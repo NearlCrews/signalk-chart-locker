@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust-lint:
+    # Format and lint are platform independent, so they run on the default amd64 runners.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: rustfmt
+        run: cargo fmt --check
+        working-directory: container/engine
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: container/engine
+
+  engine-test:
+    # The parity corpus and the geometry oracle tests assert exact f64 values captured on
+    # aarch64, so this job runs on an arm64 runner to match. If the parity bar moves to a
+    # per-coordinate ulp tolerance (design spec section 8), this pin can relax to amd64.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test
+        run: cargo test
+        working-directory: container/engine
+
+  plugin:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
