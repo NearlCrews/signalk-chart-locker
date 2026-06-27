@@ -421,8 +421,21 @@ mod tests {
 
     // The cases below cover the primitives the leg-geometry test file does not
     // exercise directly. The expected floating-point values are oracle values
-    // captured from the TypeScript reference (node --import tsx), so they assert
-    // bit-for-bit parity, not a recomputation of the same Rust formula.
+    // captured from the TypeScript reference (node --import tsx). They are
+    // compared within a small ULP tolerance rather than bit-exactly, so that
+    // platform libm differences between aarch64 and amd64 do not produce false
+    // failures; see design spec section 8.
+
+    /// ULP tolerance for reference-derived float comparisons; see design spec section 8.
+    const MAX_ORACLE_ULP_GAP: i64 = 2;
+
+    fn assert_oracle_close(label: &str, a: f64, b: f64) {
+        let gap = crate::provider::ulp_gap(a, b);
+        assert!(
+            gap <= MAX_ORACLE_ULP_GAP,
+            "{label}: {a} differs from oracle {b} by {gap} ulp (max {MAX_ORACLE_ULP_GAP})"
+        );
+    }
 
     #[test]
     fn orient2d_sign_follows_the_turn_direction() {
@@ -443,10 +456,10 @@ mod tests {
 
     #[test]
     fn meters_per_degree_lon_matches_the_reference() {
-        // 111320 * cos(0) at the equator.
+        // 111320 * cos(0) at the equator: exact by construction, not an oracle float.
         assert_eq!(meters_per_degree_lon(0.0), 111_320.0);
         // Oracle value at latitude 47.6 degrees from the TypeScript reference.
-        assert_eq!(meters_per_degree_lon(47.6), 75_063.34178582008);
+        assert_oracle_close("meters_per_degree_lon(47.6)", meters_per_degree_lon(47.6), 75_063.34178582008);
     }
 
     #[test]
@@ -460,8 +473,8 @@ mod tests {
             longitude: -122.35,
         };
         // Oracle value from the TypeScript distanceMeters.
-        assert_eq!(distance_meters(a, b), 4358.322920633704);
-        // A zero-length leg is exactly zero.
+        assert_oracle_close("distance_meters(a,b)", distance_meters(a, b), 4358.322920633704);
+        // A zero-length leg is exactly zero: structural check, not an oracle float.
         assert_eq!(distance_meters(a, a), 0.0);
     }
 
@@ -508,7 +521,11 @@ mod tests {
                 longitude: -122.31427406717529,
             },
         ];
-        assert_eq!(samples, expected);
+        assert_eq!(samples.len(), expected.len(), "sample count mismatch");
+        for (i, (a, e)) in samples.iter().zip(expected.iter()).enumerate() {
+            assert_oracle_close(&format!("sample[{i}].latitude"), a.latitude, e.latitude);
+            assert_oracle_close(&format!("sample[{i}].longitude"), a.longitude, e.longitude);
+        }
     }
 
     #[test]
@@ -525,9 +542,9 @@ mod tests {
         ];
         let b = route_bbox(&waypoints, 3704.0);
         // Oracle edges from the TypeScript routeBbox.
-        assert_eq!(b.north, 47.683300240554374);
-        assert_eq!(b.south, 47.566678531871);
-        assert_eq!(b.east, -122.25058374813136);
-        assert_eq!(b.west, -122.44943196790138);
+        assert_oracle_close("route_bbox north", b.north, 47.683300240554374);
+        assert_oracle_close("route_bbox south", b.south, 47.566678531871);
+        assert_oracle_close("route_bbox east", b.east, -122.25058374813136);
+        assert_oracle_close("route_bbox west", b.west, -122.44943196790138);
     }
 }

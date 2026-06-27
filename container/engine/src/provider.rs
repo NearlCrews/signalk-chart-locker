@@ -59,7 +59,7 @@ struct CallsFile {
 /// The ulp gap between two finite floats, as a non-negative count. Both are mapped to the
 /// monotonic sign-magnitude ordering first, so the subtraction counts representable
 /// steps correctly across zero and sign.
-fn ulp_gap(a: f64, b: f64) -> i64 {
+pub(crate) fn ulp_gap(a: f64, b: f64) -> i64 {
     let order = |x: f64| -> i64 {
         let bits = x.to_bits() as i64;
         if bits < 0 {

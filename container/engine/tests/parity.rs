@@ -1,9 +1,9 @@
 //! The Milestone 2 proof gate: for every case in the replay corpus, run the Rust
-//! `route_channel` against the captured provider calls and assert the result equals the
-//! TypeScript reference exactly. The bar is bit-for-bit on each waypoint latitude and
-//! longitude, on `usedTileWater`, on `borderFallback`, and on the decline reason. With
-//! no deadline the router is deterministic, so exact equality is the right bar: any
-//! divergence is a finding to close, not a tolerance to widen.
+//! `route_channel` against the captured provider calls and assert the result agrees with
+//! the TypeScript reference. Waypoint coordinates are compared within a small ULP
+//! tolerance (design spec section 8) so platform libm differences between aarch64 and
+//! amd64 do not produce false failures. `usedTileWater`, `borderFallback`, and the
+//! decline reason are exact (boolean and enum, no floating-point involved).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -84,14 +84,24 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// Two f64 are equal for parity when their bit patterns match: the strictest test, so a
-/// 1-ulp drift or a sign-of-zero difference is a failure, not a pass.
-fn bits_eq(a: f64, b: f64) -> bool {
-    a.to_bits() == b.to_bits()
+/// Per-coordinate ULP tolerance for waypoint comparisons; see design spec section 8.
+/// Matches `MAX_BBOX_ULP_GAP` in `provider.rs`: both stem from the same platform libm
+/// bound between V8 and the Rust math libraries.
+const MAX_WAYPOINT_ULP_GAP: i64 = 2;
+
+/// ULP gap between two finite f64 values, non-negative. Maps both to the monotonic
+/// sign-magnitude ordering so the count is correct across zero and sign changes.
+fn ulp_gap(a: f64, b: f64) -> i64 {
+    let order = |x: f64| -> i64 {
+        let bits = x.to_bits() as i64;
+        if bits < 0 { i64::MIN - bits } else { bits }
+    };
+    (order(a) - order(b)).abs()
 }
 
-/// Compare the Rust result against the captured TypeScript result. Returns `Ok` on an
-/// exact match, or `Err` with a one-line description of the first divergence.
+/// Compare the Rust result against the captured TypeScript result. Returns `Ok` when
+/// coordinates are within `MAX_WAYPOINT_ULP_GAP`, booleans and the decline reason are
+/// exact, or `Err` with a one-line description of the first divergence.
 fn check(
     case: &str,
     actual: &ChannelRouteResult,
@@ -113,9 +123,12 @@ fn check(
                     ));
                 }
                 for (i, (a, e)) in waypoints.iter().zip(expected_waypoints.iter()).enumerate() {
-                    if !bits_eq(a.latitude, e.latitude) || !bits_eq(a.longitude, e.longitude) {
+                    let lat_gap = ulp_gap(a.latitude, e.latitude);
+                    let lon_gap = ulp_gap(a.longitude, e.longitude);
+                    if lat_gap > MAX_WAYPOINT_ULP_GAP || lon_gap > MAX_WAYPOINT_ULP_GAP {
                         return Err(format!(
-                            "{case}: waypoint {i} ({}, {}) != expected ({}, {})",
+                            "{case}: waypoint {i} ({}, {}) differs from expected ({}, {}) \
+                             by ({lat_gap}, {lon_gap}) ulp",
                             a.latitude, a.longitude, e.latitude, e.longitude
                         ));
                     }
@@ -199,4 +212,38 @@ fn parity_over_the_whole_corpus() {
         index.cases.len(),
         failures.join("\n")
     );
+}
+
+/// Verify that the ULP tolerance boundary behaves correctly: waypoints within
+/// `MAX_WAYPOINT_ULP_GAP` pass, and those beyond it fail.
+#[test]
+fn waypoint_ulp_tolerance_boundary() {
+    use binnacle_engine::Position;
+
+    let base = Position {
+        latitude: 47.61071647312815,
+        longitude: -122.37857510526305,
+    };
+
+    // A waypoint that is bit-identical passes.
+    assert_eq!(ulp_gap(base.latitude, base.latitude), 0);
+    assert_eq!(ulp_gap(base.longitude, base.longitude), 0);
+
+    // A waypoint shifted by 1 ULP passes.
+    let lat_plus_1 = f64::from_bits(base.latitude.to_bits() + 1);
+    let lon_plus_1 = f64::from_bits(base.longitude.to_bits() + 1);
+    assert_eq!(ulp_gap(base.latitude, lat_plus_1), 1);
+    assert_eq!(ulp_gap(base.longitude, lon_plus_1), 1);
+    assert!(ulp_gap(base.latitude, lat_plus_1) <= MAX_WAYPOINT_ULP_GAP);
+    assert!(ulp_gap(base.longitude, lon_plus_1) <= MAX_WAYPOINT_ULP_GAP);
+
+    // A waypoint shifted by 2 ULP (the boundary) passes.
+    let lat_plus_2 = f64::from_bits(base.latitude.to_bits() + 2);
+    assert_eq!(ulp_gap(base.latitude, lat_plus_2), 2);
+    assert!(ulp_gap(base.latitude, lat_plus_2) <= MAX_WAYPOINT_ULP_GAP);
+
+    // A waypoint shifted by 100 ULP is clearly beyond the tolerance and must fail.
+    let lat_plus_100 = f64::from_bits(base.latitude.to_bits() + 100);
+    assert_eq!(ulp_gap(base.latitude, lat_plus_100), 100);
+    assert!(ulp_gap(base.latitude, lat_plus_100) > MAX_WAYPOINT_ULP_GAP);
 }

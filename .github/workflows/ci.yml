@@ -21,10 +21,12 @@ jobs:
         working-directory: container/engine
 
   engine-test:
-    # The parity corpus and the geometry oracle tests assert exact f64 values captured on
-    # aarch64, so this job runs on an arm64 runner to match. If the parity bar moves to a
-    # per-coordinate ulp tolerance (design spec section 8), this pin can relax to amd64.
-    runs-on: ubuntu-24.04-arm
+    # The ULP tolerance on waypoint and oracle float comparisons (design spec section 8)
+    # makes the engine tests cross-platform, so the arm64-only pin is no longer needed.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
