@@ -1,0 +1,58 @@
+{
+  "name": "signalk-binnacle-companion",
+  "version": "0.0.1",
+  "description": "Signal K companion that runs a polyglot container alongside the server, hosting compute and datasets that a JS/TS plugin cannot.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test": "node --import tsx --test test/*.test.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "signalk-node-server-plugin",
+    "signalk-category-utility",
+    "container",
+    "companion"
+  ],
+  "signalk-plugin-enabled-by-default": false,
+  "signalk": {
+    "displayName": "Binnacle Companion",
+    "requires": ["signalk-container"],
+    "recommends": ["signalk-crows-nest", "signalk-binnacle", "signalk-container"]
+  },
+  "peerDependencies": {
+    "signalk-container": ">=1.20.0"
+  },
+  "engines": {
+    "node": ">=20.3.0"
+  },
+  "author": {
+    "name": "Nearl Crews",
+    "email": "NearlCrews@users.noreply.github.com"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/NearlCrews/signalk-binnacle-companion#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NearlCrews/signalk-binnacle-companion.git"
+  },
+  "bugs": {
+    "url": "https://github.com/NearlCrews/signalk-binnacle-companion/issues"
+  },
+  "devDependencies": {
+    "@signalk/server-api": "^2.28.0",
+    "@types/node": "^25.9.4",
+    "eslint": "^9.39.4",
+    "neostandard": "^0.13.0",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3"
+  }
+}
