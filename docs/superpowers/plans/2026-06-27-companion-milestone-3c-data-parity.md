@@ -7,8 +7,11 @@
 > and the drying-as-land classification, with 0 load-bearing disagreements and 1 expected
 > coverage-edge point. So the local GDAL S-57 prep produces depth classifications identical to
 > NOAA's own ArcGIS lineage for the same charts. Remaining in 3C: the one-way leg-level safety
-> invariant (Task 3) and the Node plugin lifecycle and fallback slice (Task 4), and running the
-> parity over more regions. The committed harness is the implementation of Tasks 1 and 2
+> invariant (Task 3), and running the parity over more regions. The Node plugin lifecycle and
+> fallback slice (Task 4) is done at `test/plugin-integration.test.ts`: an end-to-end slice
+> proving the started plugin publishes the in-process bridge, the bridge routes through a
+> reachable container, and it returns `router-unavailable` (the crows-nest fallback signal) when
+> the container is down. The committed harness is the implementation of Tasks 1 and 2
 > (capture plus per-sample classification comparison), folded into one online-sampling script.
 
 > **For agentic workers:** when the inputs exist, execute with
@@ -78,9 +81,9 @@ the Node plugin test harness for the lifecycle slice.
 
 **Files:** Create `test/plugin-integration.test.ts` (Node). This slice does NOT need real geodata, so it can be built independently of Tasks 1 to 3, but it belongs to the M3 to M4 cutover proof.
 
-- [ ] **Step 1: Write the test** (spec section 11 lines 360 to 362). Exercise the signalk-container runtime guard, `ensureRunning`, and `resolveContainerAddress` against a mocked container manager, and assert the crows-nest in-process fallback path is taken when the companion is down (the bridge returns `router-unavailable` and the caller falls back). This extends the existing bridge and plugin tests.
-- [ ] **Step 2: Run it** with `npm test`, confirm green.
-- [ ] **Step 3: Commit.** `test: cover the container lifecycle guard and the in-process fallback`
+- [x] **Step 1: Write the test** (spec section 11 lines 360 to 362). Done at `test/plugin-integration.test.ts`. Exercises the signalk-container runtime guard, `ensureRunning`, and `resolveContainerAddress` against a fake container manager, and asserts the companion-side fallback signal: the published bridge routes through a reachable container (a local HTTP stub) and returns `router-unavailable` when the container is down (a fixed refused address). The caller-side fallback, crows-nest taking the in-process path on that signal, is Milestone 4 cross-repo work; this slice proves the signal the caller keys off.
+- [x] **Step 2: Run it** with `npm test`, green (33 tests).
+- [x] **Step 3: Commit.** `test: cover the container lifecycle guard and the in-process fallback`
 
 ---
 
