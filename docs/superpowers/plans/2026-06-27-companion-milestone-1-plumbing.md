@@ -1172,14 +1172,16 @@ ENTRYPOINT ["/router"]
 
 - [ ] **Step 3: Build the image**
 
-Run: `docker build -t signalk-binnacle-router:dev -f container/Dockerfile container`
-Expected: the build completes and tags `signalk-binnacle-router:dev`.
+The deployment runtime is Podman (signalk-container resolves the runtime over the Docker-API socket with Podman preferred, Docker fallback), so build with Podman so the image lands in the same local store signalk-container reads. Build in Docker image format, not Podman's default OCI: OCI silently drops the Dockerfile `HEALTHCHECK` (`HEALTHCHECK is not supported for OCI image format and will be ignored`), and the standalone health check below depends on the image carrying it.
+
+Run: `podman build --format docker -t signalk-binnacle-router:dev -f container/Dockerfile container`
+Expected: the build completes, no OCI HEALTHCHECK warning, and it tags `localhost/signalk-binnacle-router:dev`.
 
 - [ ] **Step 4: Run the container and verify the endpoints**
 
 Run:
 ```bash
-docker run --rm -d --name binnacle-router-test -p 127.0.0.1:8080:8080 signalk-binnacle-router:dev
+podman run --rm -d --name binnacle-router-test -p 127.0.0.1:8080:8080 signalk-binnacle-router:dev
 sleep 2
 curl -s http://127.0.0.1:8080/health
 echo
@@ -1192,13 +1194,13 @@ Expected: `/health` prints `{"status":"ok"}` and `/regions` prints `[]`.
 Run:
 ```bash
 sleep 16
-docker inspect --format '{{.State.Health.Status}}' binnacle-router-test
+podman inspect --format '{{.State.Health.Status}}' binnacle-router-test
 ```
-Expected: `healthy` (after the 15s start period).
+Expected: `healthy` (after the 15s start period). In production the plugin also supplies `ContainerConfig.healthcheck`, so signalk-container applies the same probe even on an image that ships none; the image `HEALTHCHECK` here is the standalone-run backstop.
 
 - [ ] **Step 6: Stop the test container**
 
-Run: `docker rm -f binnacle-router-test`
+Run: `podman rm -f binnacle-router-test`
 Expected: the container is removed.
 
 - [ ] **Step 7: Commit**
