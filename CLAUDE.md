@@ -37,6 +37,11 @@ router, ported to Rust with a fully offline local geodata store.
   with the `bundled` feature plus a pure-Rust WKB decoder; GDAL is confined to the offline prep
   stage of the geodata milestone. The engine is hand-ported, not built on the `geo` or
   `pathfinding` crates, whose predicates and tie-breaks break parity.
+- ENC and chart data are never bundled in the image or the repo. The companion ships the GDAL
+  S-57 to GeoPackage prep pipeline only; the owner downloads NOAA ENC cells per region and runs
+  prep locally. This is the resolved Milestone 3 ENC distribution decision (Option A,
+  pipeline-only, 2026-06-27): ship the pipeline, not the data. See
+  `docs/superpowers/decisions/2026-06-27-enc-distribution-model.md`.
 - Deterministic numerics: FMA contraction disabled on x86_64 (`container/engine/.cargo/config.toml`),
   with aarch64 relying on Rust's default of no FMA contraction and no fast-math; expression order
   preserved, `total_cmp` not `partial_cmp().unwrap()` on any sort that a non-finite float could reach.
@@ -64,7 +69,9 @@ on both amd64 and arm64.
 - `docs/superpowers/specs/`, `docs/superpowers/plans/`, `docs/superpowers/reviews/`: the design
   spec, the per-milestone plans, and review records.
 
-Milestone 3 (the local geodata pipeline and `LocalProvider`) is gated on an ENC licensing decision.
+Milestone 3 (the local geodata pipeline and `LocalProvider`) is the next milestone to build. Its
+ENC distribution gate is resolved: Option A, pipeline-only. The companion ships the prep pipeline,
+and the owner downloads NOAA ENC cells per region locally; chart data is never bundled.
 Milestone 4 is the crows-nest cutover behind a feature flag with an in-process fallback.
 
 ## Build and test
