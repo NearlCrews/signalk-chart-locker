@@ -1,0 +1,21 @@
+[package]
+name = "binnacle-router"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "binnacle_router"
+path = "src/lib.rs"
+
+[[bin]]
+name = "router"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+serde_json = "1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
