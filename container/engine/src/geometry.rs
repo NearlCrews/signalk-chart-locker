@@ -1,6 +1,6 @@
 //! Planar and spherical geometry primitives, ported from the crows-nest
-//! `leg-geometry.ts` and the `position-utilities.ts` and `length.ts` subset the
-//! router uses. The ring helpers work in degree space (longitude is x, latitude
+//! `leg-geometry.ts`, `position-utilities.ts`, and `length.ts` (the subset the
+//! router uses). The ring helpers work in degree space (longitude is x, latitude
 //! is y), matching the GeoJSON `[lon, lat]` ring shape the providers emit.
 //! `distance_meters` is spherical haversine; `sample_rhumb_leg` and `route_bbox`
 //! walk the loxodrome and the great-circle projection respectively.
