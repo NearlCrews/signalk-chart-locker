@@ -1,0 +1,14 @@
+{
+  "from": {
+    "latitude": 0.08,
+    "longitude": 0.2
+  },
+  "to": {
+    "latitude": 0.2,
+    "longitude": 0.2
+  },
+  "draftMeters": 2,
+  "safetyMarginMeters": 0.5,
+  "standoffNm": 0,
+  "borderAware": false
+}

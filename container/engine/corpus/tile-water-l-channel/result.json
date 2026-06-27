@@ -1,0 +1,18 @@
+{
+  "ok": true,
+  "waypoints": [
+    {
+      "latitude": 0.9,
+      "longitude": 0.1
+    },
+    {
+      "longitude": 0.19840462225588465,
+      "latitude": 0.19840832947643572
+    },
+    {
+      "latitude": 0.1,
+      "longitude": 0.9
+    }
+  ],
+  "usedTileWater": true
+}
