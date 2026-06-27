@@ -1,0 +1,15 @@
+[package]
+name = "storage-spike"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "storage-spike"
+path = "src/main.rs"
+
+[dependencies]
+# bundled compiles SQLite from the amalgamation with the R-tree module enabled,
+# so no system SQLite, GDAL, spatialite, geos, or proj is needed or linked.
+rusqlite = { version = "0.31", features = ["bundled"] }
+# Pure-Rust JSON for the stdout report. Adds no shared-library linkage.
+serde_json = "1"

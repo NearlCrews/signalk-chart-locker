@@ -5,6 +5,10 @@ node_modules/
 dist/
 public/
 target/
+__pycache__/
+
+# Storage spike generated GeoPackage sample (never commit; not in any tarball)
+container/storage-spike/data/
 
 # Local tooling state
 .remember/
