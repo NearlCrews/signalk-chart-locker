@@ -45,13 +45,15 @@ router, ported to Rust with a fully offline local geodata store.
   only and must never make a route read as safer than the data supports.
 - Units are SI internally (meters, radians, Kelvin); convert only at a display edge.
 
-## Parity bar (open decision)
+## Parity bar (resolved: 2-ULP tolerance)
 
-The Milestone 2 plan sets a BIT-EXACT parity bar on waypoints (`to_bits()` equality); design spec
-section 8 prescribes a per-coordinate ULP tolerance because libm transcendentals differ across
-platforms. The corpus was generated on aarch64, so bit-exact passes locally but risks a false
-failure on an amd64 CI host. This is an unresolved human decision (plan versus spec); do not flip
-it unilaterally.
+The engine parity bar compares waypoint longitude and latitude within a 2-ULP per-coordinate
+tolerance, per design spec section 8, while `usedTileWater`, `borderFallback`, and the decline
+reasons match exactly. This resolves the earlier plan-versus-spec tension in favor of the spec:
+libm transcendentals differ by ULPs across platforms, so the prior bit-exact bar could not hold on
+an amd64 CI host against an aarch64-generated corpus. The 2-ULP bar still catches any real
+regression (a divergence beyond a handful of ULP is always a logic error). The engine CI job runs
+on both amd64 and arm64.
 
 ## Layout and status
 

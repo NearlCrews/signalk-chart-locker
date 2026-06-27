@@ -20,7 +20,7 @@ not in the ported algorithm.
 
 ### Critical
 
-1. Bit-exact waypoint comparison versus cross-platform CI. OPEN, needs a decision.
+1. Bit-exact waypoint comparison versus cross-platform CI. RESOLVED: moved to a 2-ULP per-coordinate tolerance (design spec section 8); waypoints within 2 ULP, while usedTileWater, borderFallback, and the decline reasons stay exact. The engine CI job now runs on amd64 and arm64. Original analysis follows.
    `container/engine/tests/parity.rs` compares waypoints with `bits_eq`
    (`to_bits() == to_bits()`) and the file comment states "exact equality is the
    right bar." The design spec section 8 says bit-exact is unattainable across
@@ -87,6 +87,6 @@ absorbs sub-ulp bbox differences while still asserting the bbox within tolerance
 
 ## Open items summary
 
-- Decision: waypoint bit-exact versus ulp tolerance (finding 1).
+- Resolved: waypoints now use a 2-ULP tolerance, flags and reasons exact, engine CI on amd64 and arm64 (finding 1).
 - Work: deadline and land-leg coverage (finding 4), the remaining geometry
   malformed-input guards (finding 5), and the corpus naming fix (finding 7).

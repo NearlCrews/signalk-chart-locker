@@ -51,7 +51,7 @@ Port in dependency order, writing the Rust unit tests first from the TS test inv
 
 ### Phase C: Parity runner and bar
 - C1. `FileProvider` reads the corpus fixtures.
-- C2. A parity-runner binary and a `cargo test` that, for each corpus case, runs the Rust `route_channel` and asserts the waypoints and flags equal the captured TS result. Parity bar: exact equality on waypoints (lon and lat to full f64) and on `usedTileWater` and `borderFallback`. Any divergence is a finding to close, not a tolerance to widen, unless it is a proven correctly-rounded-transcendental platform difference, which is then documented.
+- C2. A parity-runner binary and a `cargo test` that, for each corpus case, runs the Rust `route_channel` and asserts the waypoints and flags equal the captured TS result. Parity bar (resolved in favor of design spec section 8): waypoint longitude and latitude must match within a 2-ULP per-coordinate tolerance, while `usedTileWater`, `borderFallback`, and the decline reasons match exactly. The 2-ULP tolerance is the smallest that absorbs the cross-platform libm transcendental differences the spec describes while still catching any real regression (a divergence beyond a handful of ULP is always a logic error). This replaces the earlier bit-exact bar, which could not hold on an amd64 CI host against an aarch64-generated corpus.
 
 ### Phase D: Close the gap
 Drive the parity runner to green across the whole corpus. Each divergence traces to one checklist item above. Document any residual platform float note.
