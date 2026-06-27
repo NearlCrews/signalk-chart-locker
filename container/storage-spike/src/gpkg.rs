@@ -343,7 +343,7 @@ mod tests {
         }
         // Reuse the production envelope sizing so the test header cannot drift from it.
         let env = envelope_len(env_indicator).unwrap_or(0);
-        v.extend(std::iter::repeat(0u8).take(env));
+        v.extend(std::iter::repeat_n(0u8, env));
         v.extend_from_slice(wkb);
         v
     }
