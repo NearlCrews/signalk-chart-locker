@@ -63,6 +63,19 @@ pub fn route_channel(
             reason: ChannelDeclineReason::NoCoverage,
         };
     }
+    // Guard: a non-finite coordinate (NaN or Inf) in from, to, anchors, or corridor
+    // must not reach route_bbox, which panics via position_to_bbox on non-finite input.
+    // All corpus inputs are finite, so this guard never fires on any corpus case.
+    let coord_finite = |p: &Position| p.latitude.is_finite() && p.longitude.is_finite();
+    let inputs_finite = coord_finite(&req.from)
+        && coord_finite(&req.to)
+        && anchors.iter().all(|p| coord_finite(p))
+        && req.corridor.as_deref().unwrap_or(&[]).iter().all(|p| coord_finite(p));
+    if !inputs_finite {
+        return ChannelRouteResult::Decline {
+            reason: ChannelDeclineReason::NoCoverage,
+        };
+    }
     let bbox = route_bbox(&anchors, BBOX_PAD_METERS);
     // Decline a degenerate, cross-antimeridian, or too-large-to-resolve bbox BEFORE any
     // fetch, using the grid's own size resolution so the pre-fetch decline matches what
@@ -632,33 +645,55 @@ fn bucket_at<'a>(b: &'a SpatialBuckets, lon: f64, lat: f64) -> &'a [usize] {
     &b.cells[(r as usize) * b.side + c as usize]
 }
 
+/// True when all four edges of a bbox are finite. A non-finite bbox arises from
+/// empty rings or all-NaN vertices in a provider polygon; such a bbox must not
+/// reach union_bbox, which panics on non-finite input.
+fn bbox_is_finite(b: &Bbox) -> bool {
+    b.north.is_finite() && b.south.is_finite() && b.east.is_finite() && b.west.is_finite()
+}
+
 fn build_water_index(bands: &[ChartedAreas], water: &TileWater) -> WaterIndex {
     // Read the per-band charted areas directly, in band order, so the index holds the
     // same polygons in the same order a flattened copy would, without the intermediate
-    // clone of every area.
+    // clone of every area. Polygons whose bounds_of_rings produces a non-finite bbox
+    // (empty rings, all-NaN vertices) are silently skipped rather than panicking in
+    // union_bbox. All corpus polygons have finite vertices, so this filter never fires
+    // on any corpus case.
     let land: Vec<IndexedPoly> = bands
         .iter()
         .flat_map(|b| b.land_areas.iter())
-        .map(|a| IndexedPoly {
-            rings: a.rings.clone(),
-            bbox: bounds_of_rings(&a.rings),
+        .filter_map(|a| {
+            let bbox = bounds_of_rings(&a.rings);
+            if !bbox_is_finite(&bbox) {
+                return None;
+            }
+            Some(IndexedPoly { rings: a.rings.clone(), bbox })
         })
         .collect();
     let depth: Vec<IndexedDepth> = bands
         .iter()
         .flat_map(|b| b.depth_areas.iter())
-        .map(|a| IndexedDepth {
-            rings: a.rings.clone(),
-            bbox: bounds_of_rings(&a.rings),
-            shallow_meters: a.depth_range.as_ref().and_then(|d| d.shallow_meters),
+        .filter_map(|a| {
+            let bbox = bounds_of_rings(&a.rings);
+            if !bbox_is_finite(&bbox) {
+                return None;
+            }
+            Some(IndexedDepth {
+                rings: a.rings.clone(),
+                bbox,
+                shallow_meters: a.depth_range.as_ref().and_then(|d| d.shallow_meters),
+            })
         })
         .collect();
     let tile: Vec<IndexedPoly> = water
         .water
         .iter()
-        .map(|w| IndexedPoly {
-            rings: w.rings.clone(),
-            bbox: bounds_of_rings(&w.rings),
+        .filter_map(|w| {
+            let bbox = bounds_of_rings(&w.rings);
+            if !bbox_is_finite(&bbox) {
+                return None;
+            }
+            Some(IndexedPoly { rings: w.rings.clone(), bbox })
         })
         .collect();
     // The union seeds the bucket grids. The caller declines no-coverage before building
@@ -921,4 +956,36 @@ fn used_tile_water(
         i += 1;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{AreaPolygon, EncAreaPolygon, TileWater};
+
+    /// A polygon with empty rings has a non-finite bbox from bounds_of_rings. The
+    /// build_water_index function must skip it (via bbox_is_finite) rather than
+    /// panicking in union_bbox.
+    #[test]
+    fn build_water_index_skips_empty_ring_polygon_without_panicking() {
+        let water = TileWater {
+            water: vec![AreaPolygon { rings: vec![] }],
+        };
+        // Should not panic.
+        let index = build_water_index(&[], &water);
+        // The degenerate polygon contributes nothing: tile list is empty after the filter.
+        assert!(index.tile.is_empty());
+    }
+
+    /// A land area polygon with empty rings is also skipped without panicking.
+    #[test]
+    fn build_water_index_skips_empty_ring_land_area_without_panicking() {
+        let areas = ChartedAreas {
+            land_areas: vec![EncAreaPolygon { rings: vec![], depth_range: None }],
+            depth_areas: vec![],
+        };
+        let water = TileWater { water: vec![] };
+        let index = build_water_index(&[areas], &water);
+        assert!(index.land.is_empty());
+    }
 }
