@@ -28,6 +28,8 @@ const ROUTER_RESOURCES = {
 export interface RouterContainerOptions {
   image?: string
   tag?: string
+  /** Owning plugin id, forwarded to ensureRunning so signalk-container attributes the container to this plugin. */
+  pluginId?: string
 }
 
 export function buildRouterConfig (opts: RouterContainerOptions = {}): ContainerConfig {
@@ -45,7 +47,8 @@ export async function startRouterContainer (
   manager: ContainerManager,
   opts: RouterContainerOptions = {}
 ): Promise<string> {
-  await manager.ensureRunning(ROUTER_CONTAINER_NAME, buildRouterConfig(opts))
+  const options = opts.pluginId ? { pluginId: opts.pluginId } : undefined
+  await manager.ensureRunning(ROUTER_CONTAINER_NAME, buildRouterConfig(opts), options)
   const address = await manager.resolveContainerAddress(ROUTER_CONTAINER_NAME, ROUTER_INTERNAL_PORT)
   if (!address) {
     throw new Error('The router container address could not be resolved after ensureRunning.')

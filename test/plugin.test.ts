@@ -70,6 +70,25 @@ test('start launches the container and installs the bridge when the runtime is r
   assert.equal(app.status.length, 1)
 })
 
+test('a failed container launch surfaces a plugin error instead of an unhandled rejection', async () => {
+  // Signal K does not await start(), so a rejection here must be caught inside the plugin. The
+  // returned promise must resolve (not reject) and the failure must land as a plugin error.
+  const manager: ContainerManager = {
+    async whenReady () {},
+    getRuntime () { return { runtime: 'docker' } },
+    async ensureRunning () { throw new Error('runtime refused the container') },
+    async resolveContainerAddress () { return null },
+    async stop () {}
+  }
+  ;(globalThis as Record<string, unknown>).__signalk_containerManager = manager
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  await assert.doesNotReject(() => Promise.resolve(plugin.start({}, () => {})))
+  assert.equal(app.errors.length, 1)
+  assert.match(app.errors[0], /runtime refused the container/)
+  assert.equal(getRouteOnWaterBridge(), undefined)
+})
+
 test('stop removes the bridge and stops the container', async () => {
   const record = { ensured: [] as Array<{ name: string; config: ContainerConfig }>, stopped: [] as string[] }
   ;(globalThis as Record<string, unknown>).__signalk_containerManager = fakeManager(record)

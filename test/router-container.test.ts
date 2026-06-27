@@ -17,12 +17,12 @@ test('the container config requests the accessible port and never a manual ports
   assert.equal(config.resources?.memory, config.resources?.memorySwap)
 })
 
-test('startRouterContainer ensures the container and returns the resolved address', async () => {
-  const calls: Array<{ name: string; config: ContainerConfig }> = []
+test('startRouterContainer ensures the container, forwards the plugin id, and returns the resolved address', async () => {
+  const calls: Array<{ name: string; config: ContainerConfig; options?: { pluginId?: string } }> = []
   const manager: ContainerManager = {
     async whenReady () {},
     getRuntime () { return { runtime: 'docker' } },
-    async ensureRunning (name, config) { calls.push({ name, config }) },
+    async ensureRunning (name, config, options) { calls.push({ name, config, options }) },
     async resolveContainerAddress (name, port) {
       assert.equal(name, ROUTER_CONTAINER_NAME)
       assert.equal(port, ROUTER_INTERNAL_PORT)
@@ -30,11 +30,25 @@ test('startRouterContainer ensures the container and returns the resolved addres
     },
     async stop () {}
   }
-  const address = await startRouterContainer(manager, { tag: 'v1' })
+  const address = await startRouterContainer(manager, { tag: 'v1', pluginId: 'signalk-binnacle-companion' })
   assert.equal(address, '127.0.0.1:8080')
   assert.equal(calls.length, 1)
   assert.equal(calls[0].name, ROUTER_CONTAINER_NAME)
   assert.equal(calls[0].config.tag, 'v1')
+  assert.equal(calls[0].options?.pluginId, 'signalk-binnacle-companion')
+})
+
+test('startRouterContainer omits the options object when no plugin id is given', async () => {
+  const calls: Array<{ options?: { pluginId?: string } }> = []
+  const manager: ContainerManager = {
+    async whenReady () {},
+    getRuntime () { return { runtime: 'docker' } },
+    async ensureRunning (_name, _config, options) { calls.push({ options }) },
+    async resolveContainerAddress () { return '127.0.0.1:8080' },
+    async stop () {}
+  }
+  await startRouterContainer(manager)
+  assert.equal(calls[0].options, undefined)
 })
 
 test('startRouterContainer throws when no address is resolvable', async () => {

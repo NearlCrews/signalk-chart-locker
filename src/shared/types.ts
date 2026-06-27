@@ -36,11 +36,17 @@ export interface ContainerConfig {
   env?: Record<string, string>
 }
 
+/** Options forwarded to the manager's ensureRunning, so the container is attributed to this plugin in the signalk-container manifest and UI. */
+export interface EnsureRunningOptions {
+  pluginId?: string
+  pluginVersion?: string
+}
+
 /** The subset of the signalk-container manager API this plugin uses. */
 export interface ContainerManager {
   whenReady(): Promise<void>
   getRuntime(): ContainerRuntimeInfo | null
-  ensureRunning(name: string, config: ContainerConfig): Promise<void>
+  ensureRunning(name: string, config: ContainerConfig, options?: EnsureRunningOptions): Promise<void>
   resolveContainerAddress(name: string, port: number): Promise<string | null>
   stop(name: string): Promise<void>
 }
