@@ -75,8 +75,15 @@ test('routeOnWater passes through an engine decline on an ok HTTP response', asy
   assert.deepEqual(result, { ok: false, reason: 'no-coverage' })
 })
 
-test('whenReady resolves when the health probe reports healthy', async () => {
-  const bridge = createRouterBridge(BRIDGE_ADDRESS, HEALTHY_PROBE)
-  await bridge.whenReady()
-  assert.ok(true)
+test('whenReady invokes the health probe with the address and resolves regardless of the result', async () => {
+  // whenReady runs a single probe and resolves whether or not it reports healthy: unavailability is
+  // surfaced later at routeOnWater. Assert the probe ran with the address for both a healthy and an
+  // unhealthy result, and that whenReady resolves in both cases.
+  const healthyCalls: string[] = []
+  await createRouterBridge(BRIDGE_ADDRESS, async (address) => { healthyCalls.push(address); return true }).whenReady()
+  assert.deepEqual(healthyCalls, [BRIDGE_ADDRESS])
+
+  const unhealthyCalls: string[] = []
+  await createRouterBridge(BRIDGE_ADDRESS, async (address) => { unhealthyCalls.push(address); return false }).whenReady()
+  assert.deepEqual(unhealthyCalls, [BRIDGE_ADDRESS])
 })

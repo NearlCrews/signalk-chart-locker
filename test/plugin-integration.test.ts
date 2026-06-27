@@ -3,43 +3,15 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { Plugin } from '@signalk/server-api'
-import type { ContainerManager } from '../src/shared/types.js'
 import { createPlugin } from '../src/plugin/plugin.js'
 import { getRouteOnWaterBridge } from '../src/bridge/route-on-water-bridge.js'
+import { fakeApp, fakeManager, managerRecord, setContainerManager, clearGlobals } from './helpers.js'
 
 // The end-to-end cutover slice: drive the real plugin start path (the real createRouterBridge
 // over the real fetch) through a fake container manager, then call the published global bridge
 // exactly as the crows-nest in-process caller will. The container is stood up as a local HTTP
 // stub for the reachable case and a fixed refused address for the down case, so the fallback
 // signal is proven without a real container.
-
-interface Recorder {
-  status: string[]
-  errors: string[]
-  setPluginStatus (m: string): void
-  setPluginError (m: string): void
-  debug (...args: unknown[]): void
-}
-
-function fakeApp (): Recorder {
-  return {
-    status: [],
-    errors: [],
-    setPluginStatus (m) { this.status.push(m) },
-    setPluginError (m) { this.errors.push(m) },
-    debug () {}
-  }
-}
-
-function managerResolving (address: string | null, ensured: string[] = []): ContainerManager {
-  return {
-    async whenReady () {},
-    getRuntime () { return { runtime: 'docker' } },
-    async ensureRunning (name) { ensured.push(name) },
-    async resolveContainerAddress () { return address },
-    async stop () {}
-  }
-}
 
 const CANNED_ROUTE = {
   ok: true,
@@ -95,14 +67,13 @@ test.afterEach(async () => {
   // a started plugin into the next.
   if (activePlugin) await activePlugin.stop()
   activePlugin = undefined
-  delete (globalThis as Record<string, unknown>).__signalk_containerManager
-  delete (globalThis as Record<string, unknown>).__signalk_binnacle_routeOnWater
+  clearGlobals()
 })
 
 test('end-to-end: a started plugin publishes a bridge that routes through the reachable container', async () => {
   const stub = await startRouterStub()
   try {
-    ;(globalThis as Record<string, unknown>).__signalk_containerManager = managerResolving(stub.address)
+    setContainerManager(fakeManager({ address: stub.address }))
     const app = fakeApp()
     activePlugin = createPlugin(app as never)
     await activePlugin.start({}, () => {})
@@ -119,7 +90,7 @@ test('end-to-end: a started plugin publishes a bridge that routes through the re
 })
 
 test('end-to-end: the published bridge returns router-unavailable when the container is down', async () => {
-  ;(globalThis as Record<string, unknown>).__signalk_containerManager = managerResolving(DEAD_ADDRESS)
+  setContainerManager(fakeManager({ address: DEAD_ADDRESS }))
   const app = fakeApp()
   activePlugin = createPlugin(app as never)
   await activePlugin.start({}, () => {})
@@ -134,20 +105,13 @@ test('end-to-end: the published bridge returns router-unavailable when the conta
 })
 
 test('end-to-end: no detected runtime short-circuits start, so no container is ensured and no bridge is published', async () => {
-  const ensured: string[] = []
-  const manager: ContainerManager = {
-    async whenReady () {},
-    getRuntime () { return null },
-    async ensureRunning (name) { ensured.push(name) },
-    async resolveContainerAddress () { return null },
-    async stop () {}
-  }
-  ;(globalThis as Record<string, unknown>).__signalk_containerManager = manager
+  const record = managerRecord()
+  setContainerManager(fakeManager({ runtime: null, record }))
   const app = fakeApp()
   activePlugin = createPlugin(app as never)
   await activePlugin.start({}, () => {})
 
-  assert.deepEqual(ensured, [])
+  assert.deepEqual(record.ensured, [])
   assert.equal(getRouteOnWaterBridge(), undefined)
   assert.equal(app.errors.length, 1)
 })

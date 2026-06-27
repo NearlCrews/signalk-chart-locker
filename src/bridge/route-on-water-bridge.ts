@@ -1,6 +1,6 @@
 /** Publishes the route-on-water bridge on globalThis so in-process callers (crows-nest) reach the router without HTTP. */
 
-import type { RouteOnWaterBridge, RouteOnWaterResult } from '../shared/types.js'
+import type { RouteOnWaterBridge, RouteOnWaterResult, FetchResponse } from '../shared/types.js'
 
 export const BRIDGE_GLOBAL_KEY = '__signalk_binnacle_routeOnWater'
 
@@ -22,11 +22,12 @@ export function getRouteOnWaterBridge (): RouteOnWaterBridge | undefined {
 export type PostFetch = (
   url: string,
   init?: { method?: string; headers?: Record<string, string>; body?: string }
-) => Promise<{ ok: boolean; json(): Promise<unknown> }>
+) => Promise<FetchResponse>
 
 /**
- * The route-on-water bridge over the router container. Readiness probes the container health
- * endpoint and resolves once healthy, leaving any unavailability for routeOnWater to surface.
+ * The route-on-water bridge over the router container. Readiness runs a single probe of the
+ * container health endpoint and resolves regardless of the probe result, leaving any
+ * unavailability for routeOnWater to surface as a router-unavailable decline.
  * routeOnWater posts the caller's request transparently to the container and returns its result.
  * The request is forwarded as-is, since the container owns its own request shape. The container
  * positions match the local Position type field names (latitude and longitude), so the waypoints

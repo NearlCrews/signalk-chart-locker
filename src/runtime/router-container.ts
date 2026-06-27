@@ -1,6 +1,6 @@
 /** Builds the managed router container config, launches it via the manager, and probes its health endpoint. */
 
-import type { ContainerConfig } from '../shared/types.js'
+import type { ContainerConfig, FetchResponse } from '../shared/types.js'
 
 export const ROUTER_CONTAINER_NAME = 'binnacle-router'
 export const ROUTER_INTERNAL_PORT = 8080
@@ -41,7 +41,7 @@ export function buildRouterConfig (opts: RouterContainerOptions = {}): Container
   }
 }
 
-export type FetchLike = (url: string) => Promise<{ ok: boolean; json(): Promise<unknown> }>
+export type FetchLike = (url: string) => Promise<FetchResponse>
 
 export async function probeRouterHealth (address: string, fetchFn: FetchLike = (url: string) => fetch(url)): Promise<boolean> {
   try {

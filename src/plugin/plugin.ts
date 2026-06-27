@@ -3,7 +3,7 @@
 import type { Plugin, ServerAPI } from '@signalk/server-api'
 import { PLUGIN_ID, PLUGIN_NAME, PLUGIN_DESCRIPTION } from '../shared/plugin-id.js'
 import { requireContainerManager, getContainerManager, ensureRuntimeReady } from '../runtime/container-manager.js'
-import { ROUTER_CONTAINER_NAME, ROUTER_INTERNAL_PORT, buildRouterConfig, probeRouterHealth } from '../runtime/router-container.js'
+import { ROUTER_CONTAINER_NAME, ROUTER_INTERNAL_PORT, DEFAULT_ROUTER_TAG, buildRouterConfig, probeRouterHealth } from '../runtime/router-container.js'
 import { installRouteOnWaterBridge, removeRouteOnWaterBridge, createRouterBridge } from '../bridge/route-on-water-bridge.js'
 
 interface CompanionConfig {
@@ -20,11 +20,14 @@ export function createPlugin (app: ServerAPI): Plugin {
   let launched = false
 
   async function doStart (config: CompanionConfig): Promise<void> {
+    app.setPluginStatus('Starting...')
     const manager = requireContainerManager(app)
     if (!manager) return
     if (!(await ensureRuntimeReady(app, manager))) return
 
-    const tag = config?.imageTag
+    // A blank or whitespace-only imageTag falls back to the default rather than producing an empty
+    // tag, which would yield an invalid image reference with a trailing colon.
+    const tag = config?.imageTag?.trim() || undefined
     await manager.ensureRunning(ROUTER_CONTAINER_NAME, buildRouterConfig({ tag }), { pluginId: PLUGIN_ID })
     launched = true
 
@@ -34,7 +37,7 @@ export function createPlugin (app: ServerAPI): Plugin {
     }
 
     installRouteOnWaterBridge(createRouterBridge(address, probeRouterHealth))
-    app.setPluginStatus(`Router container running and reachable at ${address}.`)
+    app.setPluginStatus(`Router container running at ${address}.`)
   }
 
   async function doStop (): Promise<void> {
@@ -66,7 +69,7 @@ export function createPlugin (app: ServerAPI): Plugin {
           type: 'string',
           title: 'Router container image tag',
           description: 'The image tag to run for the router container.',
-          default: 'latest'
+          default: DEFAULT_ROUTER_TAG
         }
       }
     }),

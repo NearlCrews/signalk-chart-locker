@@ -3,8 +3,11 @@
 import type { ServerAPI } from '@signalk/server-api'
 import type { ContainerManager } from '../shared/types.js'
 
+/** The global key signalk-container publishes its manager on, mirrored by BRIDGE_GLOBAL_KEY for the bridge. */
+export const CONTAINER_MANAGER_GLOBAL_KEY = '__signalk_containerManager'
+
 export function getContainerManager (): ContainerManager | null {
-  const manager = (globalThis as { __signalk_containerManager?: ContainerManager }).__signalk_containerManager
+  const manager = (globalThis as Record<string, unknown>)[CONTAINER_MANAGER_GLOBAL_KEY] as ContainerManager | undefined
   return manager ?? null
 }
 
