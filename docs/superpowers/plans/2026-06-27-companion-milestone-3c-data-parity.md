@@ -6,8 +6,11 @@
 > an 8x8 grid, 30 of 64 points were covered by both sources, all 30 agreed on the `inEncDeep`
 > and the drying-as-land classification, with 0 load-bearing disagreements and 1 expected
 > coverage-edge point. So the local GDAL S-57 prep produces depth classifications identical to
-> NOAA's own ArcGIS lineage for the same charts. Remaining in 3C: the one-way leg-level safety
-> invariant (Task 3), and running the parity over more regions. The Node plugin lifecycle and
+> NOAA's own ArcGIS lineage for the same charts. The one-way leg-level safety invariant (Task 3,
+> the `--legs` mode of `data_parity.py`) also passed against a real SF Bay store and the live
+> NOAA ENC: of 8 legs, the online ENC flagged 5 unsafe and the local data flagged all 5 unsafe
+> too, with 0 silent safe flips and 0 hazards outside local coverage. Remaining in 3C: running
+> the parity over more regions. The Node plugin lifecycle and
 > fallback slice (Task 4) is done at `test/plugin-integration.test.ts`: an end-to-end slice
 > proving the started plugin publishes the in-process bridge, the bridge routes through a
 > reachable container, and it returns `router-unavailable` (the crows-nest fallback signal) when
@@ -74,8 +77,8 @@ the Node plugin test harness for the lifecycle slice.
 **Files:** Extend `container/prep/data_parity.py` (the `--legs` mode), consistent with Tasks 1 and 2 being folded into that one online-sampling script rather than a separate Rust harness. The invariant compares the two data sources along legs, not the engine internals: the engine's navigability check is already covered by the Milestone 2 parity corpus, so the load-bearing question here is purely whether the local data ever reads a leg safer than the online data.
 
 - [x] **Step 1: Write the harness.** Done in `container/prep/data_parity.py` (`--legs N --leg-samples K`). It sweeps deterministic legs across the region (horizontal, vertical, and the two diagonals), samples points along each, and applies the one-way invariant per point: a hazard is an online-covered point not deep enough for the contour (drying included), and the forbidden flip is a hazard the local store covers and calls deep enough. A hazard outside local coverage is reported as a gap (the engine declines no-coverage), not a failure. The pure helpers (`classify`, `leg_points`, `generate_legs`) are unit-checked offline.
-- [ ] **Step 2: Run it** against a staged region store and live NOAA, triage divergences, and fix the data or reader cause for any unsafe-to-safe flip. PENDING staged data.
-- [ ] **Step 3: Commit** the run result. `test(parity): enforce the one-way local-versus-online safety invariant`
+- [x] **Step 2: Run it.** Ran against a real SF Bay store (NOAA cell US5CA13M, harbour, 500 depth areas and 120 land areas) and the live NOAA ENC Direct service with `--legs 3 --leg-samples 12`: 8 legs, 5 flagged unsafe by the online ENC, all 5 also flagged unsafe locally, 0 silent safe flips, and 0 hazards outside local coverage. No divergence to triage. The point-classification check passed in the same run (30 of 30 co-covered points agree, 1 expected coverage edge).
+- [x] **Step 3: Commit** the run result.
 
 ## Task 4: The plugin lifecycle and fallback integration slice
 
