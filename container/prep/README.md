@@ -27,9 +27,12 @@ treats `drval1 < 0` as land. The `band` is the cell's usage band, taken from the
 1. Download the ENC cells for your region from the NOAA ENC download
    (`https://www.charts.noaa.gov/ENCs/<CELL>.zip`) and unzip them. Each zip contains an
    `ENC_ROOT/<CELL>/<CELL>.000` file and its update files.
-2. Optionally stage an OSM water source and an admin-0 boundaries source, both in EPSG:4326.
+2. Optionally stage an OSM water source and a maritime boundaries source, both in EPSG:4326.
    For OSM water use the osmdata.openstreetmap.de `water-polygons-split-4326` product: it
    includes the coastline-derived ocean and bays, which a raw `natural=water` query does not.
+   For boundaries use the Marine Regions World EEZ (its `iso_sov1` field is the ISO alpha-3
+   sovereign): border-aware routing blocks foreign jurisdiction over WATER, so it needs the EEZ
+   maritime zones, not admin-0 LAND polygons, which cover no water and make the feature a no-op.
    Prep clips both sources to the ENC cell extent automatically (a `-spat` index filter plus
    `-clipdst`), so a global source is fine and stays fast.
 3. Build the prep image once:
@@ -44,12 +47,13 @@ treats `drval1 < 0` as land. The `band` is the cell's usage band, taken from the
    podman run --rm -v /path/to/data:/work binnacle-prep \
      --enc-dir /work/enc \
      --out /work/region.gpkg \
-     --boundaries /work/admin0.geojson --country-field ADM0_A3 \
+     --boundaries /work/eez.json --country-field iso_sov1 \
      --osm /work/osm_water.gpkg
    ```
 
-   `--boundaries` and `--osm` are optional. Border-aware routing needs `boundaries`, and
-   `country_id` must use the same identifier scheme the caller passes as `homeCountryId`.
+   `--boundaries` and `--osm` are optional. Border-aware routing needs `boundaries` from a
+   maritime source (Marine Regions EEZ), and `country_id` (the EEZ `iso_sov1`, ISO alpha-3) must
+   match the identifier the caller passes as `homeCountryId`.
 
 5. Place the resulting `region.gpkg` on the runtime NVMe and point the router at it with the
    `BINNACLE_REGION_STORE` environment variable.

@@ -49,6 +49,11 @@ router, ported to Rust with a fully offline local geodata store.
   gate, the depth-authority precedence, and all honesty wording. The container computes geometry
   only and must never make a route read as safer than the data supports.
 - Units are SI internally (meters, radians, Kelvin); convert only at a display edge.
+- Border-aware routing's `boundaries` table is sourced from Marine Regions EEZ with
+  `country_id = iso_sov1` (ISO alpha-3), never admin-0 land. Land polygons cover no navigable
+  water, so a foreign-water block built from them is a silent no-op, the worst failure for a
+  trust-boundary feature. The Milestone 4 caller passes `homeCountryId` as the same alpha-3 code.
+  Resolved 2026-06-27; see `docs/superpowers/decisions/2026-06-27-border-aware-boundaries-source.md`.
 
 ## Parity bar (resolved: 2-ULP tolerance)
 

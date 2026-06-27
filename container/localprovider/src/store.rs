@@ -216,6 +216,7 @@ fn query_foreign_polygons(conn: &Connection, bbox: Bbox, home: &str) -> rusqlite
 mod tests {
     use super::*;
     use crate::fixture::StoreBuilder;
+    use binnacle_engine::{route_channel, ChannelRouteRequest, ChannelRouteResult, Position};
 
     fn band_str(b: ScaleBand) -> &'static str {
         match b {
@@ -345,5 +346,48 @@ mod tests {
         let p = LocalProvider::open(file.path(), None).unwrap();
         let bbox = Bbox { north: 1.5, south: 0.5, east: 1.5, west: 0.5 };
         assert!(p.charted_areas(ScaleBand::Harbour, bbox).is_none());
+    }
+
+    #[test]
+    fn border_aware_blocks_foreign_water_and_falls_back() {
+        // A foreign boundary that covers the navigable water (as a maritime EEZ does, unlike an
+        // admin-0 land polygon, which covers only land) makes the engine block the foreign water
+        // and take the border fallback. With the home country matching the boundary, nothing is
+        // foreign and the route stays in home water with no fallback. This locks the border-aware
+        // data contract: the boundaries source must cover water (Marine Regions EEZ, country_id
+        // iso_sov1), not admin-0 land, or border-aware is a silent no-op.
+        let sq: &[[f64; 2]] = &[[-0.1, -0.1], [0.1, -0.1], [0.1, 0.1], [-0.1, 0.1], [-0.1, -0.1]];
+        let file = StoreBuilder::new()
+            .depth_area("coastal", Some(10.0), Some(20.0), &[sq]) // deep, navigable everywhere
+            .boundary("FRA", &[sq]) // a foreign maritime zone over the water
+            .build();
+        let req = ChannelRouteRequest {
+            from: Position { latitude: 0.0, longitude: 0.0 },
+            to: Position { latitude: 0.03, longitude: 0.03 },
+            draft_meters: 2.0,
+            safety_margin_meters: 0.5,
+            standoff_nm: 0.0,
+            corridor: None,
+            bbox_anchors: None,
+            border_aware: true,
+            max_snap_meters: None,
+            deadline_ms: None,
+            home_country_id: None,
+        };
+
+        // Home is FRA: the boundary is home water, nothing is foreign, the route needs no fallback.
+        let home = LocalProvider::open(file.path(), Some("FRA".into())).unwrap();
+        match route_channel(&home, &ScaleBand::ALL, &req) {
+            ChannelRouteResult::Ok { border_fallback, .. } => assert!(!border_fallback, "home water: no fallback"),
+            other => panic!("home route should succeed, got {other:?}"),
+        }
+
+        // Home is USA: the FRA boundary is foreign and covers the water, so the in-country attempt
+        // finds no home water and the engine falls back across it, flagged for the caller.
+        let foreign = LocalProvider::open(file.path(), Some("USA".into())).unwrap();
+        match route_channel(&foreign, &ScaleBand::ALL, &req) {
+            ChannelRouteResult::Ok { border_fallback, .. } => assert!(border_fallback, "foreign water: border fallback"),
+            other => panic!("foreign route should still succeed via fallback, got {other:?}"),
+        }
     }
 }

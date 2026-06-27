@@ -224,7 +224,8 @@ def main():
     ap.add_argument("--enc-dir", required=True, help="directory containing ENC .000 cells (searched recursively)")
     ap.add_argument("--out", required=True, help="output GeoPackage path")
     ap.add_argument("--boundaries", help="admin-0 polygons (any OGR source) for the boundaries table")
-    ap.add_argument("--country-field", default="ADM0_A3", help="admin-0 field to store as country_id")
+    ap.add_argument("--country-field", default="iso_sov1",
+                    help="boundaries field stored as country_id (Marine Regions EEZ iso_sov1, ISO alpha-3)")
     ap.add_argument("--osm", help="OSM water polygons (any OGR source) for the osm_water table")
     args = ap.parse_args()
 
