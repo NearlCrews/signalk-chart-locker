@@ -1,0 +1,19 @@
+[package]
+name = "binnacle-localprovider"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "binnacle_localprovider"
+path = "src/lib.rs"
+
+[dependencies]
+binnacle-engine = { path = "../engine" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+tempfile = { version = "3", optional = true }
+
+[features]
+# The synthetic GeoPackage fixture builder is behind this feature so the router's
+# integration test can reuse it as a dev-dependency, and so neither the fixture code nor
+# tempfile is ever compiled into the release binary. Run this crate's tests with the feature.
+testutil = ["dep:tempfile"]
