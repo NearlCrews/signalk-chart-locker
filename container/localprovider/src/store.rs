@@ -309,4 +309,41 @@ mod tests {
         let bbox = Bbox { north: 1.0, south: 0.5, east: 1.0, west: 0.5 };
         assert!(p.charted_areas(ScaleBand::Coastal, bbox).is_none());
     }
+
+    #[test]
+    fn charted_areas_returns_none_on_a_non_polygon_land_geometry() {
+        // S-57 LNDARE can carry point and line features, which PROMOTE_TO_MULTI writes as
+        // MultiPoint or MultiLineString. The polygon-only reader must fail the band loud (None),
+        // never silently drop the obstacle. The prep stage keeps the store polygon-only so a real
+        // store never hits this, but the reader stays strict as the backstop. Regression for the
+        // bug where non-area LNDARE made charted_areas return None and the router decline
+        // no-coverage for a real cell.
+        let square: &[[f64; 2]] = &[[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0], [0.0, 0.0]];
+        let file = StoreBuilder::new()
+            .depth_area("harbour", Some(5.0), Some(9.0), &[square])
+            .land_area("harbour", &[square])
+            .build();
+
+        // A valid GeoPackage blob carrying a WKB MultiPoint (type 4), the geometry class the
+        // polygon-only reader rejects. LE, no envelope, srs 4326, one point at (1, 1).
+        let mut mp = vec![0x47u8, 0x50, 0x00, 0x01];
+        mp.extend_from_slice(&4326i32.to_le_bytes());
+        mp.push(0x01); // WKB byte order: little endian
+        mp.extend_from_slice(&4u32.to_le_bytes()); // WKB type: MultiPoint
+        mp.extend_from_slice(&1u32.to_le_bytes()); // one point
+        mp.push(0x01); // sub-point byte order
+        mp.extend_from_slice(&1u32.to_le_bytes()); // WKB type: Point
+        mp.extend_from_slice(&1.0f64.to_le_bytes()); // x (lon)
+        mp.extend_from_slice(&1.0f64.to_le_bytes()); // y (lat)
+        {
+            // Replace the land geometry blob only; its R-tree bounds still overlap the bbox, so
+            // the query selects the row and reaches the decode that must fail the band.
+            let rw = Connection::open(file.path()).unwrap();
+            rw.execute("UPDATE enc_land_areas SET geom = ?1", rusqlite::params![mp]).unwrap();
+        }
+
+        let p = LocalProvider::open(file.path(), None).unwrap();
+        let bbox = Bbox { north: 1.5, south: 0.5, east: 1.5, west: 0.5 };
+        assert!(p.charted_areas(ScaleBand::Harbour, bbox).is_none());
+    }
 }

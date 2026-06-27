@@ -77,6 +77,16 @@ def cell_layers(cell_path):
     return layers
 
 
+# The routing store is polygon-only: the runtime reader decodes Polygon and MultiPolygon
+# WKB and rejects anything else. S-57 LNDARE (and in principle a depth layer) can carry
+# point and line features too, which PROMOTE_TO_MULTI would write as MultiPoint or
+# MultiLineString. A single such row makes the reader fail the whole band and the router
+# decline no-coverage, so keep only area geometry. Point and line land features are not
+# area obstacles and are out of the routing schema, like the point hazards (WRECKS, UWTROC,
+# OBSTRN) that belong to the separate leg-safety geometry, not this store.
+POLYGON_ONLY = "OGR_GEOMETRY LIKE '%POLYGON'"
+
+
 def ingest_cell(cell_path, out_gpkg):
     """Append a cell's depth and land areas into the store, tagged with its band."""
     band = band_for_cell(cell_path)
@@ -85,13 +95,13 @@ def ingest_cell(cell_path, out_gpkg):
         if layer in present:
             _ogr_append(
                 cell_path, out_gpkg, "enc_depth_areas",
-                f"SELECT DRVAL1 AS drval1, DRVAL2 AS drval2, '{band}' AS band FROM {layer}",
+                f"SELECT DRVAL1 AS drval1, DRVAL2 AS drval2, '{band}' AS band FROM {layer} WHERE {POLYGON_ONLY}",
             )
     for layer in LAND_LAYERS:
         if layer in present:
             _ogr_append(
                 cell_path, out_gpkg, "enc_land_areas",
-                f"SELECT '{band}' AS band FROM {layer}",
+                f"SELECT '{band}' AS band FROM {layer} WHERE {POLYGON_ONLY}",
             )
 
 
