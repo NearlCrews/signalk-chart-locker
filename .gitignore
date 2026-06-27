@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+public/
+target/
+
+# Local tooling state
+.remember/
+*.log
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+
+# OS cruft
+.DS_Store
