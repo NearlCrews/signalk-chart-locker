@@ -2,13 +2,15 @@ use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use binnacle_engine::{
-    route_channel, Bbox, ChannelDeclineReason, ChannelRouteRequest, ChannelRouteResult,
-    ChartedAreas, Position, Provider, RingPolygon, ScaleBand, TileWater,
+    route_channel, ChannelDeclineReason, ChannelRouteRequest, ChannelRouteResult, EmptyProvider,
+    Position, ScaleBand, UnavailableProvider,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+
+/// The scale bands the engine queries, finest first. Bound once and reused by every request.
+const BANDS: &[ScaleBand] = &ScaleBand::ALL;
 
 /// The HTTP surface of the router container with no region store configured: every route
 /// declines no-coverage. Used by tests that do not exercise the geodata read path.
@@ -26,12 +28,12 @@ pub fn app_with_store(store_path: Option<PathBuf>) -> Router {
         .route("/health", get(health))
         .route("/regions", get(regions))
         .route("/route-on-water", post(route_on_water))
-        .with_state(RouterState { store_path: Arc::new(store_path) })
+        .with_state(RouterState { store_path })
 }
 
 #[derive(Clone)]
 struct RouterState {
-    store_path: Arc<Option<PathBuf>>,
+    store_path: Option<PathBuf>,
 }
 
 async fn health() -> Json<Value> {
@@ -39,44 +41,8 @@ async fn health() -> Json<Value> {
 }
 
 async fn regions() -> Json<Value> {
+    // TODO(milestone 3B+): enumerate the configured store's regions once LocalProvider exposes them.
     Json(json!([]))
-}
-
-/// The no-geodata placeholder provider. It reports every query as a successful but empty
-/// result: the store is present and was consulted, it simply holds nothing yet. The engine
-/// reads that as `no-coverage`, the honest decline for an area with no charted water.
-/// Returning `None` instead would read as a fetch failure (`fetch-failed`), which would
-/// misreport an empty-but-healthy store as a transient error.
-struct EmptyProvider;
-
-impl Provider for EmptyProvider {
-    fn charted_areas(&self, _band: ScaleBand, _bbox: Bbox) -> Option<ChartedAreas> {
-        Some(ChartedAreas::default())
-    }
-
-    fn tile_water(&self, _bbox: Bbox) -> Option<TileWater> {
-        Some(TileWater::default())
-    }
-
-    fn foreign_rings(&self, _bbox: Bbox) -> Vec<RingPolygon> {
-        Vec::new()
-    }
-}
-
-/// A provider that reports every read as failed. A configured-but-unopenable store routes over
-/// this so the engine declines fetch-failed, the honest signal that the data source broke.
-struct UnavailableProvider;
-
-impl Provider for UnavailableProvider {
-    fn charted_areas(&self, _band: ScaleBand, _bbox: Bbox) -> Option<ChartedAreas> {
-        None
-    }
-    fn tile_water(&self, _bbox: Bbox) -> Option<TileWater> {
-        None
-    }
-    fn foreign_rings(&self, _bbox: Bbox) -> Vec<RingPolygon> {
-        Vec::new()
-    }
 }
 
 /// The stable wire form of a routing result. The engine returns its native `ChannelRouteResult`;
@@ -125,19 +91,29 @@ async fn route_on_water(
     State(state): State<RouterState>,
     Json(req): Json<ChannelRouteRequest>,
 ) -> Json<WireRouteResult> {
-    let result = match state.store_path.as_ref() {
-        Some(path) => {
-            match binnacle_localprovider::LocalProvider::open(path, req.home_country_id.clone()) {
-                Ok(provider) => route_channel(&provider, &ScaleBand::ALL, &req),
-                // A configured store that will not open is a genuine failure, not absent coverage.
-                // UnavailableProvider returns None for both reads so the engine declines fetch-failed.
-                Err(_) => route_channel(&UnavailableProvider, &ScaleBand::ALL, &req),
-            }
-        }
-        // No store configured (the pre-store default): the engine declines no-coverage.
-        None => route_channel(&EmptyProvider, &ScaleBand::ALL, &req),
-    };
+    // The store open and the route computation are blocking (SQLite plus CPU-bound geometry), so
+    // run them off the async executor. A join failure (a panic in routing) declines fetch-failed.
+    let result = tokio::task::spawn_blocking(move || route_for(state.store_path.as_deref(), &req))
+        .await
+        .unwrap_or(ChannelRouteResult::Decline { reason: ChannelDeclineReason::FetchFailed });
     Json(WireRouteResult::from(result))
+}
+
+/// Route over the configured store, or over a stub provider when no store is set (declines
+/// no-coverage) or the store will not open (declines fetch-failed). Runs on a blocking thread.
+/// The store is opened per request because the home country for border-aware routing is
+/// per-request, and LocalProvider binds it at open time.
+fn route_for(store_path: Option<&Path>, req: &ChannelRouteRequest) -> ChannelRouteResult {
+    match store_path {
+        Some(path) => match binnacle_localprovider::LocalProvider::open(path, req.home_country_id.clone()) {
+            Ok(provider) => route_channel(&provider, BANDS, req),
+            Err(e) => {
+                eprintln!("router: region store {} failed to open: {e}", path.display());
+                route_channel(&UnavailableProvider, BANDS, req)
+            }
+        },
+        None => route_channel(&EmptyProvider, BANDS, req),
+    }
 }
 
 #[cfg(test)]
@@ -194,5 +170,32 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v, json!({ "ok": false, "reason": "no-coverage" }));
+    }
+
+    /// A configured store that cannot be opened routes over UnavailableProvider, so the engine
+    /// declines fetch-failed rather than misreporting the broken data source as empty coverage.
+    #[tokio::test]
+    async fn route_on_water_declines_fetch_failed_when_store_will_not_open() {
+        let body = serde_json::json!({
+            "from": { "latitude": 37.80, "longitude": -122.50 },
+            "to": { "latitude": 37.81, "longitude": -122.49 },
+            "draftMeters": 2.0,
+            "safetyMarginMeters": 0.5,
+            "standoffNm": 0.1
+        })
+        .to_string();
+        let resp = app_with_store(Some(PathBuf::from("/nonexistent/region.gpkg")))
+            .oneshot(
+                Request::post("/route-on-water")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v, json!({ "ok": false, "reason": "fetch-failed" }));
     }
 }

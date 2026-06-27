@@ -35,10 +35,10 @@ struct MinHeap {
 }
 
 impl MinHeap {
-    fn new() -> Self {
+    fn with_capacity(cap: usize) -> Self {
         MinHeap {
-            keys: Vec::new(),
-            vals: Vec::new(),
+            keys: Vec::with_capacity(cap),
+            vals: Vec::with_capacity(cap),
         }
     }
 
@@ -142,7 +142,9 @@ pub fn find_path(
     let goal_c = goal.0 as f64;
     let goal_r = goal.1 as f64;
     let h = |c: f64, r: f64| (c - goal_c).hypot(r - goal_r);
-    let mut open = MinHeap::new();
+    // Hint the heap with one slot per cell. A cell can be re-pushed on a cheaper g, so
+    // the heap can briefly exceed cols*rows, but this bound avoids most regrowth.
+    let mut open = MinHeap::with_capacity(cols * rows);
     let start_idx = idx(start.0, start.1);
     g_score[start_idx] = 0.0;
     open.push(h(start.0 as f64, start.1 as f64), start_idx);
@@ -157,6 +159,9 @@ pub fn find_path(
             break;
         }
         pops += 1;
+        // pops is incremented before the check, so the first deadline poll fires at pop
+        // DEADLINE_CHECK_INTERVAL (4096), not pop 0: a fresh search always expands at
+        // least one batch before it consults the wall clock.
         if pops.is_multiple_of(DEADLINE_CHECK_INTERVAL) && over_deadline(deadline_ms) {
             if let Some(s) = status {
                 s.timed_out = true;

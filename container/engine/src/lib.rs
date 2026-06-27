@@ -11,8 +11,12 @@ pub mod geometry;
 pub mod path_simplify;
 pub mod astar;
 pub mod nav_grid;
+mod snap;
+mod water_index;
 pub mod channel_router;
 pub mod provider;
+pub mod providers;
 
 pub use channel_router::route_channel;
+pub use providers::{EmptyProvider, UnavailableProvider};
 pub use types::*;

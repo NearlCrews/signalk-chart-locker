@@ -12,7 +12,7 @@
 //! Default db path is `data/sample.gpkg` relative to the current directory.
 //! Output is JSON on stdout so a reference reader can diff it field for field.
 
-mod gpkg;
+use binnacle_gpkg as gpkg;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

@@ -147,6 +147,10 @@ pub struct ChannelRouteRequest {
     #[serde(default)]
     pub deadline_ms: Option<f64>,
     /// The home country for border-aware routing. Absent means no border filter.
+    /// `route_channel` does not read this field directly: the `Provider` implementation
+    /// (the `LocalProvider`) consumes it per request to decide which rings are foreign,
+    /// then `border_aware` plus the provider's `foreign_rings` carry the result into the
+    /// engine. It is therefore part of the request contract, not dead.
     #[serde(default)]
     pub home_country_id: Option<String>,
 }

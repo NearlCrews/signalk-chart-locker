@@ -54,10 +54,10 @@ pub fn simplify_path(points: &[[f64; 2]], epsilon: f64) -> Vec<[f64; 2]> {
             }
         }
     }
-    let mut out: Vec<[f64; 2]> = Vec::new();
+    let mut out: Vec<[f64; 2]> = Vec::with_capacity(n);
     for i in 0..n {
         if keep[i] {
-            out.push([points[i][0], points[i][1]]);
+            out.push(points[i]);
         }
     }
     out

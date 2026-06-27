@@ -1,0 +1,13 @@
+[package]
+name = "binnacle-gpkg"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "binnacle_gpkg"
+path = "src/lib.rs"
+
+# Pure-Rust GeoPackage geometry BLOB and WKB decoder. No dependencies, no libgdal, no
+# mod_spatialite, no libgeos, no libproj: byte parsing over &[u8] only. Shared by the runtime
+# LocalProvider read path and the storage-spike historical proof so the decoder lives in one place.
+[dependencies]

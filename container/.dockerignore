@@ -1,1 +1,4 @@
-router/target/
+target/
+**/target/
+prep/
+*.gpkg

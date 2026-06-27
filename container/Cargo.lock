@@ -95,10 +95,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "binnacle-gpkg"
+version = "0.1.0"
+
+[[package]]
 name = "binnacle-localprovider"
 version = "0.1.0"
 dependencies = [
  "binnacle-engine",
+ "binnacle-gpkg",
  "rusqlite",
  "tempfile",
 ]
@@ -583,6 +588,15 @@ checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
  "windows-sys",
+]
+
+[[package]]
+name = "storage-spike"
+version = "0.1.0"
+dependencies = [
+ "binnacle-gpkg",
+ "rusqlite",
+ "serde_json",
 ]
 
 [[package]]

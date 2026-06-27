@@ -1,0 +1,13 @@
+# The container Rust crates as one workspace: one lock file, one target dir, one lint and profile
+# surface, and a single root .cargo/config.toml so the deterministic-numerics FMA flag applies to
+# every crate automatically (no per-crate copy in the Dockerfile). Adding a crate is one members
+# entry here. This is a Cargo workspace, not an npm monorepo: the plugin stays one npm package.
+[workspace]
+resolver = "2"
+members = [
+    "engine",
+    "gpkg",
+    "localprovider",
+    "router",
+    "storage-spike",
+]

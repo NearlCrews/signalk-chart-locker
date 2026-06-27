@@ -86,7 +86,27 @@ pub fn meters_per_degree_lon(latitude: f64) -> f64 {
     METERS_PER_DEGREE * ((latitude * std::f64::consts::PI) / 180.0).cos()
 }
 
-/// Axis-aligned bounds of all vertices across the rings.
+/// The ulp gap between two finite floats, as a non-negative count. Both are mapped to
+/// the monotonic sign-magnitude ordering first, so the subtraction counts representable
+/// steps correctly across zero and sign. This is the parity ULP helper shared by the
+/// provider bbox check and the geometry oracle tests.
+pub(crate) fn ulp_gap(a: f64, b: f64) -> i64 {
+    let order = |x: f64| -> i64 {
+        let bits = x.to_bits() as i64;
+        if bits < 0 {
+            i64::MIN - bits
+        } else {
+            bits
+        }
+    };
+    (order(a) - order(b)).abs()
+}
+
+/// Axis-aligned bounds of all vertices across the rings. Empty rings (no vertices)
+/// intentionally return the sentinel `{ north: NEG_INFINITY, south: INFINITY, east:
+/// NEG_INFINITY, west: INFINITY }`: the start values are never updated, so the box is
+/// non-finite. Callers guard with `bbox_is_finite` before using it, so the sentinel is
+/// a signal to skip the degenerate polygon rather than a usable extent.
 pub fn bounds_of_rings(rings: &Rings) -> Bbox {
     let mut north = f64::NEG_INFINITY;
     let mut south = f64::INFINITY;
@@ -146,14 +166,19 @@ pub fn point_in_rings(lon: f64, lat: f64, rings: &Rings) -> bool {
 }
 
 /// Signed area of the triangle a, b, c (the 2D cross product); its sign gives the
-/// turn direction.
-pub fn orient2d(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
+/// turn direction. Retained from the leg-geometry port for the not-yet-ported
+/// safety-check; currently exercised only by the geometry tests.
+#[allow(dead_code)]
+pub(crate) fn orient2d(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
     (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
 }
 
 /// True when the two planar segments `p1->p2` and `p3->p4` properly cross. Strict
-/// inequalities, so a shared endpoint or a collinear overlap does not count.
-pub fn segments_cross(p1: [f64; 2], p2: [f64; 2], p3: [f64; 2], p4: [f64; 2]) -> bool {
+/// inequalities, so a shared endpoint or a collinear overlap does not count. Retained
+/// from the leg-geometry port for the not-yet-ported safety-check; currently exercised
+/// only by the geometry tests.
+#[allow(dead_code)]
+pub(crate) fn segments_cross(p1: [f64; 2], p2: [f64; 2], p3: [f64; 2], p4: [f64; 2]) -> bool {
     let d1 = orient2d(p3, p4, p1);
     let d2 = orient2d(p3, p4, p2);
     if !((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0)) {
@@ -165,8 +190,11 @@ pub fn segments_cross(p1: [f64; 2], p2: [f64; 2], p3: [f64; 2], p4: [f64; 2]) ->
 }
 
 /// True when segment a, b properly crosses any edge of any ring. Each edge runs
-/// from the previous vertex to the current one, matching the TypeScript order.
-pub fn segment_crosses_rings(a: [f64; 2], b: [f64; 2], rings: &Rings) -> bool {
+/// from the previous vertex to the current one, matching the TypeScript order. Retained
+/// from the leg-geometry port for the not-yet-ported safety-check; currently exercised
+/// only by the geometry tests.
+#[allow(dead_code)]
+pub(crate) fn segment_crosses_rings(a: [f64; 2], b: [f64; 2], rings: &Rings) -> bool {
     for ring in rings {
         let len = ring.len();
         if len == 0 {
@@ -290,18 +318,19 @@ fn project_position(position: Position, bearing_degrees: f64, distance_km: f64) 
     }
 }
 
-/// Build a bounding box that fully encloses a search circle of `distance_meters`
+/// Build a bounding box that fully encloses a search circle of `radius_meters`
 /// radius around the center. Panics on a non-finite coordinate or a non-finite or
-/// negative radius, mirroring the TypeScript throw.
-fn position_to_bbox(position: Position, distance_meters: f64) -> Bbox {
+/// negative radius, mirroring the TypeScript throw. The parameter is named
+/// `radius_meters` so it does not shadow the module's `distance_meters` function.
+fn position_to_bbox(position: Position, radius_meters: f64) -> Bbox {
     if !position.latitude.is_finite() || !position.longitude.is_finite() {
         panic!("position_to_bbox: position carries a non-finite coordinate");
     }
-    if !distance_meters.is_finite() || distance_meters < 0.0 {
-        panic!("position_to_bbox: distance_meters must be a finite non-negative number");
+    if !radius_meters.is_finite() || radius_meters < 0.0 {
+        panic!("position_to_bbox: radius_meters must be a finite non-negative number");
     }
-    // Corner-to-center distance for a square whose edges sit distance_meters out.
-    let corner_distance_km = (distance_meters * std::f64::consts::SQRT_2) / 1000.0;
+    // Corner-to-center distance for a square whose edges sit radius_meters out.
+    let corner_distance_km = (radius_meters * std::f64::consts::SQRT_2) / 1000.0;
     let north_west = project_position(position, NW_BEARING_DEGREES, corner_distance_km);
     let south_east = project_position(position, SE_BEARING_DEGREES, corner_distance_km);
 
@@ -430,7 +459,7 @@ mod tests {
     const MAX_ORACLE_ULP_GAP: i64 = 2;
 
     fn assert_oracle_close(label: &str, a: f64, b: f64) {
-        let gap = crate::provider::ulp_gap(a, b);
+        let gap = ulp_gap(a, b);
         assert!(
             gap <= MAX_ORACLE_ULP_GAP,
             "{label}: {a} differs from oracle {b} by {gap} ulp (max {MAX_ORACLE_ULP_GAP})"

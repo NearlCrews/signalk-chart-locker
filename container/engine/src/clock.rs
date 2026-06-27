@@ -9,6 +9,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub(crate) fn now_ms() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
+        // A clock set before the epoch (duration_since errors) falls back to 0.0. With
+        // now_ms() == 0.0 every `now_ms() > deadline` is false, so a broken clock
+        // disables the deadline and the route is allowed to COMPLETE, the safe direction
+        // (a declined route is the failure we avoid). No log here: a persistently broken
+        // clock would otherwise spam every call.
         .map(|d| d.as_millis() as f64)
         .unwrap_or(0.0)
 }

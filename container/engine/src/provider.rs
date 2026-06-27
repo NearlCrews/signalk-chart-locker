@@ -56,21 +56,6 @@ struct CallsFile {
     foreign_rings: Option<ForeignRingsCall>,
 }
 
-/// The ulp gap between two finite floats, as a non-negative count. Both are mapped to the
-/// monotonic sign-magnitude ordering first, so the subtraction counts representable
-/// steps correctly across zero and sign.
-pub(crate) fn ulp_gap(a: f64, b: f64) -> i64 {
-    let order = |x: f64| -> i64 {
-        let bits = x.to_bits() as i64;
-        if bits < 0 {
-            i64::MIN - bits
-        } else {
-            bits
-        }
-    };
-    (order(a) - order(b)).abs()
-}
-
 /// Assert the engine's queried bbox matches the captured bbox within the ulp tolerance.
 /// A failure means `route_bbox` diverged from the reference by more than rounding, which
 /// is a real bug; panicking here names the offending component instead of letting it
@@ -82,7 +67,7 @@ fn assert_bbox_close(call: &str, engine: Bbox, captured: Bbox) {
         ("east", engine.east, captured.east),
         ("west", engine.west, captured.west),
     ] {
-        let gap = ulp_gap(a, b);
+        let gap = crate::geometry::ulp_gap(a, b);
         assert!(
             gap <= MAX_BBOX_ULP_GAP,
             "{call} bbox {name} differs by {gap} ulp: engine {a}, captured {b}",
@@ -127,7 +112,18 @@ impl FileProvider {
 
 impl Provider for FileProvider {
     fn charted_areas(&self, band: ScaleBand, bbox: Bbox) -> Option<ChartedAreas> {
-        let call = self.charted.iter().find(|c| c.band == band)?;
+        // The router only queries bands the capture lists (it is driven by `bands()`), so a
+        // missing band is a corrupt or mismatched corpus case, not a rejected fetch. Panic
+        // loudly rather than masking it as `None`, which the engine would read as a rejected
+        // band. A captured call whose `result` is `None` (the band fetched but rejected) is
+        // distinct and still returns `None` below.
+        let call = self
+            .charted
+            .iter()
+            .find(|c| c.band == band)
+            .unwrap_or_else(|| {
+                panic!("FileProvider: no captured chartedAreas call for band {band:?}")
+            });
         assert_bbox_close("chartedAreas", bbox, call.bbox);
         call.result.clone()
     }

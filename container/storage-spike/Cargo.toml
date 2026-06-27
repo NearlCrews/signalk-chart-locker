@@ -8,6 +8,8 @@ name = "storage-spike"
 path = "src/main.rs"
 
 [dependencies]
+# The shared pure-Rust GeoPackage and WKB decoder (this crate's was a duplicated copy of it).
+binnacle-gpkg = { path = "../gpkg" }
 # bundled compiles SQLite from the amalgamation with the R-tree module enabled,
 # so no system SQLite, GDAL, spatialite, geos, or proj is needed or linked.
 rusqlite = { version = "0.31", features = ["bundled"] }

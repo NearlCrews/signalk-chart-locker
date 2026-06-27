@@ -1,6 +1,7 @@
 //! Pure-Rust decoder for the GeoPackage geometry BLOB (StandardGeoPackageBinary)
 //! and the ISO/OGC WKB it wraps. No libgdal, mod_spatialite, libgeos, or libproj:
-//! everything here is byte parsing over `&[u8]`.
+//! everything here is byte parsing over `&[u8]`. Shared by the runtime LocalProvider
+//! read path and the storage-spike proof so the decoder lives in one place.
 //!
 //! Byte layout decoded (per the OGC GeoPackage 1.3 spec):
 //!
@@ -119,7 +120,7 @@ pub enum GpkgError {
     TooShort,
     /// First two bytes were not the "GP" magic.
     BadMagic([u8; 2]),
-    /// Header flag bit5 set: ExtendedGeoPackageBinary, not handled by this spike.
+    /// Header flag bit5 set: ExtendedGeoPackageBinary, which this decoder does not support.
     ExtendedGeometry,
     /// Envelope indicator was outside 0..=4.
     BadEnvelopeIndicator(u8),
@@ -200,6 +201,12 @@ fn envelope_len(indicator: u8) -> Result<usize, GpkgError> {
     }
 }
 
+/// `count * unit`, as a usize, failing TooShort on overflow rather than wrapping (a wrap would
+/// shrink the bounds check and let a corrupt length field through on a 32-bit target).
+fn checked_extent(count: u32, unit: usize) -> Result<usize, GpkgError> {
+    (count as usize).checked_mul(unit).ok_or(GpkgError::TooShort)
+}
+
 fn read_wkb(r: &mut Reader) -> Result<(GeometryKind, Vec<Polygon>), GpkgError> {
     let le = read_byte_order(r)?;
     let geom_type = r.read_u32(le)?;
@@ -210,7 +217,7 @@ fn read_wkb(r: &mut Reader) -> Result<(GeometryKind, Vec<Polygon>), GpkgError> {
         }
         WKB_MULTIPOLYGON => {
             let count = r.read_u32(le)?;
-            r.ensure(count as usize * 9)?; // each part is at least a 9-byte header
+            r.ensure(checked_extent(count, 9)?)?; // each part is at least a 9-byte header
             let mut polys = Vec::with_capacity(count as usize);
             for _ in 0..count {
                 // Each part carries its own byte order and type tag.
@@ -229,11 +236,11 @@ fn read_wkb(r: &mut Reader) -> Result<(GeometryKind, Vec<Polygon>), GpkgError> {
 
 fn read_polygon_body(r: &mut Reader, le: bool) -> Result<Polygon, GpkgError> {
     let num_rings = r.read_u32(le)?;
-    r.ensure(num_rings as usize * 4)?; // every ring header is a 4-byte count
+    r.ensure(checked_extent(num_rings, 4)?)?; // every ring header is a 4-byte count
     let mut rings = Vec::with_capacity(num_rings as usize);
     for _ in 0..num_rings {
         let num_points = r.read_u32(le)?;
-        r.ensure(num_points as usize * 16)?; // 2 doubles per point
+        r.ensure(checked_extent(num_points, 16)?)?; // 2 doubles per point
         let mut ring = Vec::with_capacity(num_points as usize);
         for _ in 0..num_points {
             let x = r.read_f64(le)?;
@@ -481,7 +488,7 @@ mod tests {
 
     #[test]
     fn unsupported_type_is_reported() {
-        // A WKB Point (type 1) is valid WKB but out of scope for this spike.
+        // A WKB Point (type 1) is valid WKB but out of scope for this polygon-only decoder.
         let mut wkb = vec![1u8];
         put_u32(&mut wkb, 1, true);
         put_f64(&mut wkb, -122.4, true);
@@ -499,5 +506,37 @@ mod tests {
         assert_eq!(g.kind, GeometryKind::Empty);
         assert_eq!(g.vertex_count(), 0);
         assert_eq!(g.bounds(), None);
+    }
+}
+
+#[cfg(test)]
+mod lift_tests {
+    use super::*;
+
+    // GeoPackage blob: "GP", version 0, flags 0x01 (LE, no envelope), srs_id 4326,
+    // then WKB Polygon with one ring of a unit square at lon 10..11, lat 50..51.
+    fn unit_square_blob() -> Vec<u8> {
+        let mut b = vec![0x47, 0x50, 0x00, 0x01]; // magic, version, flags
+        b.extend_from_slice(&4326i32.to_le_bytes()); // srs_id
+        b.push(0x01); // WKB byte order: little endian
+        b.extend_from_slice(&3u32.to_le_bytes()); // WKB type: Polygon
+        b.extend_from_slice(&1u32.to_le_bytes()); // ring count
+        b.extend_from_slice(&5u32.to_le_bytes()); // point count (closed ring)
+        for (lon, lat) in [(10.0f64, 50.0f64), (11.0, 50.0), (11.0, 51.0), (10.0, 51.0), (10.0, 50.0)] {
+            b.extend_from_slice(&lon.to_le_bytes());
+            b.extend_from_slice(&lat.to_le_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn decodes_lon_lat_polygon() {
+        let g = decode(&unit_square_blob()).unwrap();
+        assert_eq!(g.srs_id, 4326);
+        assert_eq!(g.kind, GeometryKind::Polygon);
+        assert_eq!(g.polygons.len(), 1);
+        let ring = &g.polygons[0].rings[0];
+        assert_eq!(ring[0], [10.0, 50.0]); // [lon, lat], not [lat, lon]
+        assert_eq!(ring[2], [11.0, 51.0]);
     }
 }

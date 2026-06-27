@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 binnacle-engine = { path = "../engine" }
+binnacle-gpkg = { path = "../gpkg" }
 rusqlite = { version = "0.31", features = ["bundled"] }
 tempfile = { version = "3", optional = true }
 

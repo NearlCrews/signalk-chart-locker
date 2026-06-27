@@ -10,7 +10,7 @@ use binnacle_engine::{
 };
 use rusqlite::{Connection, OpenFlags};
 
-use crate::gpkg::{self, GeometryKind};
+use binnacle_gpkg::{self as gpkg, GeometryKind};
 
 pub struct LocalProvider {
     conn: Connection,
@@ -68,8 +68,8 @@ fn band_value(band: ScaleBand) -> &'static str {
 
 impl Provider for LocalProvider {
     fn charted_areas(&self, band: ScaleBand, bbox: Bbox) -> Option<ChartedAreas> {
-        let depth = query_banded_polygons(&self.conn, "enc_depth_areas", band, bbox);
-        let land = query_banded_polygons(&self.conn, "enc_land_areas", band, bbox);
+        let depth = query_depth_polygons(&self.conn, band, bbox);
+        let land = query_land_polygons(&self.conn, band, bbox);
         match (depth, land) {
             (Ok(depth_rows), Ok(land_rows)) => Some(ChartedAreas {
                 depth_areas: depth_rows
@@ -83,14 +83,22 @@ impl Provider for LocalProvider {
                     .collect(),
                 land_areas: land_rows
                     .into_iter()
-                    .flat_map(|(rings_sets, _, _)| {
-                        rings_sets.into_iter().map(|rings| EncAreaPolygon { rings, depth_range: None })
-                    })
+                    .flatten()
+                    .map(|rings| EncAreaPolygon { rings, depth_range: None })
                     .collect(),
             }),
-            // A query or decode error is a genuine fetch failure: return None so the
-            // engine declines fetch-failed rather than no-coverage.
-            _ => None,
+            // A query or decode error is a genuine fetch failure: log it and return None so the
+            // engine declines fetch-failed rather than no-coverage, never silently dropping an
+            // obstacle.
+            (depth, land) => {
+                if let Err(e) = depth {
+                    eprintln!("localprovider: charted_areas depth query failed for {band:?}: {e}");
+                }
+                if let Err(e) = land {
+                    eprintln!("localprovider: charted_areas land query failed for {band:?}: {e}");
+                }
+                None
+            }
         }
     }
 
@@ -99,7 +107,10 @@ impl Provider for LocalProvider {
             Ok(rows) => Some(TileWater {
                 water: rows.into_iter().flatten().map(|rings| AreaPolygon { rings }).collect(),
             }),
-            Err(_) => None,
+            Err(e) => {
+                eprintln!("localprovider: tile_water query failed: {e}");
+                None
+            }
         }
     }
 
@@ -119,46 +130,60 @@ impl Provider for LocalProvider {
     }
 }
 
-// The R-tree overlap predicate: a feature whose bbox overlaps the query window.
-// Bbox is { north, south, east, west }; feature bbox is (minx, maxx, miny, maxy).
+// The R-tree overlap predicate: a feature whose bbox overlaps the query window. Bbox is
+// { north, south, east, west }; the feature bbox is (minx, maxx, miny, maxy). A query bbox that
+// crosses the antimeridian (west > east) would select nothing here, but the engine rejects such a
+// bbox upstream in resolve_grid_size before any provider query, so this predicate never sees one.
 const OVERLAP: &str =
     "r.minx <= :east AND r.maxx >= :west AND r.miny <= :north AND r.maxy >= :south";
 
-/// Row type for `query_banded_polygons`: decoded polygon sets plus the two depth values.
-type BandedRow = (Vec<Rings>, Option<f64>, Option<f64>);
+/// Decode a geometry blob column into ring sets, mapping a decode failure to a rusqlite error so
+/// the whole query fails loud (the band reads as fetch-failed) rather than dropping the obstacle.
+fn decode_geom(blob: Vec<u8>) -> rusqlite::Result<Vec<Rings>> {
+    LocalProvider::blob_to_polygons(&blob).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(e))
+    })
+}
 
-fn query_banded_polygons(
-    conn: &Connection,
-    table: &str,
-    band: ScaleBand,
-    bbox: Bbox,
-) -> rusqlite::Result<Vec<BandedRow>> {
-    // enc_land_areas has no drval columns; select NULLs so the row shape is uniform.
-    let drval = if table == "enc_depth_areas" { "t.drval1, t.drval2" } else { "NULL, NULL" };
+/// A decoded depth-area row: ring sets plus DRVAL1 (shallow) and DRVAL2 (deep).
+type DepthRow = (Vec<Rings>, Option<f64>, Option<f64>);
+
+/// Depth-area rows for one band in the bbox: ring sets plus DRVAL1 and DRVAL2.
+fn query_depth_polygons(conn: &Connection, band: ScaleBand, bbox: Bbox) -> rusqlite::Result<Vec<DepthRow>> {
     let sql = format!(
-        "SELECT t.geom, {drval} FROM {table} t \
-         JOIN rtree_{table}_geom r ON t.fid = r.id \
+        "SELECT t.geom, t.drval1, t.drval2 FROM enc_depth_areas t \
+         JOIN rtree_enc_depth_areas_geom r ON t.fid = r.id \
          WHERE t.band = :band AND {OVERLAP}"
     );
-    let mut stmt = conn.prepare(&sql)?;
+    let mut stmt = conn.prepare_cached(&sql)?;
     let rows = stmt.query_map(
         rusqlite::named_params! {
             ":band": band_value(band),
             ":east": bbox.east, ":west": bbox.west, ":north": bbox.north, ":south": bbox.south,
         },
         |row| {
-            let blob: Vec<u8> = row.get(0)?;
             let drval1: Option<f64> = row.get(1)?;
             let drval2: Option<f64> = row.get(2)?;
-            let rings = LocalProvider::blob_to_polygons(&blob).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Blob,
-                    Box::new(e),
-                )
-            })?;
-            Ok((rings, drval1, drval2))
+            Ok((decode_geom(row.get(0)?)?, drval1, drval2))
         },
+    )?;
+    rows.collect()
+}
+
+/// Land-area ring sets for one band in the bbox (land carries no depth values).
+fn query_land_polygons(conn: &Connection, band: ScaleBand, bbox: Bbox) -> rusqlite::Result<Vec<Vec<Rings>>> {
+    let sql = format!(
+        "SELECT t.geom FROM enc_land_areas t \
+         JOIN rtree_enc_land_areas_geom r ON t.fid = r.id \
+         WHERE t.band = :band AND {OVERLAP}"
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(
+        rusqlite::named_params! {
+            ":band": band_value(band),
+            ":east": bbox.east, ":west": bbox.west, ":north": bbox.north, ":south": bbox.south,
+        },
+        |row| decode_geom(row.get(0)?),
     )?;
     rows.collect()
 }
@@ -167,21 +192,12 @@ fn query_plain_polygons(conn: &Connection, table: &str, bbox: Bbox) -> rusqlite:
     let sql = format!(
         "SELECT t.geom FROM {table} t JOIN rtree_{table}_geom r ON t.fid = r.id WHERE {OVERLAP}"
     );
-    let mut stmt = conn.prepare(&sql)?;
+    let mut stmt = conn.prepare_cached(&sql)?;
     let rows = stmt.query_map(
         rusqlite::named_params! {
             ":east": bbox.east, ":west": bbox.west, ":north": bbox.north, ":south": bbox.south,
         },
-        |row| {
-            let blob: Vec<u8> = row.get(0)?;
-            LocalProvider::blob_to_polygons(&blob).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Blob,
-                    Box::new(e),
-                )
-            })
-        },
+        |row| decode_geom(row.get(0)?),
     )?;
     rows.collect()
 }
@@ -191,22 +207,13 @@ fn query_foreign_polygons(conn: &Connection, bbox: Bbox, home: &str) -> rusqlite
         "SELECT t.geom FROM boundaries t JOIN rtree_boundaries_geom r ON t.fid = r.id \
          WHERE t.country_id <> :home AND {OVERLAP}"
     );
-    let mut stmt = conn.prepare(&sql)?;
+    let mut stmt = conn.prepare_cached(&sql)?;
     let rows = stmt.query_map(
         rusqlite::named_params! {
             ":home": home,
             ":east": bbox.east, ":west": bbox.west, ":north": bbox.north, ":south": bbox.south,
         },
-        |row| {
-            let blob: Vec<u8> = row.get(0)?;
-            LocalProvider::blob_to_polygons(&blob).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Blob,
-                    Box::new(e),
-                )
-            })
-        },
+        |row| decode_geom(row.get(0)?),
     )?;
     rows.collect()
 }
@@ -217,17 +224,6 @@ mod tests {
     use super::*;
     use crate::fixture::StoreBuilder;
     use binnacle_engine::{route_channel, ChannelRouteRequest, ChannelRouteResult, Position};
-
-    fn band_str(b: ScaleBand) -> &'static str {
-        match b {
-            ScaleBand::Overview => "overview",
-            ScaleBand::General => "general",
-            ScaleBand::Coastal => "coastal",
-            ScaleBand::Approach => "approach",
-            ScaleBand::Harbour => "harbour",
-            ScaleBand::Berthing => "berthing",
-        }
-    }
 
     #[test]
     fn charted_areas_returns_depth_and_land_for_the_band_in_bbox() {
@@ -246,12 +242,10 @@ mod tests {
         assert_eq!(coastal.land_areas.len(), 1);
         assert!(coastal.land_areas[0].depth_range.is_none());
 
-        // A band with no rows in bbox still returns Some (present-but-empty), not None.
+        // A band with no rows in bbox still returns Some (present-but-empty), not None, and the
+        // harbour band's row is excluded from the coastal query.
         let berthing = p.charted_areas(ScaleBand::Berthing, bbox).unwrap();
         assert!(berthing.depth_areas.is_empty() && berthing.land_areas.is_empty());
-
-        // The other band's row is excluded.
-        let _ = band_str(ScaleBand::Harbour);
     }
 
     #[test]
