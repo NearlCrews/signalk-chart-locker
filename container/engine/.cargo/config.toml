@@ -1,9 +1,9 @@
-# Disable fused multiply-add contraction so `a * b + c` keeps the same rounding as the
-# TypeScript reference, which computes it as two separate IEEE-754 operations. The parity
-# corpus is asserted bit-for-bit on waypoints and within a ulp tolerance on the bbox, so an
-# inadvertent fmadd fusion (which the compiler may apply on aarch64 at opt-level 2 and above)
-# would shift the bbox, the cell dimensions, and the waypoints and break parity across builds.
-# Required by the design spec section 8 (disable FMA contraction and fast-math, preserve
-# expression order).
-[build]
+# Disable fused multiply-add contraction on x86_64 so `a * b + c` keeps the same rounding as the
+# TypeScript reference, which computes it as two separate IEEE-754 operations. On x86_64 the
+# compiler may fuse a multiply-add into a single rounding; -fma forbids that. On aarch64, the Pi
+# and the primary target, `fma` is not a recognized target-feature name and Rust performs no FMA
+# contraction by default at any optimization level, so determinism holds without a flag, and
+# gating to x86_64 keeps the aarch64 build warning-free. Required by the design spec section 8,
+# which directs disabling FMA contraction and fast-math and preserving expression order.
+[target.'cfg(target_arch = "x86_64")']
 rustflags = ["-C", "target-feature=-fma"]
