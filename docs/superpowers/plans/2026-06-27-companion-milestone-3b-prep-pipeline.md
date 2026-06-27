@@ -7,10 +7,14 @@
 > exact 3A schema, and the runtime router read that store through `LocalProvider` and returned
 > a real `ok: true` route over the bathymetry (and an honest `no-coverage` outside the cell).
 > Per the Option A decision the owner downloads ENC cells; this milestone ships the pipeline,
-> not the data. Remaining before this milestone is fully closed: OSM water ingestion at real
-> scale, multi-cell overlapping-band precedence on a real cell set, LNDARE and DRGARE (the
-> test cell carried neither), and the cell-versus-ArcGIS validation gate (which is the
-> Milestone 3C harness).
+> not the data. The DEPARE, DRGARE, and LNDARE
+> paths are all verified against a real harbour cell (US5CA13M: 500 depth areas and 120 land
+> areas), and multi-cell overlapping-band precedence is verified against two real overlapping
+> cells (US5CA13M harbour plus US3CA52M coastal: 633 depth rows tagged 500 harbour and 133
+> coastal, with the finer harbour band covering the bay interior and the coarser coastal band
+> filling gaps). The cell-versus-ArcGIS validation gate is the Milestone 3C harness and passed.
+> Remaining before this milestone is fully closed: OSM water ingestion at real (multi-GB)
+> scale, and running prep over more regions.
 >
 > **Implementation note.** The committed tool consolidates the design below into one
 > `prep_region.py` that drives `ogr2ogr` (the S-57 read and the GeoPackage write) and the
