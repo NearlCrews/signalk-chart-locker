@@ -157,7 +157,7 @@ pub fn find_path(
             break;
         }
         pops += 1;
-        if pops % DEADLINE_CHECK_INTERVAL == 0 && over_deadline(deadline_ms) {
+        if pops.is_multiple_of(DEADLINE_CHECK_INTERVAL) && over_deadline(deadline_ms) {
             if let Some(s) = status {
                 s.timed_out = true;
             }
@@ -255,7 +255,7 @@ mod tests {
             3
         }
         fn is_navigable(&self, col: i64, row: i64) -> bool {
-            col >= 0 && col < 5 && row >= 0 && row < 3
+            (0..5).contains(&col) && (0..3).contains(&row)
         }
         fn step_penalty(&self, _col: i64, row: i64) -> f64 {
             if row == 0 {

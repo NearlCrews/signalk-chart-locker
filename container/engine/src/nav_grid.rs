@@ -203,8 +203,8 @@ fn empty_grid(bbox: Bbox) -> NavGrid {
 pub fn resolve_grid_size(bbox: Bbox, target_cell_meters: Option<f64>) -> Option<GridSize> {
     let lon_span_deg = bbox.east - bbox.west;
     let lat_span_deg = bbox.north - bbox.south;
-    if !(lon_span_deg > 0.0)
-        || !(lat_span_deg > 0.0)
+    if lon_span_deg <= 0.0
+        || lat_span_deg <= 0.0
         || !lon_span_deg.is_finite()
         || !lat_span_deg.is_finite()
     {
@@ -635,7 +635,7 @@ fn planar_point_to_polyline_meters(p: Position, polyline: &[Position], mx: f64, 
         let t = if len2 == 0.0 {
             0.0
         } else {
-            (((px - ax) * dx + (py - ay) * dy) / len2).max(0.0).min(1.0)
+            (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0)
         };
         let d = (px - (ax + t * dx)).hypot(py - (ay + t * dy));
         if d < best {

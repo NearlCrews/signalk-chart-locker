@@ -277,7 +277,7 @@ fn project_position(position: Position, bearing_degrees: f64, distance_km: f64) 
     // past the limit for a center extremely close to a pole, where asin is NaN.
     let sine_new_latitude = latitude_rad.sin() * angular_distance.cos()
         + latitude_rad.cos() * angular_distance.sin() * bearing_rad.cos();
-    let new_latitude_rad = sine_new_latitude.min(1.0).max(-1.0).asin();
+    let new_latitude_rad = sine_new_latitude.clamp(-1.0, 1.0).asin();
 
     let new_longitude_rad = longitude_rad
         + (bearing_rad.sin() * angular_distance.sin() * latitude_rad.cos()).atan2(
@@ -339,8 +339,8 @@ pub(crate) fn union_bbox(a: Bbox, b: Bbox) -> Bbox {
 /// waypoint list, since there is no box to seed, mirroring the TypeScript throw.
 pub fn route_bbox(waypoints: &[Position], half_width_meters: f64) -> Bbox {
     let mut bbox = position_to_bbox(waypoints[0], half_width_meters);
-    for i in 1..waypoints.len() {
-        bbox = union_bbox(bbox, position_to_bbox(waypoints[i], half_width_meters));
+    for &wp in &waypoints[1..] {
+        bbox = union_bbox(bbox, position_to_bbox(wp, half_width_meters));
     }
     bbox
 }
@@ -503,8 +503,7 @@ mod tests {
         };
         let samples = sample_rhumb_leg(from, to, 2000.0);
         // Oracle samples from the TypeScript sampleRhumbLeg.
-        let expected = vec![
-            Position {
+        let expected = [Position {
                 latitude: 47.61071647312815,
                 longitude: -122.37857510526305,
             },
@@ -519,8 +518,7 @@ mod tests {
             Position {
                 latitude: 47.64286589251261,
                 longitude: -122.31427406717529,
-            },
-        ];
+            }];
         assert_eq!(samples.len(), expected.len(), "sample count mismatch");
         for (i, (a, e)) in samples.iter().zip(expected.iter()).enumerate() {
             assert_oracle_close(&format!("sample[{i}].latitude"), a.latitude, e.latitude);

@@ -69,8 +69,8 @@ pub fn route_channel(
     let coord_finite = |p: &Position| p.latitude.is_finite() && p.longitude.is_finite();
     let inputs_finite = coord_finite(&req.from)
         && coord_finite(&req.to)
-        && anchors.iter().all(|p| coord_finite(p))
-        && req.corridor.as_deref().unwrap_or(&[]).iter().all(|p| coord_finite(p));
+        && anchors.iter().all(&coord_finite)
+        && req.corridor.as_deref().unwrap_or(&[]).iter().all(coord_finite);
     if !inputs_finite {
         return ChannelRouteResult::Decline {
             reason: ChannelDeclineReason::NoCoverage,
@@ -227,9 +227,7 @@ pub fn route_channel(
             if leg_safe(grid.cell_center(cells[p]), grid.cell_center(cells[q])) {
                 route_cells.push(cells[q]);
             } else {
-                for m in (p + 1)..=q {
-                    route_cells.push(cells[m]);
-                }
+                route_cells.extend_from_slice(&cells[(p + 1)..=q]);
             }
         }
 
@@ -263,7 +261,7 @@ pub fn route_channel(
         // Decimate to TURNING points: drop each waypoint whose removal still leaves the
         // longer leg on water, so the dense cell-resolution trace becomes a handful of
         // turns. Endpoints are kept, and every surviving leg stays legSafe by construction.
-        let waypoints = decimate_route(&route_positions, &leg_safe, req.deadline_ms);
+        let waypoints = decimate_route(&route_positions, leg_safe, req.deadline_ms);
 
         if !route_legs_on_water(&waypoints, &index, sample_spacing, clip_tolerance, req.deadline_ms) {
             return ChannelRouteResult::Decline {
@@ -585,7 +583,7 @@ fn bbox_contains_point(b: &Bbox, lon: f64, lat: f64) -> bool {
 fn build_buckets(item_bboxes: &[Bbox], union: Bbox) -> SpatialBuckets {
     let lon_span = union.east - union.west;
     let lat_span = union.north - union.south;
-    if item_bboxes.is_empty() || !(lon_span > 0.0) || !(lat_span > 0.0) {
+    if item_bboxes.is_empty() || lon_span <= 0.0 || !lon_span.is_finite() || lat_span <= 0.0 || !lat_span.is_finite() {
         return SpatialBuckets {
             west: 0.0,
             north: 0.0,
@@ -633,7 +631,7 @@ fn build_buckets(item_bboxes: &[Bbox], union: Bbox) -> SpatialBuckets {
 
 /// The candidate polygon indices for a point: its bucket's list, or none when the point
 /// is outside the index.
-fn bucket_at<'a>(b: &'a SpatialBuckets, lon: f64, lat: f64) -> &'a [usize] {
+fn bucket_at(b: &SpatialBuckets, lon: f64, lat: f64) -> &[usize] {
     if b.side == 0 {
         return &[];
     }
@@ -865,9 +863,7 @@ fn decimate_route<F: Fn(Position, Position) -> bool>(
         // Stop decimating once the deadline passes, keeping the rest of the trace; the
         // re-check that follows sees the deadline and declines cleanly.
         if over_deadline(deadline_ms) {
-            for k in j..last {
-                kept.push(waypoints[k]);
-            }
+            kept.extend_from_slice(&waypoints[j..last]);
             kept.push(waypoints[last]);
             return kept;
         }

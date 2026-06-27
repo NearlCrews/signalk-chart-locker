@@ -37,9 +37,9 @@ pub fn simplify_path(points: &[[f64; 2]], epsilon: f64) -> Vec<[f64; 2]> {
         };
         let mut far = 0.0_f64;
         let mut far_idx: Option<usize> = None;
-        for i in (lo + 1)..hi {
-            let px = points[i][0];
-            let py = points[i][1];
+        for (i, point) in points.iter().enumerate().take(hi).skip(lo + 1) {
+            let px = point[0];
+            let py = point[1];
             let dist = (dy * px - dx * py + bx * ay - by * ax).abs() / len;
             if dist > far {
                 far = dist;
