@@ -3,3 +3,6 @@
 //! WKB decoder, exactly the read path proven in the Milestone 1.5 storage spike.
 
 pub mod gpkg;
+
+#[cfg(feature = "testutil")]
+pub mod fixture;

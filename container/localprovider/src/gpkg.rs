@@ -515,9 +515,9 @@ mod lift_tests {
         b.extend_from_slice(&3u32.to_le_bytes()); // WKB type: Polygon
         b.extend_from_slice(&1u32.to_le_bytes()); // ring count
         b.extend_from_slice(&5u32.to_le_bytes()); // point count (closed ring)
-        for (lon, lat) in [(10.0, 50.0), (11.0, 50.0), (11.0, 51.0), (10.0, 51.0), (10.0, 50.0)] {
-            b.extend_from_slice(&(lon as f64).to_le_bytes());
-            b.extend_from_slice(&(lat as f64).to_le_bytes());
+        for (lon, lat) in [(10.0f64, 50.0f64), (11.0, 50.0), (11.0, 51.0), (10.0, 51.0), (10.0, 50.0)] {
+            b.extend_from_slice(&lon.to_le_bytes());
+            b.extend_from_slice(&lat.to_le_bytes());
         }
         b
     }
