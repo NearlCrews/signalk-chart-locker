@@ -1,0 +1,9 @@
+# Disable fused multiply-add contraction so `a * b + c` keeps the same rounding as the
+# TypeScript reference, which computes it as two separate IEEE-754 operations. The parity
+# corpus is asserted bit-for-bit on waypoints and within a ulp tolerance on the bbox, so an
+# inadvertent fmadd fusion (which the compiler may apply on aarch64 at opt-level 2 and above)
+# would shift the bbox, the cell dimensions, and the waypoints and break parity across builds.
+# Required by the design spec section 8 (disable FMA contraction and fast-math, preserve
+# expression order).
+[build]
+rustflags = ["-C", "target-feature=-fma"]
