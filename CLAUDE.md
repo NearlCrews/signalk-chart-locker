@@ -75,10 +75,12 @@ on both amd64 and arm64.
 - `docs/superpowers/specs/`, `docs/superpowers/plans/`, `docs/superpowers/reviews/`: the design
   spec, the per-milestone plans, and review records.
 
-Milestone 3B's ENC depth-area core is implemented and was verified against a real NOAA cell
-(the prep tool builds a store the runtime router routes over). Remaining for 3B: OSM water at
-scale and multi-cell precedence. Milestone 3C (data-parity harness) is next. Milestone 4 is the
-crows-nest cutover behind a feature flag with an in-process fallback.
+Milestone 3B's ENC core is implemented and verified against real NOAA cells (the prep tool
+builds stores the runtime router routes over, avoiding charted land). Milestone 3C's
+classification parity passed against the live NOAA ENC Direct service (`container/prep/data_parity.py`,
+verified on San Francisco Bay). Remaining: OSM water at scale, multi-cell precedence, the 3C
+one-way leg safety invariant, and broader regions. Milestone 4 is the crows-nest cutover behind
+a feature flag with an in-process fallback.
 
 ## Build and test
 

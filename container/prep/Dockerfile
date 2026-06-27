@@ -15,6 +15,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work
-COPY prep_region.py /opt/prep/prep_region.py
+COPY prep_region.py data_parity.py /opt/prep/
 
+# Default entry builds a region store. The Milestone 3C parity check is run with an entrypoint
+# override: `--entrypoint python3 ... /opt/prep/data_parity.py`.
 ENTRYPOINT ["python3", "/opt/prep/prep_region.py"]

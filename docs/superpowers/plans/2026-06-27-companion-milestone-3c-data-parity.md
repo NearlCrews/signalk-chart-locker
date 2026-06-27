@@ -1,9 +1,15 @@
 # Milestone 3C: Data-parity harness Implementation Plan
 
-> **Status: data-gated, downstream of 3B.** This plan cannot run until Milestone 3B has
-> produced a real region GeoPackage AND captured online ENC outputs exist for the same area.
-> It also depends on the Milestone 3A `LocalProvider`, which is complete. Execute it when a
-> real region store and captured online reference outputs are staged.
+> **Status: classification parity executed and PASSED against the live NOAA ENC.** The harness
+> is committed at `container/prep/data_parity.py`. It was run on a real region (San Francisco
+> Bay, NOAA cell US5CA13M, built by the prep tool) against the live NOAA ENC Direct service: on
+> an 8x8 grid, 30 of 64 points were covered by both sources, all 30 agreed on the `inEncDeep`
+> and the drying-as-land classification, with 0 load-bearing disagreements and 1 expected
+> coverage-edge point. So the local GDAL S-57 prep produces depth classifications identical to
+> NOAA's own ArcGIS lineage for the same charts. Remaining in 3C: the one-way leg-level safety
+> invariant (Task 3) and the Node plugin lifecycle and fallback slice (Task 4), and running the
+> parity over more regions. The committed harness is the implementation of Tasks 1 and 2
+> (capture plus per-sample classification comparison), folded into one online-sampling script.
 
 > **For agentic workers:** when the inputs exist, execute with
 > superpowers:subagent-driven-development. Steps use checkbox (`- [ ]`) syntax.

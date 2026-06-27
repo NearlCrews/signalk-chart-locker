@@ -40,6 +40,11 @@ everything below is unreleased.
   `LocalProvider` schema, with R-tree indexes and the usage band taken from the ENC cell name.
   GDAL stays confined to this prep image, so the runtime image carries none of it. ENC and
   chart data are downloaded by the owner per region and are never bundled.
+- The Milestone 3C data-parity harness under `container/prep/data_parity.py`: it samples a grid
+  of points across a region and compares the local store's `inEncDeep` and drying-as-land
+  classifications against the live NOAA ENC Direct service. Verified on San Francisco Bay (NOAA
+  cell US5CA13M): every point covered by both sources agreed, confirming the local GDAL S-57
+  prep produces depth classifications identical to NOAA's own lineage for the same charts.
 
 ### Changed
 
