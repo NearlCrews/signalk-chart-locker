@@ -15,6 +15,12 @@ Guidance for Claude Code working in `signalk-binnacle-companion`.
 - On-demand Rust review: the `rust-signalk-expert` agent (`.claude/agents/`) knows the engine
   crate, the parity contract, the no-heavy-native-libs runtime rule, and the Signal K container
   seam. Invoke it to review or advise on the Rust.
+- Keep everything consistent, modular, and following best practices. Match the surrounding style
+  and idioms; hoist shared logic into one place (a shared crate, helper, or module) instead of
+  duplicating; prefer data-driven structures over parallel hard-coded lists; and leave every change
+  self-consistent (build, tests, clippy, and lint green). The Rust is one Cargo workspace, the
+  GeoPackage and WKB decoder lives only in `binnacle-gpkg`, and the prep store schema and ENC
+  ingests are single sources (`TABLE_SCHEMAS`, `ENC_INGESTS`): extend those seams, never fork them.
 
 ## What this is
 
@@ -42,7 +48,8 @@ router, ported to Rust with a fully offline local geodata store.
   prep locally. This is the resolved Milestone 3 ENC distribution decision (Option A,
   pipeline-only, 2026-06-27): ship the pipeline, not the data. See
   `docs/superpowers/decisions/2026-06-27-enc-distribution-model.md`.
-- Deterministic numerics: FMA contraction disabled on x86_64 (`container/engine/.cargo/config.toml`),
+- Deterministic numerics: FMA contraction disabled on x86_64 (`container/.cargo/config.toml`, the
+  Cargo workspace root, so the flag applies to every crate compiled into any binary),
   with aarch64 relying on Rust's default of no FMA contraction and no fast-math; expression order
   preserved, `total_cmp` not `partial_cmp().unwrap()` on any sort that a non-finite float could reach.
 - The trust boundary stays in crows-nest: the LLM call, the Signal K reads, the budget and admin
@@ -68,15 +75,21 @@ on both amd64 and arm64.
 ## Layout and status
 
 - `src/`, `test/`: the Node plugin (Milestone 1, complete, on `main`).
+- The Rust crates under `container/` are one Cargo workspace (`container/Cargo.toml`): `engine`,
+  `gpkg`, `localprovider`, `router`, and `storage-spike`, sharing one lock, one target dir, and the
+  root `container/.cargo/config.toml`. This is a Cargo workspace, not an npm monorepo.
 - `container/router/`: the Milestone 1 axum service (`/health`, `/regions`, distroless image).
-- `container/storage-spike/`: the Milestone 1.5 offline-GeoPackage-from-Rust proof.
+- `container/storage-spike/`: the Milestone 1.5 offline-GeoPackage-from-Rust proof, kept as a
+  record; it reads through the shared `binnacle-gpkg` decoder.
 - `container/engine/`: the Milestone 2 channel-router port and parity corpus (materially complete).
+- `container/gpkg/`: the shared pure-Rust GeoPackage and WKB decoder (`binnacle-gpkg`), used by
+  `localprovider` and `storage-spike` so the decoder lives in one place.
 - `container/localprovider/`: the Milestone 3A runtime read path: reads an offline OGC GeoPackage
-  via `rusqlite`, answers the engine's provider queries, and is wired into the router via
-  `BINNACLE_REGION_STORE`. The `testutil` feature exposes a `StoreBuilder` for integration tests.
+  via `rusqlite` and the `binnacle-gpkg` decoder, answers the engine's provider queries, and is
+  wired into the router via `BINNACLE_REGION_STORE`. The `testutil` feature exposes a `StoreBuilder`.
 - `container/prep/`: the Milestone 3B offline prep tool: a pinned-GDAL container that reads
-  NOAA ENC S-57 cells and admin-0 and OSM sources and writes a per-region GeoPackage in the
-  `LocalProvider` schema. GDAL lives only here, never in the runtime image.
+  NOAA ENC S-57 cells and Marine Regions EEZ and OSM sources and writes a per-region GeoPackage in
+  the `LocalProvider` schema. GDAL lives only here, never in the runtime image.
 - `docs/superpowers/specs/`, `docs/superpowers/plans/`, `docs/superpowers/reviews/`: the design
   spec, the per-milestone plans, and review records.
 
@@ -95,8 +108,9 @@ tests).
 ## Build and test
 
 - Plugin: `npm test` (node --test via tsx), `npm run typecheck`, `npm run lint`, `npm run build`.
-- Rust: `cd container/engine && cargo test` (first build is slow on the Pi; allow a long timeout),
-  `cargo clippy --all-targets -- -D warnings`, `cargo build --release`. Likewise in
-  `container/router` and `container/storage-spike`.
+- Rust (Cargo workspace): `cd container && cargo test --workspace` (first build is slow on the Pi;
+  allow a long timeout), plus `cargo test -p binnacle-localprovider --features testutil` for its
+  feature-gated tests, then `cargo clippy --workspace --all-targets -- -D warnings` and
+  `cargo build --release --bin router`.
 - No `prepare` or `prepack` lifecycle script in `package.json` (it corrupts the App Store
   install-simulation CI step).

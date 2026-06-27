@@ -6,6 +6,31 @@ everything below is unreleased.
 
 ## [Unreleased]
 
+### Changed
+
+- Reorganized the container Rust crates into one Cargo workspace (`container/Cargo.toml`) sharing a
+  lock, a target directory, and the root `.cargo/config.toml`, so the x86_64 FMA-off determinism
+  flag applies to every crate. Extracted the duplicated GeoPackage and WKB decoder into a shared
+  `binnacle-gpkg` crate used by both `localprovider` and `storage-spike`, and the router image is
+  now a single workspace build.
+- Split the engine orchestrator: the water index and the endpoint snapping moved into
+  `water_index.rs` and `snap.rs`, and the navigable-grid build into per-stage helpers, with no
+  change to routing output (the parity corpus stays green). Efficiency work in the same area: a
+  borrowed water index with no per-route ring clones, packed grid masks, fewer per-row deadline
+  syscalls, and pre-sized buffers.
+- The offline prep tool is now data-driven (single sources for the store schema and the ENC layer
+  ingests), the router runs its blocking store-open and route off the async executor via
+  `spawn_blocking`, and the `localprovider` reader caches its prepared statements and queries depth
+  and land through typed paths.
+
+### Fixed
+
+- The prep tool no longer writes a spurious `keep` column into `osm_water` (the table is now
+  geometry-only per the store contract), and it validates the boundaries country field.
+- The data-parity harness filters local depth areas by band (a multi-band store could otherwise
+  produce a false PASS) and fails loud on an `ogrinfo` error instead of silently treating it as no
+  coverage.
+
 ### Added
 
 - The Signal K companion plugin: a lifecycle that resolves the `signalk-container`
