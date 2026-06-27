@@ -37,6 +37,10 @@ from urllib.request import pathname2url
 GPKG_APPLICATION_ID = 0x47504B47
 GPKG_USER_VERSION = 10301
 
+# WKB geometry type codes, named so the summary does not carry bare integers.
+_WKB_POLYGON = 3
+_WKB_MULTIPOLYGON = 6
+
 # The candidate query from the contract: an R-tree envelope overlap test. This
 # is the candidate set, not a point-in-polygon refinement, which is the engine's
 # job and out of spike scope.
@@ -256,11 +260,13 @@ def summarize_geometry(decoded: dict) -> dict:
     total_vertices = sum(len(r) for r in rings)
     first_ring = rings[0] if rings else []
     first_ring_bbox = _bbox_of_points(first_ring)
-    whole_geom_bbox = _bbox_of_points([p for ring in rings for p in ring])
+    whole_geom_bbox = _bbox_of_points(p for ring in rings for p in ring)
 
     return {
         "geom_type": geom_type,
-        "wkb_type": 3 if geom_type == "Polygon" else (6 if geom_type == "MultiPolygon" else None),
+        "wkb_type": _WKB_POLYGON
+        if geom_type == "Polygon"
+        else (_WKB_MULTIPOLYGON if geom_type == "MultiPolygon" else None),
         "total_vertices": total_vertices,
         "polygon_count": polygon_count,
         "ring_count": len(rings),
@@ -272,12 +278,21 @@ def summarize_geometry(decoded: dict) -> dict:
     }
 
 
-def _bbox_of_points(points: list[tuple[float, float]]) -> dict | None:
-    if not points:
+def _bbox_of_points(points) -> dict | None:
+    # Accepts any iterable of (x, y) and scans once, so a whole-geometry bbox does not
+    # materialize every vertex into an intermediate list first.
+    minx = miny = float("inf")
+    maxx = maxy = float("-inf")
+    found = False
+    for x, y in points:
+        found = True
+        minx = min(minx, x)
+        maxx = max(maxx, x)
+        miny = min(miny, y)
+        maxy = max(maxy, y)
+    if not found:
         return None
-    xs = [p[0] for p in points]
-    ys = [p[1] for p in points]
-    return {"minx": min(xs), "maxx": max(xs), "miny": min(ys), "maxy": max(ys)}
+    return {"minx": minx, "maxx": maxx, "miny": miny, "maxy": maxy}
 
 
 # --------------------------------------------------------------------------- #
@@ -302,12 +317,14 @@ def oracle_for_bbox(conn: sqlite3.Connection, bbox: dict) -> tuple[list[int], di
     rows = conn.execute(RTREE_QUERY, bbox).fetchall()
     fids = [int(r[0]) for r in rows]
     geoms: dict[int, dict] = {}
-    for fid in fids:
-        row = conn.execute("SELECT geom FROM regions WHERE fid = ?", (fid,)).fetchone()
-        if row is None:
-            raise BlobError(f"rtree id {fid} has no matching regions row")
-        decoded = decode_gpkg_blob(bytes(row[0]))
-        geoms[fid] = summarize_geometry(decoded)
+    if fids:
+        placeholders = ",".join("?" * len(fids))
+        query = f"SELECT fid, geom FROM regions WHERE fid IN ({placeholders})"
+        for fid_value, blob in conn.execute(query, fids).fetchall():
+            geoms[int(fid_value)] = summarize_geometry(decode_gpkg_blob(bytes(blob)))
+        for fid in fids:
+            if fid not in geoms:
+                raise BlobError(f"rtree id {fid} has no matching regions row")
     return fids, geoms
 
 

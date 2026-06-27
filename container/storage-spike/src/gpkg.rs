@@ -341,13 +341,8 @@ mod tests {
         } else {
             v.extend_from_slice(&srs_id.to_be_bytes());
         }
-        let env = match env_indicator {
-            0 => 0,
-            1 => 32,
-            2 | 3 => 48,
-            4 => 64,
-            _ => 0,
-        };
+        // Reuse the production envelope sizing so the test header cannot drift from it.
+        let env = envelope_len(env_indicator).unwrap_or(0);
         v.extend(std::iter::repeat(0u8).take(env));
         v.extend_from_slice(wkb);
         v
@@ -388,8 +383,7 @@ mod tests {
         put_u32(&mut v, WKB_MULTIPOLYGON, outer_le);
         put_u32(&mut v, parts.len() as u32, outer_le);
         for (part_le, rings) in parts {
-            let rings_ref: Vec<&[Point]> = rings.clone();
-            v.extend_from_slice(&wkb_polygon(*part_le, &rings_ref));
+            v.extend_from_slice(&wkb_polygon(*part_le, rings));
         }
         v
     }

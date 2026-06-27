@@ -171,6 +171,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
 /// file will not change, so it skips the lock and WAL machinery: that is what
 /// lets the engine read from a read-only mount with no sidecar files.
 fn open_readonly(path: &Path) -> rusqlite::Result<Connection> {
+    // Precondition: `path` is a plain ASCII path with no space, `%`, `#`, or `?`, which
+    // holds for the spike's fixed `data/sample.gpkg`. A path with URI-special characters
+    // would need percent-encoding before going into this `file:` URI.
     let uri = format!("file:{}?immutable=1", path.display());
     Connection::open_with_flags(
         &uri,

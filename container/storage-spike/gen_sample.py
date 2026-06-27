@@ -715,8 +715,8 @@ def main():
     print(f"  source: {source_label} ({len(features)} input features)")
 
     rows = emit_rows(features)
-    n_poly = sum(1 for r in rows if r["geom_type"] == WKB_POLYGON)
-    n_multi = sum(1 for r in rows if r["geom_type"] == WKB_MULTIPOLYGON)
+    n_poly = sum(r["geom_type"] == WKB_POLYGON for r in rows)
+    n_multi = len(rows) - n_poly
     print(f"  stored features: {len(rows)} (POLYGON={n_poly}, MULTIPOLYGON={n_multi})")
 
     print("Writing GeoPackage...")
