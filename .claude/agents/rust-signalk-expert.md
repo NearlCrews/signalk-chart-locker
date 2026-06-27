@@ -90,8 +90,9 @@ pinned to one platform or whether the waypoint comparison moved to a tolerance.
   `geo` or `pathfinding`, whose predicates and tie-breaks diverge from the TypeScript and break
   parity. Restrict crates on the hot path to `rusqlite` plus a WKB decoder; port the uniform-grid
   bucket index rather than swapping in `rstar`.
-- Deterministic numerics: FMA contraction and fast-math disabled (`.cargo/config.toml`
-  `-C target-feature=-fma`), expression order preserved in ported kernels, `total_cmp` (not
+- Deterministic numerics: FMA contraction disabled on x86_64 (`.cargo/config.toml`
+  `-C target-feature=-fma`), with aarch64 relying on Rust's default of no FMA contraction and no
+  fast-math; expression order preserved in ported kernels, `total_cmp` (not
   `partial_cmp().unwrap()`) wherever a non-finite float could reach a sort.
 - No panic on external input: parsing and geometry from a real `LocalProvider` or an HTTP
   request must return a decline or an error, never panic. Position and bbox validation belongs at

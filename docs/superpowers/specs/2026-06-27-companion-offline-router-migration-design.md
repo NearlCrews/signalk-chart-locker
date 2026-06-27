@@ -286,7 +286,8 @@ why the provider abstraction exists.
      unattainable: `hypot`, `asinh`, `tan`, and the distance trig differ by ULPs
      across libm implementations and against JS `Math`, and equal-cost A* tie-breaks
      can flip. The port replicates expression order exactly and disables FMA
-     contraction and fast-math so the deterministic integer-grid operations stay
+     contraction on x86_64 (aarch64 performs no FMA contraction or fast-math by
+     default in Rust) so the deterministic integer-grid operations stay
      reproducible. The `deadline` decline is timing dependent across languages and
      CPUs, so the corpus runs with deadlines generous enough that no decline is
      timing-induced, and the deadline path is tested separately with synthetic
@@ -353,7 +354,7 @@ is part of keeping it.
   with the corner-cut rule, RDP simplify, decimation, and the re-check, on synthetic
   fixtures with known-correct paths.
 - The two-axis parity harness from section 8, runnable in CI on amd64 and on the Pi
-  on arm64, with FMA and fast-math disabled.
+  on arm64, with FMA contraction disabled on x86_64 and Rust's default of no FMA contraction and no fast-math on arm64.
 - A cell-versus-ArcGIS validation of the GDAL S-57 prep output for one region before
   building on it.
 - Plugin integration test: the signalk-container runtime guard, `ensureRunning`

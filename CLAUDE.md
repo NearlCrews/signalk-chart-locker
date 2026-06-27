@@ -37,9 +37,9 @@ router, ported to Rust with a fully offline local geodata store.
   with the `bundled` feature plus a pure-Rust WKB decoder; GDAL is confined to the offline prep
   stage of the geodata milestone. The engine is hand-ported, not built on the `geo` or
   `pathfinding` crates, whose predicates and tie-breaks break parity.
-- Deterministic numerics: FMA contraction and fast-math disabled (`container/engine/.cargo/config.toml`),
-  expression order preserved, `total_cmp` not `partial_cmp().unwrap()` on any sort that a
-  non-finite float could reach.
+- Deterministic numerics: FMA contraction disabled on x86_64 (`container/engine/.cargo/config.toml`),
+  with aarch64 relying on Rust's default of no FMA contraction and no fast-math; expression order
+  preserved, `total_cmp` not `partial_cmp().unwrap()` on any sort that a non-finite float could reach.
 - The trust boundary stays in crows-nest: the LLM call, the Signal K reads, the budget and admin
   gate, the depth-authority precedence, and all honesty wording. The container computes geometry
   only and must never make a route read as safer than the data supports.
