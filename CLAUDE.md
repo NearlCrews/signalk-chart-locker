@@ -1,0 +1,75 @@
+# CLAUDE.md
+
+Guidance for Claude Code working in `signalk-binnacle-companion`.
+
+## Working style for this project (standing rules)
+
+- Use caveman **ultra** mode for all responses in this project (terse, abbreviated prose,
+  arrows for causality, code and API names and error strings kept verbatim). Drop caveman only
+  for security warnings, irreversible-action confirmations, and multi-step sequences where
+  compression risks misread.
+- **Always delegate to a cavecrew** subagent (`cavecrew-investigator` to locate code,
+  `cavecrew-builder` for a one-to-two-file edit, `cavecrew-reviewer` to review a diff or file)
+  unless told otherwise. Use a Bash-capable general agent only when the cavecrew genuinely cannot
+  do the job (for example a task that must compile and run `cargo` to verify itself).
+- On-demand Rust review: the `rust-signalk-expert` agent (`.claude/agents/`) knows the engine
+  crate, the parity contract, the no-heavy-native-libs runtime rule, and the Signal K container
+  seam. Invoke it to review or advise on the Rust.
+
+## What this is
+
+A Signal K companion that runs a polyglot container alongside the server to escape the JS/TS
+native-plugin sandbox. It is ONE npm package (the thin Node plugin) plus container build
+artifacts (the Rust crates under `container/`), in one repo. Container lifecycle is delegated to
+the installed `signalk-container` plugin. The first migration target is the crows-nest channel
+router, ported to Rust with a fully offline local geodata store.
+
+## Architecture rules (do not violate)
+
+- One npm package, modular TypeScript under `src/`. The containers are build artifacts, not npm
+  packages. Never split into multiple npm packages or a monorepo.
+- The caller (crows-nest) reaches routing through an in-process bridge
+  `globalThis.__signalk_binnacle_routeOnWater`, never an HTTP call from crows-nest to the plugin.
+- The container is tokenless and Signal K agnostic. Only the in-process plugin talks to it,
+  reached via `signalk-container`'s `resolveContainerAddress` after `ensureRunning` with
+  `signalkAccessiblePorts` (never a manual `ports` or `networkMode`).
+- The runtime image carries no GDAL, GEOS, PROJ, or SpatiaLite. GeoPackage reads use `rusqlite`
+  with the `bundled` feature plus a pure-Rust WKB decoder; GDAL is confined to the offline prep
+  stage of the geodata milestone. The engine is hand-ported, not built on the `geo` or
+  `pathfinding` crates, whose predicates and tie-breaks break parity.
+- Deterministic numerics: FMA contraction and fast-math disabled (`container/engine/.cargo/config.toml`),
+  expression order preserved, `total_cmp` not `partial_cmp().unwrap()` on any sort that a
+  non-finite float could reach.
+- The trust boundary stays in crows-nest: the LLM call, the Signal K reads, the budget and admin
+  gate, the depth-authority precedence, and all honesty wording. The container computes geometry
+  only and must never make a route read as safer than the data supports.
+- Units are SI internally (meters, radians, Kelvin); convert only at a display edge.
+
+## Parity bar (open decision)
+
+The Milestone 2 plan sets a BIT-EXACT parity bar on waypoints (`to_bits()` equality); design spec
+section 8 prescribes a per-coordinate ULP tolerance because libm transcendentals differ across
+platforms. The corpus was generated on aarch64, so bit-exact passes locally but risks a false
+failure on an amd64 CI host. This is an unresolved human decision (plan versus spec); do not flip
+it unilaterally.
+
+## Layout and status
+
+- `src/`, `test/`: the Node plugin (Milestone 1, complete, on `master`).
+- `container/router/`: the Milestone 1 axum service (`/health`, `/regions`, distroless image).
+- `container/storage-spike/`: the Milestone 1.5 offline-GeoPackage-from-Rust proof.
+- `container/engine/`: the Milestone 2 channel-router port and parity corpus (materially complete).
+- `docs/superpowers/specs/`, `docs/superpowers/plans/`, `docs/superpowers/reviews/`: the design
+  spec, the per-milestone plans, and review records.
+
+Milestone 3 (the local geodata pipeline and `LocalProvider`) is gated on an ENC licensing decision.
+Milestone 4 is the crows-nest cutover behind a feature flag with an in-process fallback.
+
+## Build and test
+
+- Plugin: `npm test` (node --test via tsx), `npm run typecheck`, `npm run lint`, `npm run build`.
+- Rust: `cd container/engine && cargo test` (first build is slow on the Pi; allow a long timeout),
+  `cargo clippy --all-targets -- -D warnings`, `cargo build --release`. Likewise in
+  `container/router` and `container/storage-spike`.
+- No `prepare` or `prepack` lifecycle script in `package.json` (it corrupts the App Store
+  install-simulation CI step).
