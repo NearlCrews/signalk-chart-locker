@@ -61,12 +61,18 @@ unchanged; only the boundaries data source changes from admin-0 land to EEZ wate
   navigable water makes the route take the border fallback (`border_fallback: true`), while a
   matching home routes with no fallback. Admin-0 land never covers water, so it never triggers
   this, which is the no-op.
+- Live border region: a store from NOAA cell US3WA1EF (Haro Strait, the US/Canada line) with the
+  Marine Regions US and Canada EEZ. The EEZ partitions the strait: US-side deep points resolve to
+  `USA`, Canada-side to `CAN`. The same US-side Haro Strait route stays in home water with
+  `homeCountryId: USA` (`borderFallback: false`) and is blocked as foreign with
+  `homeCountryId: CAN`, taking the border fallback (`borderFallback: true`). With admin-0 land
+  both homes gave the identical route; the EEZ source makes border-aware work end to end.
 
 ## Consequences
 
 - Prep's `--country-field` defaults to `iso_sov1`, and the README directs the owner to the Marine
   Regions EEZ for `--boundaries`. The flag still allows another source and field if needed.
-- A live border-region routing test (an ENC cell straddling a maritime border, plus both
-  countries' EEZ) remains the final real-world confirmation; the all-US, internal-water SF Bay
-  cannot exercise border-aware. The mechanism and the data shape are both verified above.
+- Border-aware is confirmed end to end on a real maritime border (the Haro Strait test under
+  Verification), so it is ready for the Milestone 4 cutover. The all-US, internal-water SF Bay
+  could not exercise it, which is why the Haro Strait cell was used.
 - Internal-water routes are correctly unaffected by border-aware, since no EEZ covers them.
