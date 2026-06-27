@@ -82,6 +82,11 @@ verified on San Francisco Bay). Remaining: OSM water at scale, multi-cell preced
 one-way leg safety invariant, and broader regions. Milestone 4 is the crows-nest cutover behind
 a feature flag with an in-process fallback.
 
+To resume in a fresh session, start from `docs/superpowers/2026-06-27-m3-handoff.md`: it is the
+single continuation guide (current state, the repo map, build and run and prep commands, the
+remaining work with the plan to follow, the decisions in force, the gotchas, and the boat-only
+tests).
+
 ## Build and test
 
 - Plugin: `npm test` (node --test via tsx), `npm run typecheck`, `npm run lint`, `npm run build`.
