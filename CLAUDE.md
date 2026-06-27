@@ -57,7 +57,7 @@ on both amd64 and arm64.
 
 ## Layout and status
 
-- `src/`, `test/`: the Node plugin (Milestone 1, complete, on `master`).
+- `src/`, `test/`: the Node plugin (Milestone 1, complete, on `main`).
 - `container/router/`: the Milestone 1 axum service (`/health`, `/regions`, distroless image).
 - `container/storage-spike/`: the Milestone 1.5 offline-GeoPackage-from-Rust proof.
 - `container/engine/`: the Milestone 2 channel-router port and parity corpus (materially complete).
