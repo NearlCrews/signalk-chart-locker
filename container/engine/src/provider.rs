@@ -8,30 +8,27 @@ use serde::Deserialize;
 
 use crate::types::{Bbox, ChartedAreas, Provider, RingPolygon, ScaleBand, TileWater};
 
-/// One captured charted-areas call: the band and bbox the router queried, and the result
-/// it returned, or `None` when that band's fetch rejected.
+/// One captured charted-areas call: the band the router queried and the result it
+/// returned, or `None` when that band's fetch rejected. The captured bbox is not modeled
+/// here because the lookup keys on the band; see the `FileProvider` doc for why.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChartedAreasCall {
     band: ScaleBand,
-    bbox: Bbox,
     result: Option<ChartedAreas>,
 }
 
-/// The captured tile-water call: the bbox queried and the result, or `None` when every
-/// tile failed.
+/// The captured tile-water call: the result, or `None` when every tile failed.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TileWaterCall {
-    bbox: Bbox,
     result: Option<TileWater>,
 }
 
-/// The captured foreign-rings call: the bbox queried and the foreign water rings.
+/// The captured foreign-rings call: the foreign water rings the reference returned.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ForeignRingsCall {
-    bbox: Bbox,
     result: Vec<RingPolygon>,
 }
 

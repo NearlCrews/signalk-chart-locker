@@ -5,10 +5,6 @@
 //! port is validated bit-for-bit against the TypeScript reference on a replay corpus.
 //! See `docs/superpowers/plans/2026-06-27-companion-milestone-2-engine-port.md`.
 
-// Scaffold-wide allow while the modules are stubs. Each module removes what it no
-// longer needs as it is implemented, and this is deleted once the port is complete.
-#![allow(unused_variables, dead_code)]
-
 pub mod types;
 pub mod geometry;
 pub mod path_simplify;
