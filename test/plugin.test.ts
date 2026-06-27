@@ -135,16 +135,18 @@ test('partial failure: launched container is stopped even when address resolutio
 })
 
 test('stop-during-in-flight-start: no bridge is installed and the container is stopped', async () => {
-  // resolveContainerAddress blocks on a deferred. stop() is called while the launch is in flight.
-  // When the deferred resolves, startCompanion detects stopRequested and tears down; no bridge is installed.
-  let releaseAddress!: (address: string) => void
-  const addressDeferred = new Promise<string>((resolve) => { releaseAddress = resolve })
+  // resolveContainerAddress blocks until releaseAddress fires. We wait for ensureRunning to complete
+  // (so launched === true) before calling stop(), ensuring a genuine mid-launch race.
+  let releaseAddress!: (addr: string) => void
+  const addressDeferred = new Promise<string>(resolve => { releaseAddress = resolve })
+  let signalEnsured!: () => void
+  const ensuredBarrier = new Promise<void>(resolve => { signalEnsured = resolve })
 
   const record = { ensured: [] as Array<{ name: string; config: ContainerConfig }>, stopped: [] as string[] }
   const manager: ContainerManager = {
     async whenReady () {},
     getRuntime () { return { runtime: 'docker' } },
-    async ensureRunning (name, config) { record.ensured.push({ name, config }) },
+    async ensureRunning (name, config) { record.ensured.push({ name, config }); signalEnsured() },
     resolveContainerAddress () { return addressDeferred },
     async stop (name) { record.stopped.push(name) }
   }
@@ -153,10 +155,23 @@ test('stop-during-in-flight-start: no bridge is installed and the container is s
   const plugin = createPlugin(app as never)
 
   const startResult = plugin.start({}, () => {})
+  await ensuredBarrier            // start is now parked at resolveContainerAddress, launched === true
   const stopResult = plugin.stop()
   releaseAddress('127.0.0.1:8080')
   await Promise.all([startResult, stopResult])
 
   assert.equal(getRouteOnWaterBridge(), undefined)
   assert.ok(record.stopped.includes(ROUTER_CONTAINER_NAME))
+})
+
+test('stop then start again installs the bridge on the second start', async () => {
+  const record = { ensured: [] as Array<{ name: string; config: ContainerConfig }>, stopped: [] as string[] }
+  ;(globalThis as Record<string, unknown>).__signalk_containerManager = fakeManager(record)
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  await plugin.start({}, () => {})
+  await plugin.stop()
+  await plugin.start({}, () => {})
+  assert.ok(getRouteOnWaterBridge() !== undefined)
+  assert.equal(record.ensured.length, 2)
 })

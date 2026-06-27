@@ -71,6 +71,8 @@ export function createPlugin (app: ServerAPI): Plugin {
     // explicit catch: a container-launch rejection surfaces as a plugin error instead of an unhandled rejection.
     // The caught promise is stored so stop() can await it and drain the in-flight launch safely.
     start (config: CompanionConfig) {
+      stopRequested = false
+      launched = false
       startPromise = startCompanion(config).catch((err: unknown) => {
         app.setPluginError(`Startup failed: ${err instanceof Error ? err.message : String(err)}`)
       })

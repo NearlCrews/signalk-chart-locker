@@ -1,6 +1,6 @@
 /** Builds the managed router container config, launches it via the manager, and probes its health endpoint. */
 
-import type { ContainerConfig, ContainerManager } from '../shared/types.js'
+import type { ContainerConfig } from '../shared/types.js'
 
 export const ROUTER_CONTAINER_NAME = 'binnacle-router'
 export const ROUTER_INTERNAL_PORT = 8080
@@ -28,8 +28,6 @@ const ROUTER_RESOURCES = {
 export interface RouterContainerOptions {
   image?: string
   tag?: string
-  /** Owning plugin id, forwarded to ensureRunning so signalk-container attributes the container to this plugin. */
-  pluginId?: string
 }
 
 export function buildRouterConfig (opts: RouterContainerOptions = {}): ContainerConfig {
@@ -41,19 +39,6 @@ export function buildRouterConfig (opts: RouterContainerOptions = {}): Container
     resources: ROUTER_RESOURCES,
     restart: 'unless-stopped'
   }
-}
-
-export async function startRouterContainer (
-  manager: ContainerManager,
-  opts: RouterContainerOptions = {}
-): Promise<string> {
-  const options = opts.pluginId ? { pluginId: opts.pluginId } : undefined
-  await manager.ensureRunning(ROUTER_CONTAINER_NAME, buildRouterConfig(opts), options)
-  const address = await manager.resolveContainerAddress(ROUTER_CONTAINER_NAME, ROUTER_INTERNAL_PORT)
-  if (!address) {
-    throw new Error('The router container address could not be resolved after ensureRunning.')
-  }
-  return address
 }
 
 export type FetchLike = (url: string) => Promise<{ ok: boolean; json(): Promise<unknown> }>
