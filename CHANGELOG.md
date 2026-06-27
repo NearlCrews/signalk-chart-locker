@@ -28,6 +28,13 @@ everything below is unreleased.
   decline on any transport failure rather than throwing or inventing a route. Until the
   local geodata store lands, the provider holds no charted water, so every request declines
   honestly as `no-coverage`.
+- The `LocalProvider` region-store read path under `container/localprovider/`: reads an
+  offline OGC GeoPackage via `rusqlite` (no GDAL or SpatiaLite), answers the engine's
+  `charted_areas`, `tile_water`, and `foreign_rings` queries with R-tree bounding-box
+  lookups, and decodes geometry with a pure-Rust WKB decoder. The router container now
+  selects `LocalProvider` when `BINNACLE_REGION_STORE` names a store path, falls back to
+  `UnavailableProvider` (declines `fetch-failed`) on an open error, and uses `EmptyProvider`
+  (declines `no-coverage`) when no store is configured.
 
 ### Changed
 

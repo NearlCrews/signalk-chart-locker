@@ -66,12 +66,13 @@ on both amd64 and arm64.
 - `container/router/`: the Milestone 1 axum service (`/health`, `/regions`, distroless image).
 - `container/storage-spike/`: the Milestone 1.5 offline-GeoPackage-from-Rust proof.
 - `container/engine/`: the Milestone 2 channel-router port and parity corpus (materially complete).
+- `container/localprovider/`: the Milestone 3A runtime read path: reads an offline OGC GeoPackage
+  via `rusqlite`, answers the engine's provider queries, and is wired into the router via
+  `BINNACLE_REGION_STORE`. The `testutil` feature exposes a `StoreBuilder` for integration tests.
 - `docs/superpowers/specs/`, `docs/superpowers/plans/`, `docs/superpowers/reviews/`: the design
   spec, the per-milestone plans, and review records.
 
-Milestone 3 (the local geodata pipeline and `LocalProvider`) is the next milestone to build. Its
-ENC distribution gate is resolved: Option A, pipeline-only. The companion ships the prep pipeline,
-and the owner downloads NOAA ENC cells per region locally; chart data is never bundled.
+Milestone 3B (the S-57 to GeoPackage prep pipeline) and 3C (data-parity harness) are next.
 Milestone 4 is the crows-nest cutover behind a feature flag with an in-process fallback.
 
 ## Build and test
