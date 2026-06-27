@@ -146,6 +146,9 @@ pub struct ChannelRouteRequest {
     pub max_snap_meters: Option<f64>,
     #[serde(default)]
     pub deadline_ms: Option<f64>,
+    /// The home country for border-aware routing. Absent means no border filter.
+    #[serde(default)]
+    pub home_country_id: Option<String>,
 }
 
 /// The data sources the router consumes, one method per call the TypeScript router

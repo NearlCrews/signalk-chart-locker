@@ -10,6 +10,8 @@ WORKDIR /build
 COPY engine/.cargo/config.toml .cargo/config.toml
 COPY engine/Cargo.toml engine/Cargo.toml
 COPY engine/src engine/src
+COPY localprovider/Cargo.toml localprovider/Cargo.toml
+COPY localprovider/src localprovider/src
 COPY router/Cargo.toml router/Cargo.lock router/
 COPY router/src router/src
 WORKDIR /build/router

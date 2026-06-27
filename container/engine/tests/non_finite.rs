@@ -44,6 +44,7 @@ fn finite_req() -> ChannelRouteRequest {
         border_aware: false,
         max_snap_meters: None,
         deadline_ms: None,
+        home_country_id: None,
     }
 }
 

@@ -1,4 +1,4 @@
-use binnacle_router::app;
+use binnacle_router::app_with_store;
 use std::env;
 
 #[tokio::main]
@@ -8,12 +8,14 @@ async fn main() {
         std::process::exit(healthcheck().await);
     }
 
+    let store_path =
+        std::env::var("BINNACLE_REGION_STORE").ok().map(std::path::PathBuf::from);
     let port = router_port();
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
         .expect("bind router port");
     println!("binnacle-router listening on 0.0.0.0:{port}");
-    axum::serve(listener, app())
+    axum::serve(listener, app_with_store(store_path))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("serve router");

@@ -1,3 +1,4 @@
+use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use binnacle_engine::{
@@ -6,15 +7,31 @@ use binnacle_engine::{
 };
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::path::PathBuf;
+use std::sync::Arc;
 
-/// The HTTP surface of the router container. Milestone 1 exposes liveness and an empty
-/// regions list; `route-on-water` wires the parity-proven engine onto the no-geodata
-/// provider, so it declines honestly until Milestone 3 lands real geodata.
+/// The HTTP surface of the router container with no region store configured: every route
+/// declines no-coverage. Used by tests that do not exercise the geodata read path.
 pub fn app() -> Router {
+    app_with_store(None)
+}
+
+/// The HTTP surface bound to an optional region store.
+///
+/// When `store_path` is `Some`, the route handler opens the store per request with
+/// `LocalProvider`. When it is `None`, the handler falls back to `EmptyProvider` so every
+/// route declines no-coverage, the honest signal for an area with no charted water.
+pub fn app_with_store(store_path: Option<PathBuf>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/regions", get(regions))
         .route("/route-on-water", post(route_on_water))
+        .with_state(RouterState { store_path: Arc::new(store_path) })
+}
+
+#[derive(Clone)]
+struct RouterState {
+    store_path: Arc<Option<PathBuf>>,
 }
 
 async fn health() -> Json<Value> {
@@ -29,8 +46,7 @@ async fn regions() -> Json<Value> {
 /// result: the store is present and was consulted, it simply holds nothing yet. The engine
 /// reads that as `no-coverage`, the honest decline for an area with no charted water.
 /// Returning `None` instead would read as a fetch failure (`fetch-failed`), which would
-/// misreport an empty-but-healthy store as a transient error. Milestone 3 replaces this
-/// with the LocalProvider backed by the offline geodata store.
+/// misreport an empty-but-healthy store as a transient error.
 struct EmptyProvider;
 
 impl Provider for EmptyProvider {
@@ -42,6 +58,22 @@ impl Provider for EmptyProvider {
         Some(TileWater::default())
     }
 
+    fn foreign_rings(&self, _bbox: Bbox) -> Vec<RingPolygon> {
+        Vec::new()
+    }
+}
+
+/// A provider that reports every read as failed. A configured-but-unopenable store routes over
+/// this so the engine declines fetch-failed, the honest signal that the data source broke.
+struct UnavailableProvider;
+
+impl Provider for UnavailableProvider {
+    fn charted_areas(&self, _band: ScaleBand, _bbox: Bbox) -> Option<ChartedAreas> {
+        None
+    }
+    fn tile_water(&self, _bbox: Bbox) -> Option<TileWater> {
+        None
+    }
     fn foreign_rings(&self, _bbox: Bbox) -> Vec<RingPolygon> {
         Vec::new()
     }
@@ -86,17 +118,35 @@ impl From<ChannelRouteResult> for WireRouteResult {
     }
 }
 
-/// Compute a water-following route for a passage. Backed by the no-geodata `EmptyProvider`,
-/// so until Milestone 3 lands real geodata every request declines as `no-coverage`. The
+/// Compute a water-following route for a passage. With a configured region store the engine
+/// routes over real charted water; without one every request declines as `no-coverage`. The
 /// result crosses the wire as the stable [`WireRouteResult`] DTO.
-async fn route_on_water(Json(req): Json<ChannelRouteRequest>) -> Json<WireRouteResult> {
-    let result = route_channel(&EmptyProvider, &ScaleBand::ALL, &req);
+async fn route_on_water(
+    State(state): State<RouterState>,
+    Json(req): Json<ChannelRouteRequest>,
+) -> Json<WireRouteResult> {
+    let result = match state.store_path.as_ref() {
+        Some(path) => {
+            match binnacle_localprovider::LocalProvider::open(path, req.home_country_id.clone()) {
+                Ok(provider) => route_channel(&provider, &ScaleBand::ALL, &req),
+                // A configured store that will not open is a genuine failure, not absent coverage.
+                // UnavailableProvider returns None for both reads so the engine declines fetch-failed.
+                Err(_) => route_channel(&UnavailableProvider, &ScaleBand::ALL, &req),
+            }
+        }
+        // No store configured (the pre-store default): the engine declines no-coverage.
+        None => route_channel(&EmptyProvider, &ScaleBand::ALL, &req),
+    };
     Json(WireRouteResult::from(result))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
 
     /// The success arm carries the waypoints and both boolean flags under their camelCase
     /// wire keys, and omits `reason` entirely.
@@ -123,24 +173,26 @@ mod tests {
     /// panicking, and the wire form is exactly `{"ok":false,"reason":"no-coverage"}`.
     #[tokio::test]
     async fn route_on_water_declines_no_coverage_without_geodata() {
-        let req = ChannelRouteRequest {
-            from: Position { latitude: 37.80, longitude: -122.50 },
-            to: Position { latitude: 37.81, longitude: -122.49 },
-            draft_meters: 2.0,
-            safety_margin_meters: 0.5,
-            standoff_nm: 0.1,
-            corridor: None,
-            bbox_anchors: None,
-            border_aware: false,
-            max_snap_meters: None,
-            deadline_ms: None,
-        };
-
-        let Json(wire) = route_on_water(Json(req)).await;
-
-        assert!(!wire.ok);
-        assert_eq!(wire.reason, Some(ChannelDeclineReason::NoCoverage));
-        let v = serde_json::to_value(&wire).unwrap();
+        let body = serde_json::json!({
+            "from": { "latitude": 37.80, "longitude": -122.50 },
+            "to": { "latitude": 37.81, "longitude": -122.49 },
+            "draftMeters": 2.0,
+            "safetyMarginMeters": 0.5,
+            "standoffNm": 0.1
+        })
+        .to_string();
+        let resp = app()
+            .oneshot(
+                Request::post("/route-on-water")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v, json!({ "ok": false, "reason": "no-coverage" }));
     }
 }

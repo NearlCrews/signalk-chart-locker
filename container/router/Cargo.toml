@@ -17,7 +17,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 binnacle-engine = { path = "../engine" }
+binnacle-localprovider = { path = "../localprovider" }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+binnacle-localprovider = { path = "../localprovider", features = ["testutil"] }
+serde_json = "1"
