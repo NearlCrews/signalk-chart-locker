@@ -146,10 +146,14 @@ def _first_layer(src):
 
 def _ogr_append_plain(src, out_gpkg, table, sql, clip=None):
     update = ["-update", "-append"] if pathlib.Path(out_gpkg).exists() else []
-    # clip is (west, south, east, north): trim source geometry to the region so a global OSM water
-    # or admin-0 source does not flood the store with the whole world. -clipdst is applied in the
-    # target SRS (EPSG:4326), matching the clip coordinates.
-    clip_args = ["-clipdst", str(clip[0]), str(clip[1]), str(clip[2]), str(clip[3])] if clip else []
+    # clip is (west, south, east, north): keep the store regional so a global OSM water or admin-0
+    # source does not write the whole world. -spat uses the source spatial index to skip
+    # non-overlapping features fast, which matters for a multi-GB source. -spat is read in the
+    # source SRS (ogr2ogr rejects -spat_srs alongside -sql), so the OSM water and admin-0 sources
+    # must be EPSG:4326: the recommended osmdata 4326 split product and Natural Earth both are.
+    # -clipdst then trims the kept geometry to the window in the target SRS.
+    bb = [str(clip[0]), str(clip[1]), str(clip[2]), str(clip[3])] if clip else None
+    clip_args = (["-spat", *bb, "-clipdst", *bb] if clip else [])
     run(
         ["ogr2ogr", "-f", "GPKG", out_gpkg, src, "-sql", sql, "-dialect", "OGRSQL",
          "-nln", table, "-nlt", "PROMOTE_TO_MULTI", "-t_srs", "EPSG:4326"]

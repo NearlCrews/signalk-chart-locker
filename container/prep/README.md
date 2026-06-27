@@ -27,8 +27,11 @@ treats `drval1 < 0` as land. The `band` is the cell's usage band, taken from the
 1. Download the ENC cells for your region from the NOAA ENC download
    (`https://www.charts.noaa.gov/ENCs/<CELL>.zip`) and unzip them. Each zip contains an
    `ENC_ROOT/<CELL>/<CELL>.000` file and its update files.
-2. Optionally stage an OSM water extract (for example the osmdata.openstreetmap.de split
-   product, clipped to your region) and an admin-0 boundaries source.
+2. Optionally stage an OSM water source and an admin-0 boundaries source, both in EPSG:4326.
+   For OSM water use the osmdata.openstreetmap.de `water-polygons-split-4326` product: it
+   includes the coastline-derived ocean and bays, which a raw `natural=water` query does not.
+   Prep clips both sources to the ENC cell extent automatically (a `-spat` index filter plus
+   `-clipdst`), so a global source is fine and stays fast.
 3. Build the prep image once:
 
    ```
