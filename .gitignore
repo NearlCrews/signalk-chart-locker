@@ -21,3 +21,6 @@ container/storage-spike/data/
 
 # OS cruft
 .DS_Store
+
+# Subagent-driven-development scratch (briefs, reports, diffs, ledger)
+.superpowers/
