@@ -41,6 +41,8 @@ export function createPlugin (app: ServerAPI): Plugin {
     async stop () {
       if (!started) return
       removeRouteOnWaterBridge()
+      // Defensive: the signalk-container manager could have become unavailable between start and stop
+      // (for example, if the user disabled signalk-container while the companion was running).
       const manager = getContainerManager()
       if (manager) await manager.stop(ROUTER_CONTAINER_NAME)
       started = false

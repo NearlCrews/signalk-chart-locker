@@ -80,3 +80,12 @@ test('stop removes the bridge and stops the container', async () => {
   assert.equal(getRouteOnWaterBridge(), undefined)
   assert.deepEqual(record.stopped, [ROUTER_CONTAINER_NAME])
 })
+
+test('stop does not stop the container when start never succeeded', async () => {
+  const record = { ensured: [] as Array<{ name: string; config: ContainerConfig }>, stopped: [] as string[] }
+  ;(globalThis as Record<string, unknown>).__signalk_containerManager = fakeManager(record)
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  await plugin.stop()
+  assert.deepEqual(record.stopped, [])
+})
