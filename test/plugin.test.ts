@@ -100,11 +100,63 @@ test('stop removes the bridge and stops the container', async () => {
   assert.deepEqual(record.stopped, [ROUTER_CONTAINER_NAME])
 })
 
-test('stop does not stop the container when start never succeeded', async () => {
+test('stop with no prior start and a manager present is a clean no-op', async () => {
   const record = { ensured: [] as Array<{ name: string; config: ContainerConfig }>, stopped: [] as string[] }
   ;(globalThis as Record<string, unknown>).__signalk_containerManager = fakeManager(record)
   const app = fakeApp()
   const plugin = createPlugin(app as never)
-  await plugin.stop()
+  await assert.doesNotReject(async () => { await plugin.stop() })
   assert.deepEqual(record.stopped, [])
+})
+
+test('partial failure: launched container is stopped even when address resolution fails', async () => {
+  // ensureRunning resolves (container is now running) but resolveContainerAddress returns null,
+  // causing startCompanion to throw. A subsequent stop() must still stop the container.
+  const record = { ensured: [] as Array<{ name: string; config: ContainerConfig }>, stopped: [] as string[] }
+  const manager: ContainerManager = {
+    async whenReady () {},
+    getRuntime () { return { runtime: 'docker' } },
+    async ensureRunning (name, config) { record.ensured.push({ name, config }) },
+    async resolveContainerAddress () { return null },
+    async stop (name) { record.stopped.push(name) }
+  }
+  ;(globalThis as Record<string, unknown>).__signalk_containerManager = manager
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+
+  // start() always resolves (error is caught inside); the plugin error is set internally.
+  await plugin.start({}, () => {})
+  assert.equal(app.errors.length, 1)
+  assert.equal(getRouteOnWaterBridge(), undefined)
+
+  await plugin.stop()
+  assert.deepEqual(record.stopped, [ROUTER_CONTAINER_NAME])
+  assert.equal(getRouteOnWaterBridge(), undefined)
+})
+
+test('stop-during-in-flight-start: no bridge is installed and the container is stopped', async () => {
+  // resolveContainerAddress blocks on a deferred. stop() is called while the launch is in flight.
+  // When the deferred resolves, startCompanion detects stopRequested and tears down; no bridge is installed.
+  let releaseAddress!: (address: string) => void
+  const addressDeferred = new Promise<string>((resolve) => { releaseAddress = resolve })
+
+  const record = { ensured: [] as Array<{ name: string; config: ContainerConfig }>, stopped: [] as string[] }
+  const manager: ContainerManager = {
+    async whenReady () {},
+    getRuntime () { return { runtime: 'docker' } },
+    async ensureRunning (name, config) { record.ensured.push({ name, config }) },
+    resolveContainerAddress () { return addressDeferred },
+    async stop (name) { record.stopped.push(name) }
+  }
+  ;(globalThis as Record<string, unknown>).__signalk_containerManager = manager
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+
+  const startResult = plugin.start({}, () => {})
+  const stopResult = plugin.stop()
+  releaseAddress('127.0.0.1:8080')
+  await Promise.all([startResult, stopResult])
+
+  assert.equal(getRouteOnWaterBridge(), undefined)
+  assert.ok(record.stopped.includes(ROUTER_CONTAINER_NAME))
 })

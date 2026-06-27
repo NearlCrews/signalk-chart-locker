@@ -58,7 +58,7 @@ export async function startRouterContainer (
 
 export type FetchLike = (url: string) => Promise<{ ok: boolean; json(): Promise<unknown> }>
 
-export async function probeRouterHealth (address: string, fetchFn: FetchLike = fetch as unknown as FetchLike): Promise<boolean> {
+export async function probeRouterHealth (address: string, fetchFn: FetchLike = (url: string) => fetch(url)): Promise<boolean> {
   try {
     const response = await fetchFn(`http://${address}/health`)
     if (!response.ok) return false
