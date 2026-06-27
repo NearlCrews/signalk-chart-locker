@@ -117,17 +117,22 @@ def _ogr_append(src, out_gpkg, table, sql):
     )
 
 
-def ingest_boundaries(src, out_gpkg, country_field):
-    """Ingest admin-0 polygons into boundaries, mapping country_field to country_id."""
+def ingest_boundaries(src, out_gpkg, country_field, clip=None):
+    """Ingest admin-0 polygons into boundaries, mapping country_field to country_id, clipped to clip."""
     _ogr_append_plain(
         src, out_gpkg, "boundaries",
-        f'SELECT "{country_field}" AS country_id FROM "{_first_layer(src)}"',
+        f'SELECT "{country_field}" AS country_id FROM "{_first_layer(src)}" WHERE {POLYGON_ONLY}',
+        clip,
     )
 
 
-def ingest_osm_water(src, out_gpkg):
-    """Ingest OSM water polygons into osm_water."""
-    _ogr_append_plain(src, out_gpkg, "osm_water", f'SELECT 1 AS keep FROM "{_first_layer(src)}"')
+def ingest_osm_water(src, out_gpkg, clip=None):
+    """Ingest OSM water polygons into osm_water, clipped to clip."""
+    _ogr_append_plain(
+        src, out_gpkg, "osm_water",
+        f'SELECT 1 AS keep FROM "{_first_layer(src)}" WHERE {POLYGON_ONLY}',
+        clip,
+    )
 
 
 def _first_layer(src):
@@ -139,12 +144,17 @@ def _first_layer(src):
     raise RuntimeError(f"no layers found in {src}")
 
 
-def _ogr_append_plain(src, out_gpkg, table, sql):
+def _ogr_append_plain(src, out_gpkg, table, sql, clip=None):
     update = ["-update", "-append"] if pathlib.Path(out_gpkg).exists() else []
+    # clip is (west, south, east, north): trim source geometry to the region so a global OSM water
+    # or admin-0 source does not flood the store with the whole world. -clipdst is applied in the
+    # target SRS (EPSG:4326), matching the clip coordinates.
+    clip_args = ["-clipdst", str(clip[0]), str(clip[1]), str(clip[2]), str(clip[3])] if clip else []
     run(
         ["ogr2ogr", "-f", "GPKG", out_gpkg, src, "-sql", sql, "-dialect", "OGRSQL",
-         "-nln", table, "-nlt", "PROMOTE_TO_MULTI", "-t_srs", "EPSG:4326",
-         "-lco", "GEOMETRY_NAME=geom", "-lco", "FID=fid", "-lco", "SPATIAL_INDEX=YES"]
+         "-nln", table, "-nlt", "PROMOTE_TO_MULTI", "-t_srs", "EPSG:4326"]
+        + clip_args
+        + ["-lco", "GEOMETRY_NAME=geom", "-lco", "FID=fid", "-lco", "SPATIAL_INDEX=YES"]
         + update,
     )
 
@@ -167,6 +177,34 @@ def ensure_schema(out_gpkg):
     )
     conn.commit()
     conn.close()
+
+
+# Margin in degrees added around the ENC extent when clipping OSM water and boundaries, wider
+# than the router's snap padding (about 0.033 deg) so water and borders near a cell edge survive.
+CLIP_MARGIN_DEG = 0.1
+
+
+def enc_region_bbox(out_gpkg, margin_deg=CLIP_MARGIN_DEG):
+    """The ENC extent (depth plus land R-trees) padded by margin_deg, as (west, south, east, north),
+    or None when the store charted nothing to bound."""
+    conn = sqlite3.connect(out_gpkg)
+    extents = []
+    for table in ("enc_depth_areas", "enc_land_areas"):
+        rtree = f"rtree_{table}_geom"
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (rtree,)).fetchone():
+            continue
+        row = conn.execute(f"SELECT min(minx), min(miny), max(maxx), max(maxy) FROM {rtree}").fetchone()
+        if row and row[0] is not None:
+            extents.append(row)
+    conn.close()
+    if not extents:
+        return None
+    return (
+        min(r[0] for r in extents) - margin_deg,
+        min(r[1] for r in extents) - margin_deg,
+        max(r[2] for r in extents) + margin_deg,
+        max(r[3] for r in extents) + margin_deg,
+    )
 
 
 def report(out_gpkg):
@@ -201,10 +239,15 @@ def main():
         print(f"  {cell.name} -> band {band_for_cell(cell)}")
         ingest_cell(str(cell), str(out))
 
+    # Clip OSM water and boundaries to the ENC extent so a regional or global source does not
+    # write the whole world into this region's store.
+    region = enc_region_bbox(str(out))
+    if region:
+        print(f"clipping OSM and boundaries to ENC extent + {CLIP_MARGIN_DEG} deg: {region}")
     if args.boundaries:
-        ingest_boundaries(args.boundaries, str(out), args.country_field)
+        ingest_boundaries(args.boundaries, str(out), args.country_field, region)
     if args.osm:
-        ingest_osm_water(args.osm, str(out))
+        ingest_osm_water(args.osm, str(out), region)
 
     ensure_schema(str(out))
     print("store contents:")
