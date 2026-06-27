@@ -71,11 +71,11 @@ the Node plugin test harness for the lifecycle slice.
 
 ## Task 3: The one-way safety invariant
 
-**Files:** Extend `container/engine/tests/data_parity.rs`.
+**Files:** Extend `container/prep/data_parity.py` (the `--legs` mode), consistent with Tasks 1 and 2 being folded into that one online-sampling script rather than a separate Rust harness. The invariant compares the two data sources along legs, not the engine internals: the engine's navigability check is already covered by the Milestone 2 parity corpus, so the load-bearing question here is purely whether the local data ever reads a leg safer than the online data.
 
-- [ ] **Step 1: Write the test.** For a set of legs over the sample region, run the leg-safety classification (the engine navigability check, which the engine already computes from `charted_areas` and `tile_water`) under `LocalProvider` and compare to the captured online leg verdicts. Assert the one-way invariant: every leg the online path flagged unsafe is also flagged unsafe locally, OR the divergence carries an explicit recorded reason. A leg that the online path flagged unsafe and the local path silently passes is a hard failure.
-- [ ] **Step 2: Run it**, triage divergences, fix the data or reader cause for any unsafe-to-safe flip.
-- [ ] **Step 3: Commit.** `test(parity): enforce the one-way local-versus-online safety invariant`
+- [x] **Step 1: Write the harness.** Done in `container/prep/data_parity.py` (`--legs N --leg-samples K`). It sweeps deterministic legs across the region (horizontal, vertical, and the two diagonals), samples points along each, and applies the one-way invariant per point: a hazard is an online-covered point not deep enough for the contour (drying included), and the forbidden flip is a hazard the local store covers and calls deep enough. A hazard outside local coverage is reported as a gap (the engine declines no-coverage), not a failure. The pure helpers (`classify`, `leg_points`, `generate_legs`) are unit-checked offline.
+- [ ] **Step 2: Run it** against a staged region store and live NOAA, triage divergences, and fix the data or reader cause for any unsafe-to-safe flip. PENDING staged data.
+- [ ] **Step 3: Commit** the run result. `test(parity): enforce the one-way local-versus-online safety invariant`
 
 ## Task 4: The plugin lifecycle and fallback integration slice
 
