@@ -213,4 +213,36 @@ mod tests {
         // The other band's row is excluded.
         let _ = band_str(ScaleBand::Harbour);
     }
+
+    #[test]
+    fn tile_water_returns_osm_water_in_bbox_and_empty_some_outside() {
+        let square: &[[f64; 2]] = &[[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0], [0.0, 0.0]];
+        let file = StoreBuilder::new().water(&[square]).build();
+        let p = LocalProvider::open(file.path(), None).unwrap();
+
+        let inside = p.tile_water(Bbox { north: 1.0, south: 0.5, east: 1.0, west: 0.5 }).unwrap();
+        assert_eq!(inside.water.len(), 1);
+        assert_eq!(inside.water[0].rings[0][0], [0.0, 0.0]);
+
+        let outside = p.tile_water(Bbox { north: 9.0, south: 8.0, east: 9.0, west: 8.0 }).unwrap();
+        assert!(outside.water.is_empty()); // present-but-empty, still Some
+    }
+
+    #[test]
+    fn foreign_rings_excludes_the_home_country_and_is_empty_without_one() {
+        let us: &[[f64; 2]] = &[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]];
+        let mx: &[[f64; 2]] = &[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]];
+        let file = StoreBuilder::new()
+            .boundary("US", &[us])
+            .boundary("MX", &[mx])
+            .build();
+        let bbox = Bbox { north: 1.0, south: 0.0, east: 1.0, west: 0.0 };
+
+        let home_us = LocalProvider::open(file.path(), Some("US".to_string())).unwrap();
+        let foreign = home_us.foreign_rings(bbox);
+        assert_eq!(foreign.len(), 1); // only MX is foreign
+
+        let no_home = LocalProvider::open(file.path(), None).unwrap();
+        assert!(no_home.foreign_rings(bbox).is_empty()); // border-aware off
+    }
 }
