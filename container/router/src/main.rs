@@ -13,7 +13,24 @@ async fn main() {
         .await
         .expect("bind router port");
     println!("binnacle-router listening on 0.0.0.0:{port}");
-    axum::serve(listener, app()).await.expect("serve router");
+    axum::serve(listener, app())
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("serve router");
+}
+
+/// Resolves when the process receives SIGTERM or SIGINT, so the container stops promptly on
+/// `podman stop` instead of ignoring the signal, waiting out the stop timeout, and being
+/// SIGKILLed. The distroless runtime has no init to forward signals, so the binary handles
+/// them directly.
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut terminate = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+    let mut interrupt = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+    tokio::select! {
+        _ = terminate.recv() => {},
+        _ = interrupt.recv() => {},
+    }
 }
 
 fn router_port() -> u16 {

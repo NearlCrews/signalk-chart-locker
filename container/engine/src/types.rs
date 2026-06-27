@@ -40,6 +40,19 @@ pub enum ScaleBand {
     Berthing,
 }
 
+impl ScaleBand {
+    /// The six NOAA ENC Direct usage bands in canonical coarse-to-fine order, overview through
+    /// berthing. A caller routing over the full chart set queries the provider in this order.
+    pub const ALL: [ScaleBand; 6] = [
+        ScaleBand::Overview,
+        ScaleBand::General,
+        ScaleBand::Coastal,
+        ScaleBand::Approach,
+        ScaleBand::Harbour,
+        ScaleBand::Berthing,
+    ];
+}
+
 /// The depth attributes of an ENC depth area. The router reads only `shallow_meters`
 /// (DRVAL1); a negative value is a drying height and is treated as land.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

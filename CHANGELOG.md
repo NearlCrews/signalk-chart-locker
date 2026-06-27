@@ -21,6 +21,13 @@ everything below is unreleased.
 - The routing engine under `container/engine`: a Rust hand-port of the crows-nest channel
   router (geometry, path simplify, A*, the navigable grid, and the orchestrator), proven
   bit-for-bit against the TypeScript reference on a 17-case replay corpus.
+- The `POST /route-on-water` endpoint on the router container: it deserializes a channel
+  route request, runs the routing engine over the data provider, and returns the engine's
+  route or decline as a stable wire result. The in-process bridge now forwards the caller's
+  request to this endpoint, parses the result, and falls back to a `router-unavailable`
+  decline on any transport failure rather than throwing or inventing a route. Until the
+  local geodata store lands, the provider holds no charted water, so every request declines
+  honestly as `no-coverage`.
 
 ### Changed
 

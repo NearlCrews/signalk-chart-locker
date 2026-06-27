@@ -4,7 +4,7 @@ import type { Plugin, ServerAPI } from '@signalk/server-api'
 import { PLUGIN_ID, PLUGIN_NAME, PLUGIN_DESCRIPTION } from '../shared/plugin-id.js'
 import { requireContainerManager, getContainerManager, ensureRuntimeReady } from '../runtime/container-manager.js'
 import { ROUTER_CONTAINER_NAME, ROUTER_INTERNAL_PORT, buildRouterConfig, probeRouterHealth } from '../runtime/router-container.js'
-import { installRouteOnWaterBridge, removeRouteOnWaterBridge, createSkeletonBridge } from '../bridge/route-on-water-bridge.js'
+import { installRouteOnWaterBridge, removeRouteOnWaterBridge, createRouterBridge } from '../bridge/route-on-water-bridge.js'
 
 interface CompanionConfig {
   imageTag?: string
@@ -33,7 +33,7 @@ export function createPlugin (app: ServerAPI): Plugin {
       throw new Error('The router container address could not be resolved after ensureRunning.')
     }
 
-    installRouteOnWaterBridge(createSkeletonBridge(address, probeRouterHealth))
+    installRouteOnWaterBridge(createRouterBridge(address, probeRouterHealth))
     app.setPluginStatus(`Router container running and reachable at ${address}.`)
   }
 
