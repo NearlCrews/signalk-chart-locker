@@ -39,7 +39,7 @@ struct Expected {
 /// `str::parse`, which is correctly rounded.
 fn number_after(s: &str, key: &str) -> f64 {
     let at = s.find(key).unwrap_or_else(|| panic!("missing key {key}"));
-    let colon = s[at..].find(':').unwrap() + at + 1;
+    let colon = s[at..].find(':').unwrap_or_else(|| panic!("missing ':' after key {key}")) + at + 1;
     s[colon..]
         .trim_start()
         .chars()
@@ -61,8 +61,8 @@ fn extract_waypoints(raw: &str) -> Vec<Position> {
         Some(i) => i,
         None => return Vec::new(),
     };
-    let open = key + raw[key..].find('[').unwrap();
-    let close = open + raw[open..].find(']').unwrap();
+    let open = key + raw[key..].find('[').expect("waypoints array has no opening bracket");
+    let close = open + raw[open..].find(']').expect("waypoints array has no closing bracket");
     let interior = &raw[open + 1..close];
     let mut out = Vec::new();
     for piece in interior.split('}') {

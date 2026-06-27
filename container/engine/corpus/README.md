@@ -42,8 +42,12 @@ Every provider call the run made:
   `null` means the router never made that call: the antimeridian case declines
   before any fetch, and only the border cases call `foreignRings`.
 - Every `bbox` carries the exact f64 the router passed; it is not rounded. The
-  engine computes the identical bbox from the same request, so a FileProvider can
-  key on the exact value.
+  engine computes the same bbox from the same request, but its `route_bbox`
+  projection can differ from the V8 reference by one or two ulp on some inputs,
+  because the projection transcendentals are not correctly rounded across math
+  libraries. So the FileProvider keys charted areas on the band, not on the exact
+  bbox, and asserts the engine's bbox matches the captured one within a small ulp
+  tolerance, so a real `route_bbox` divergence is still caught.
 - ENC area polygons carry the raw `properties` bag the TypeScript query returns;
   the engine reads only `rings` and `depthRange.shallowMeters` and ignores it.
 

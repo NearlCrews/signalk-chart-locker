@@ -22,6 +22,8 @@ pub const EARTH_RADIUS_METERS: f64 = 6_371_000.0;
 const EARTH_RADIUS_KM: f64 = 6371.0;
 /// Meters per degree of latitude, and of longitude at the equator.
 pub const METERS_PER_DEGREE: f64 = 111_320.0;
+/// Meters in one international nautical mile, exact by definition.
+pub(crate) const METERS_PER_NAUTICAL_MILE: f64 = 1852.0;
 
 /// Compass bearing from a center toward its north-west corner, degrees.
 const NW_BEARING_DEGREES: f64 = -45.0;
@@ -313,7 +315,7 @@ fn position_to_bbox(position: Position, distance_meters: f64) -> Bbox {
 
 /// The smallest bounding box that encloses both inputs. Panics on a non-finite
 /// edge, mirroring the TypeScript throw.
-fn union_bbox(a: Bbox, b: Bbox) -> Bbox {
+pub(crate) fn union_bbox(a: Bbox, b: Bbox) -> Bbox {
     if !a.north.is_finite()
         || !a.south.is_finite()
         || !a.east.is_finite()
@@ -383,40 +385,38 @@ mod tests {
 
     #[test]
     fn point_in_rings_is_true_inside_and_false_outside_the_ring() {
-        assert_eq!(point_in_rings(0.0, 0.0, &square()), true);
-        assert_eq!(point_in_rings(2.0, 2.0, &square()), false);
+        assert!(point_in_rings(0.0, 0.0, &square()));
+        assert!(!point_in_rings(2.0, 2.0, &square()));
     }
 
     #[test]
     fn point_in_rings_treats_the_interior_of_a_hole_as_outside_the_polygon() {
         // Inside the hole is outside the polygon by the even-odd rule.
-        assert_eq!(point_in_rings(0.0, 0.0, &square_with_hole()), false);
+        assert!(!point_in_rings(0.0, 0.0, &square_with_hole()));
         // The solid band between the outer ring and the hole is inside the polygon.
-        assert_eq!(point_in_rings(0.75, 0.0, &square_with_hole()), true);
+        assert!(point_in_rings(0.75, 0.0, &square_with_hole()));
     }
 
     #[test]
     fn segments_cross_detects_a_proper_crossing_and_rejects_a_non_crossing_pair() {
-        assert_eq!(
-            segments_cross([-1.0, 0.0], [1.0, 0.0], [0.0, -1.0], [0.0, 1.0]),
-            true
-        );
-        assert_eq!(
-            segments_cross([-1.0, 0.0], [1.0, 0.0], [-1.0, 1.0], [1.0, 1.0]),
-            false
-        );
+        assert!(segments_cross(
+            [-1.0, 0.0],
+            [1.0, 0.0],
+            [0.0, -1.0],
+            [0.0, 1.0]
+        ));
+        assert!(!segments_cross(
+            [-1.0, 0.0],
+            [1.0, 0.0],
+            [-1.0, 1.0],
+            [1.0, 1.0]
+        ));
     }
 
     #[test]
     fn segment_crosses_rings_is_true_when_a_segment_cuts_a_ring_edge() {
-        assert_eq!(
-            segment_crosses_rings([-2.0, 0.0], [2.0, 0.0], &square()),
-            true
-        );
-        assert_eq!(
-            segment_crosses_rings([2.0, 2.0], [3.0, 3.0], &square()),
-            false
-        );
+        assert!(segment_crosses_rings([-2.0, 0.0], [2.0, 0.0], &square()));
+        assert!(!segment_crosses_rings([2.0, 2.0], [3.0, 3.0], &square()));
     }
 
     // The cases below cover the primitives the leg-geometry test file does not

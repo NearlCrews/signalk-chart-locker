@@ -13,7 +13,8 @@
 //! and an empty slice for them.
 
 use crate::astar::AStarGrid;
-use crate::geometry::{meters_per_degree_lon, METERS_PER_DEGREE};
+use crate::clock::{now_ms, over_deadline};
+use crate::geometry::{meters_per_degree_lon, METERS_PER_DEGREE, METERS_PER_NAUTICAL_MILE};
 use crate::types::{Bbox, ChartedAreas, Position, Ring, RingPolygon, TileWater};
 
 /// Standoff cost weight: the step-cost multiplier at zero clearance, ramping to 0
@@ -28,10 +29,6 @@ const MAX_CELLS: f64 = 250_000.0;
 const MAX_CELL_METERS: f64 = 250.0;
 /// Check the deadline this often during the standoff BFS.
 const DEADLINE_CHECK_CELLS: usize = 8192;
-/// Meters in one international nautical mile, exact by definition. Used to fold the
-/// channel-router.ts `standoff_nm * METERS_PER_NAUTICAL_MILE` conversion into this
-/// crate, since `NavGridParams` carries the standoff in nautical miles.
-const METERS_PER_NAUTICAL_MILE: f64 = 1852.0;
 /// Optimize-corridor half-width: channel-router.ts's `CORRIDOR_HALF_WIDTH_METERS`
 /// (one nautical mile) folded in here, since `NavGridParams` carries only the
 /// polyline and not the half-width the TypeScript `buildNavGrid` receives.
@@ -56,8 +53,9 @@ pub struct NavGridParams<'a> {
     pub bands: &'a [ChartedAreas],
     pub tile_water: Option<&'a TileWater>,
     /// OSM land blockers (islands mapped as their own feature, explicit land). They
-    /// block exactly like an ENC land area. The router passes an empty slice today;
-    /// the field exists so the port carries the `nav-grid.ts` osmLand behavior.
+    /// block exactly like an ENC land area. The router currently passes an empty slice;
+    /// the field exists so the port carries the `nav-grid.ts` osmLand behavior, and a
+    /// later milestone wires up the OSM land layer here.
     pub osm_land: &'a [RingPolygon],
     pub foreign_rings: &'a [RingPolygon],
     pub draft_meters: f64,
@@ -178,20 +176,6 @@ impl GridTransform {
     }
 }
 
-/// Milliseconds since the Unix epoch, the `Date.now()` equivalent. The only
-/// nondeterministic input; with `deadline_ms` set to `None` it is never read.
-fn now_ms() -> f64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as f64)
-        .unwrap_or(0.0)
-}
-
-/// True when a deadline is set and the wall clock has passed it.
-fn over_deadline(deadline_ms: Option<f64>) -> bool {
-    matches!(deadline_ms, Some(d) if now_ms() > d)
-}
 
 /// A safe all-blocked 1x1 grid for the decline paths (degenerate bbox, too-coarse,
 /// or deadline). Its single cell center is the bbox center, and `cell_of` returns
@@ -605,7 +589,10 @@ fn fill_polygon_cells(
             }
             xs.push(x0 + ((y - y0) / (y1 - y0)) * (x1 - x0));
         }
-        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // total_cmp gives the same ascending order as partial_cmp for the finite
+        // coordinates the rasterizer produces, and is total, so a stray non-finite
+        // vertex sorts deterministically instead of panicking.
+        xs.sort_by(|a, b| a.total_cmp(b));
         // Fill the columns whose cell CENTER (col + 0.5) falls inside each crossing
         // pair, hence the -0.5 shift: ceil for the left edge, floor for the right.
         let base = (row as usize) * cols;

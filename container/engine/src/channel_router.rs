@@ -9,19 +9,20 @@
 //! replay corpus an exact parity oracle.
 
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::astar::{find_path, AStarGrid, PathStatus};
-use crate::geometry::{bounds_of_rings, distance_meters, point_in_rings, route_bbox, sample_rhumb_leg};
+use crate::clock::{now_ms, over_deadline};
+use crate::geometry::{
+    bounds_of_rings, distance_meters, point_in_rings, route_bbox, sample_rhumb_leg, union_bbox,
+    METERS_PER_NAUTICAL_MILE,
+};
 use crate::nav_grid::{build_nav_grid, resolve_grid_size, NavGrid, NavGridParams, ORTHO_NEIGHBORS};
 use crate::path_simplify::simplify_path;
 use crate::types::{
-    Bbox, ChannelDeclineReason, ChannelRouteRequest, ChannelRouteResult, ChartedAreas,
-    EncAreaPolygon, Position, Provider, RingPolygon, Rings, ScaleBand, TileWater,
+    Bbox, ChannelDeclineReason, ChannelRouteRequest, ChannelRouteResult, ChartedAreas, Position,
+    Provider, RingPolygon, Rings, ScaleBand, TileWater,
 };
 
-/// Meters in one international nautical mile, exact by definition.
-const METERS_PER_NAUTICAL_MILE: f64 = 1852.0;
 /// Default cap an endpoint may be snapped to navigable water: two nautical miles, so a
 /// near-shore waypoint can reach the navigable channel a mile or two out.
 const DEFAULT_MAX_SNAP_METERS: f64 = 2.0 * METERS_PER_NAUTICAL_MILE;
@@ -39,16 +40,6 @@ const SAMPLE_CAP_METERS: f64 = 30.0;
 /// route failed. Only consulted when a deadline is set, which the corpus never does.
 const ROUTER_FALLBACK_MIN_MS: f64 = 2000.0;
 
-/// Milliseconds since the Unix epoch, the `Date.now()` equivalent. Read only on the
-/// deadline branches; with `deadline_ms` set to `None` (every corpus case) it never
-/// runs, so the router stays a pure function of its inputs.
-fn now_ms() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as f64)
-        .unwrap_or(0.0)
-}
-
 /// Compute a water-following route. With no deadline this is a pure function of the
 /// request and the provider responses, which is what makes the replay corpus an
 /// exact parity oracle. `bands` lists the usage bands to query, finest first.
@@ -64,6 +55,14 @@ pub fn route_channel(
     } else {
         vec![req.from, req.to]
     };
+    // route_bbox has no box to seed from an empty anchor list, and the TypeScript
+    // reference throws in that case. Decline cleanly instead of panicking. No corpus case
+    // exercises this, so the proven parity is unaffected.
+    if anchors.is_empty() {
+        return ChannelRouteResult::Decline {
+            reason: ChannelDeclineReason::NoCoverage,
+        };
+    }
     let bbox = route_bbox(&anchors, BBOX_PAD_METERS);
     // Decline a degenerate, cross-antimeridian, or too-large-to-resolve bbox BEFORE any
     // fetch, using the grid's own size resolution so the pre-fetch decline matches what
@@ -76,53 +75,38 @@ pub fn route_channel(
 
     // Fetch the ENC bands and the tile water. A band returns None when its fetch
     // rejected; the ENC view is "absent" only when every queried band rejected. Tile
-    // water is absent when every tile failed. Both absent is fetch-failed.
-    let mut enc_bands: Vec<ChartedAreas> = Vec::new();
+    // water is absent when every tile failed. Both absent is fetch-failed. `bands_list`
+    // is empty exactly when every band rejected, which is the `encBands ?? []` list
+    // either way.
+    let mut bands_list: Vec<ChartedAreas> = Vec::new();
     for &band in bands {
         if let Some(areas) = provider.charted_areas(band, bbox) {
-            enc_bands.push(areas);
+            bands_list.push(areas);
         }
     }
-    let enc_present = !enc_bands.is_empty();
+    let enc_present = !bands_list.is_empty();
     let tile = provider.tile_water(bbox);
     if !enc_present && tile.is_none() {
         return ChannelRouteResult::Decline {
             reason: ChannelDeclineReason::FetchFailed,
         };
     }
-    // `encBands ?? []`: an absent ENC view becomes no bands. `enc_bands` is already empty
-    // exactly when every band rejected, so it is the right list either way.
-    let bands_list = enc_bands;
 
-    // A flattened view of all bands for the land re-check and the tile-water-used test;
-    // the grid itself takes the per-band list so a finer band wins per cell. One pass
-    // builds both flattened lists.
-    let mut enc_depth: Vec<EncAreaPolygon> = Vec::new();
-    let mut enc_land: Vec<EncAreaPolygon> = Vec::new();
-    for band in &bands_list {
-        for area in &band.depth_areas {
-            enc_depth.push(area.clone());
-        }
-        for area in &band.land_areas {
-            enc_land.push(area.clone());
-        }
-    }
-    let enc = ChartedAreas {
-        depth_areas: enc_depth,
-        land_areas: enc_land,
-    };
     let water: TileWater = tile.unwrap_or_default();
-    if enc.depth_areas.is_empty() && water.water.is_empty() {
+    // No coverage when no band charts a depth area and no tile water covers the window.
+    let has_depth = bands_list.iter().any(|b| !b.depth_areas.is_empty());
+    if !has_depth && water.water.is_empty() {
         return ChannelRouteResult::Decline {
             reason: ChannelDeclineReason::NoCoverage,
         };
     }
 
     // One bbox index over the route's physical water (charted areas plus tile water),
-    // shared by both attempts. The foreign block is jurisdictional and lives only in the
-    // grid, so the water re-check is identical for the in-country attempt and the
-    // unconstrained fallback.
-    let index = build_water_index(&enc, &water);
+    // shared by both attempts. It reads the per-band charted areas directly, in band
+    // order, so a finer band's polygons precede a coarser band's, matching the reference.
+    // The foreign block is jurisdictional and lives only in the grid, so the water
+    // re-check is identical for the in-country attempt and the unconstrained fallback.
+    let index = build_water_index(&bands_list, &water);
 
     // Build the grid and route across it, optionally blocking foreign water. A closure so
     // the border fallback can run it again without the block, reusing the fetched data.
@@ -217,12 +201,13 @@ pub fn route_channel(
         }
         let mut route_cells: Vec<(usize, usize)> = vec![cells[kept_idx[0]]];
         for k in 1..kept_idx.len() {
-            if let Some(d) = req.deadline_ms {
-                if now_ms() > d {
-                    return ChannelRouteResult::Decline {
-                        reason: ChannelDeclineReason::LandLeg,
-                    };
-                }
+            // Mirrors the TypeScript: the repair loop does not propagate a timed-out
+            // reason, it declines as LandLeg. Do not "correct" this to Deadline; that
+            // would break parity with the reference.
+            if over_deadline(req.deadline_ms) {
+                return ChannelRouteResult::Decline {
+                    reason: ChannelDeclineReason::LandLeg,
+                };
             }
             let p = kept_idx[k - 1];
             let q = kept_idx[k];
@@ -497,25 +482,44 @@ fn snap_to_water(
     }
     let cell_meters = grid.size().cell_meters;
     let max_radius = 1.0_f64.max((max_snap_meters / cell_meters).ceil()) as i64;
+    // Test one ring cell at offset (dc, dr): accept it when it is in the component and
+    // within the true distance cap.
+    let try_cell = |dc: i64, dr: i64| -> Option<(usize, usize)> {
+        let c = c0 as i64 + dc;
+        let r = r0 as i64 + dr;
+        if ok(c, r)
+            && distance_meters(p, grid.cell_center((c as usize, r as usize))) <= max_snap_meters
+        {
+            Some((c as usize, r as usize))
+        } else {
+            None
+        }
+    };
     let mut radius = 1_i64;
     while radius <= max_radius {
-        let mut dr = -radius;
-        while dr <= radius {
-            let mut dc = -radius;
-            while dc <= radius {
-                if dr.abs().max(dc.abs()) == radius {
-                    let c = c0 as i64 + dc;
-                    let r = r0 as i64 + dr;
-                    if ok(c, r)
-                        && distance_meters(p, grid.cell_center((c as usize, r as usize)))
-                            <= max_snap_meters
-                    {
-                        return Some((c as usize, r as usize));
-                    }
-                }
-                dc += 1;
+        // Walk the Chebyshev ring perimeter in the exact order the full dr-outer, dc-inner
+        // scan visited it: the top row left to right, then each interior row's left then
+        // right side cell, then the bottom row left to right. Only the perimeter satisfies
+        // `max(|dc|, |dr|) == radius`, so this emits the same cells in the same order while
+        // skipping the interior the old scan iterated and discarded. The first qualifying
+        // cell wins, so this order is part of the snap parity and must not change.
+        for dc in -radius..=radius {
+            if let Some(hit) = try_cell(dc, -radius) {
+                return Some(hit);
             }
-            dr += 1;
+        }
+        for dr in (-radius + 1)..=(radius - 1) {
+            if let Some(hit) = try_cell(-radius, dr) {
+                return Some(hit);
+            }
+            if let Some(hit) = try_cell(radius, dr) {
+                return Some(hit);
+            }
+        }
+        for dc in -radius..=radius {
+            if let Some(hit) = try_cell(dc, radius) {
+                return Some(hit);
+            }
         }
         radius += 1;
     }
@@ -558,16 +562,6 @@ struct WaterIndex {
     land_b: SpatialBuckets,
     depth_b: SpatialBuckets,
     tile_b: SpatialBuckets,
-}
-
-/// The smallest bounding box that encloses both inputs.
-fn union_bbox(a: Bbox, b: Bbox) -> Bbox {
-    Bbox {
-        north: a.north.max(b.north),
-        south: a.south.min(b.south),
-        east: a.east.max(b.east),
-        west: a.west.min(b.west),
-    }
 }
 
 /// True when a bbox contains the point (touching counts).
@@ -638,18 +632,21 @@ fn bucket_at<'a>(b: &'a SpatialBuckets, lon: f64, lat: f64) -> &'a [usize] {
     &b.cells[(r as usize) * b.side + c as usize]
 }
 
-fn build_water_index(charted: &ChartedAreas, water: &TileWater) -> WaterIndex {
-    let land: Vec<IndexedPoly> = charted
-        .land_areas
+fn build_water_index(bands: &[ChartedAreas], water: &TileWater) -> WaterIndex {
+    // Read the per-band charted areas directly, in band order, so the index holds the
+    // same polygons in the same order a flattened copy would, without the intermediate
+    // clone of every area.
+    let land: Vec<IndexedPoly> = bands
         .iter()
+        .flat_map(|b| b.land_areas.iter())
         .map(|a| IndexedPoly {
             rings: a.rings.clone(),
             bbox: bounds_of_rings(&a.rings),
         })
         .collect();
-    let depth: Vec<IndexedDepth> = charted
-        .depth_areas
+    let depth: Vec<IndexedDepth> = bands
         .iter()
+        .flat_map(|b| b.depth_areas.iter())
         .map(|a| IndexedDepth {
             rings: a.rings.clone(),
             bbox: bounds_of_rings(&a.rings),
@@ -832,14 +829,12 @@ fn decimate_route<F: Fn(Position, Position) -> bool>(
     while j < last {
         // Stop decimating once the deadline passes, keeping the rest of the trace; the
         // re-check that follows sees the deadline and declines cleanly.
-        if let Some(d) = deadline_ms {
-            if now_ms() > d {
-                for k in j..last {
-                    kept.push(waypoints[k]);
-                }
-                kept.push(waypoints[last]);
-                return kept;
+        if over_deadline(deadline_ms) {
+            for k in j..last {
+                kept.push(waypoints[k]);
             }
+            kept.push(waypoints[last]);
+            return kept;
         }
         if leg_safe(waypoints[anchor], waypoints[j + 1]) {
             j += 1;
@@ -864,10 +859,8 @@ fn route_legs_on_water(
 ) -> bool {
     let mut i = 0;
     while i + 1 < waypoints.len() {
-        if let Some(d) = deadline_ms {
-            if now_ms() > d {
-                return false;
-            }
+        if over_deadline(deadline_ms) {
+            return false;
         }
         if !leg_stays_on_water(
             waypoints[i],
@@ -912,10 +905,8 @@ fn used_tile_water(
     while i + 1 < waypoints.len() {
         // Past the deadline, keep the depth-unverified caveat (the conservative direction)
         // rather than spending more budget proving it.
-        if let Some(d) = deadline_ms {
-            if now_ms() > d {
-                return true;
-            }
+        if over_deadline(deadline_ms) {
+            return true;
         }
         let a = waypoints[i];
         let b = waypoints[i + 1];

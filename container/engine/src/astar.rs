@@ -3,7 +3,7 @@
 //! must match the TypeScript exactly, so the heap is hand-ported rather than built
 //! on `std::collections::BinaryHeap`.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::clock::over_deadline;
 
 /// The grid A* operates over; coordinates are `(col, row)`, origin top-left.
 /// Out-of-bounds coordinates are not navigable, so the methods take signed inputs.
@@ -112,16 +112,6 @@ const NEIGHBORS: [(i64, i64, f64); 8] = [
 /// Check the wall-clock deadline every this many pops, to bound the synchronous search.
 const DEADLINE_CHECK_INTERVAL: u64 = 4096;
 
-/// Milliseconds since the Unix epoch, the `Date.now()` equivalent. This is the only
-/// nondeterministic input to the search; with `deadline_ms` set to `None` (every
-/// corpus case) it is never read, so the search is a pure function of the grid.
-fn now_ms() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as f64)
-        .unwrap_or(0.0)
-}
-
 /// 8-connected A* from `start` to `goal`, returning the ordered cell path including
 /// both endpoints, or `None` when the goal is unreachable, an endpoint is not
 /// navigable, or the deadline passes mid-search. Step cost is the geometric distance
@@ -167,15 +157,11 @@ pub fn find_path(
             break;
         }
         pops += 1;
-        if pops % DEADLINE_CHECK_INTERVAL == 0 {
-            if let Some(deadline) = deadline_ms {
-                if now_ms() > deadline {
-                    if let Some(s) = status {
-                        s.timed_out = true;
-                    }
-                    return None;
-                }
+        if pops % DEADLINE_CHECK_INTERVAL == 0 && over_deadline(deadline_ms) {
+            if let Some(s) = status {
+                s.timed_out = true;
             }
+            return None;
         }
         let cr = cur / cols;
         let cc = cur - cr * cols;
