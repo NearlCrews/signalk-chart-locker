@@ -17,26 +17,41 @@ pub struct LocalProvider {
     home_country_id: Option<String>,
 }
 
+/// Percent-encode characters that are meaningful in a SQLite URI query string.
+/// Operator-set store paths are normally plain ASCII, so this is defensive.
+fn encode_path_for_uri(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('%', "%25")
+        .replace('?', "%3F")
+        .replace('#', "%23")
+        .replace(' ', "%20")
+}
+
 impl LocalProvider {
     /// Open a region store read-only. `immutable=1` lets a read-only mount work without
-    /// a WAL sidecar. `home_country_id` selects which boundaries count as foreign.
+    /// a WAL sidecar. `home_country_id` selects which boundaries count as foreign;
+    /// an empty string is treated the same as `None` (border awareness off).
     pub fn open(path: &Path, home_country_id: Option<String>) -> rusqlite::Result<Self> {
-        let uri = format!("file:{}?immutable=1", path.display());
+        let uri = format!("file:{}?immutable=1", encode_path_for_uri(path));
         let conn = Connection::open_with_flags(
             &uri,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
         )?;
-        Ok(LocalProvider { conn, home_country_id })
+        Ok(LocalProvider {
+            conn,
+            home_country_id: home_country_id.filter(|s| !s.is_empty()),
+        })
     }
 
-    /// Decode a GeoPackage blob into zero or more rings sets (one per WKB polygon).
-    fn blob_to_polygons(blob: &[u8]) -> Vec<Rings> {
-        match gpkg::decode(blob) {
-            Ok(geom) if geom.kind != GeometryKind::Empty => {
-                geom.polygons.into_iter().map(|poly| poly.rings).collect()
-            }
-            _ => Vec::new(),
+    /// Decode a GeoPackage blob into zero or more ring sets (one per WKB polygon).
+    /// A valid Empty geometry returns `Ok(vec![])`. A malformed blob returns `Err` so
+    /// the caller can propagate the failure rather than silently dropping the geometry.
+    fn blob_to_polygons(blob: &[u8]) -> Result<Vec<Rings>, gpkg::GpkgError> {
+        let geom = gpkg::decode(blob)?;
+        if geom.kind == GeometryKind::Empty {
+            return Ok(Vec::new());
         }
+        Ok(geom.polygons.into_iter().map(|poly| poly.rings).collect())
     }
 }
 
@@ -88,6 +103,11 @@ impl Provider for LocalProvider {
         }
     }
 
+    /// Return ring polygons for boundaries whose `country_id` differs from the home country.
+    ///
+    /// Border filtering is best-effort: a read or decode error on any row yields an empty
+    /// result (fails open to not-blocked). The Milestone 4 border-aware caller must treat
+    /// this return value as best-effort and validate its inputs accordingly.
     fn foreign_rings(&self, bbox: Bbox) -> Vec<RingPolygon> {
         let Some(home) = self.home_country_id.as_deref() else {
             return Vec::new();
@@ -130,7 +150,14 @@ fn query_banded_polygons(
             let blob: Vec<u8> = row.get(0)?;
             let drval1: Option<f64> = row.get(1)?;
             let drval2: Option<f64> = row.get(2)?;
-            Ok((LocalProvider::blob_to_polygons(&blob), drval1, drval2))
+            let rings = LocalProvider::blob_to_polygons(&blob).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Blob,
+                    Box::new(e),
+                )
+            })?;
+            Ok((rings, drval1, drval2))
         },
     )?;
     rows.collect()
@@ -147,7 +174,13 @@ fn query_plain_polygons(conn: &Connection, table: &str, bbox: Bbox) -> rusqlite:
         },
         |row| {
             let blob: Vec<u8> = row.get(0)?;
-            Ok(LocalProvider::blob_to_polygons(&blob))
+            LocalProvider::blob_to_polygons(&blob).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Blob,
+                    Box::new(e),
+                )
+            })
         },
     )?;
     rows.collect()
@@ -166,7 +199,13 @@ fn query_foreign_polygons(conn: &Connection, bbox: Bbox, home: &str) -> rusqlite
         },
         |row| {
             let blob: Vec<u8> = row.get(0)?;
-            Ok(LocalProvider::blob_to_polygons(&blob))
+            LocalProvider::blob_to_polygons(&blob).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Blob,
+                    Box::new(e),
+                )
+            })
         },
     )?;
     rows.collect()
@@ -244,5 +283,30 @@ mod tests {
 
         let no_home = LocalProvider::open(file.path(), None).unwrap();
         assert!(no_home.foreign_rings(bbox).is_empty()); // border-aware off
+    }
+
+    #[test]
+    fn charted_areas_returns_none_on_a_corrupt_geometry_blob() {
+        let square: &[[f64; 2]] = &[[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0], [0.0, 0.0]];
+        let file = StoreBuilder::new()
+            .depth_area("coastal", Some(0.0), Some(5.0), &[square])
+            .build();
+
+        // Overwrite the geometry with a truncated blob: "GP" magic, version 0, LE flags, then one
+        // byte before the srs_id field ends. The decoder returns GpkgError::TooShort, which must
+        // surface as None rather than silently removing the obstacle.
+        let corrupt: Vec<u8> = vec![0x47u8, 0x50, 0x00, 0x01, 0xff];
+        {
+            let rw = Connection::open(file.path()).unwrap();
+            rw.execute(
+                "UPDATE enc_depth_areas SET geom = ?1",
+                rusqlite::params![corrupt],
+            )
+            .unwrap();
+        }
+
+        let p = LocalProvider::open(file.path(), None).unwrap();
+        let bbox = Bbox { north: 1.0, south: 0.5, east: 1.0, west: 0.5 };
+        assert!(p.charted_areas(ScaleBand::Coastal, bbox).is_none());
     }
 }
