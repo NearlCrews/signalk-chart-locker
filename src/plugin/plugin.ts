@@ -11,15 +11,15 @@ interface CompanionConfig {
 }
 
 export function createPlugin (app: ServerAPI): Plugin {
-  // launched: set to true the moment ensureRunning resolves, so stop() knows a container was started
-  // even if address resolution or bridge installation never completed.
+  // All lifecycle transitions are serialized through this chain. It always resolves: errors from
+  // doStart are caught in start(), and doStop never throws. This eliminates the concurrent-call
+  // race where stop() setting a flag could be undone by a subsequent start() resetting it.
+  let lifecycle: Promise<void> = Promise.resolve()
+  // launched: set to true the moment ensureRunning resolves, so doStop knows a container was
+  // started even if address resolution or bridge installation never completed.
   let launched = false
-  // stopRequested: set by stop() so an in-flight start can detect a concurrent stop and tear down.
-  let stopRequested = false
-  // startPromise: the in-flight start chain (with its error catch), awaited by stop() to drain it safely.
-  let startPromise: Promise<void> | null = null
 
-  async function startCompanion (config: CompanionConfig): Promise<void> {
+  async function doStart (config: CompanionConfig): Promise<void> {
     const manager = requireContainerManager(app)
     if (!manager) return
     if (!(await ensureRuntimeReady(app, manager))) return
@@ -33,23 +33,26 @@ export function createPlugin (app: ServerAPI): Plugin {
       throw new Error('The router container address could not be resolved after ensureRunning.')
     }
 
-    // A stop() arrived while we were resolving the address. Tear down the container we launched and
-    // bail out without installing the bridge, so no orphan is left behind.
-    if (stopRequested) {
-      const m = getContainerManager()
-      if (m) {
+    installRouteOnWaterBridge(createSkeletonBridge(address, probeRouterHealth))
+    app.setPluginStatus(`Router container running and reachable at ${address}.`)
+  }
+
+  async function doStop (): Promise<void> {
+    removeRouteOnWaterBridge()
+
+    // Only stop the container if it was actually launched. If the launch partially failed (address
+    // resolution returned null) or no start has run yet, launched is false and we skip the stop.
+    if (launched) {
+      const manager = getContainerManager()
+      if (manager) {
         try {
-          await m.stop(ROUTER_CONTAINER_NAME)
+          await manager.stop(ROUTER_CONTAINER_NAME)
         } catch (err) {
-          app.debug('Failed to stop container after stop-during-launch race:', err)
+          app.debug('Failed to stop router container:', err)
         }
       }
       launched = false
-      return
     }
-
-    installRouteOnWaterBridge(createSkeletonBridge(address, probeRouterHealth))
-    app.setPluginStatus(`Router container running and reachable at ${address}.`)
   }
 
   return {
@@ -67,42 +70,22 @@ export function createPlugin (app: ServerAPI): Plugin {
         }
       }
     }),
-    // Signal K calls start synchronously and does not await it, so the async work runs detached with an
-    // explicit catch: a container-launch rejection surfaces as a plugin error instead of an unhandled rejection.
-    // The caught promise is stored so stop() can await it and drain the in-flight launch safely.
+    // Signal K calls start synchronously and does not await it, so the async work runs detached with
+    // an explicit catch: a doStart rejection surfaces as a plugin error instead of an unhandled
+    // rejection. Chaining onto the shared lifecycle promise serializes this start after any in-flight
+    // stop, so a stop() queued before this start() always completes before doStart runs.
     start (config: CompanionConfig) {
-      stopRequested = false
-      launched = false
-      startPromise = startCompanion(config).catch((err: unknown) => {
+      lifecycle = lifecycle.then(() => doStart(config)).catch((err: unknown) => {
         app.setPluginError(`Startup failed: ${err instanceof Error ? err.message : String(err)}`)
       })
-      return startPromise
+      return lifecycle
     },
-    async stop () {
-      stopRequested = true
-
-      // Drain the in-flight start before proceeding. The promise always resolves (errors are caught
-      // inside startCompanion's .catch handler), so this never throws here.
-      if (startPromise !== null) {
-        try { await startPromise } catch { /* already surfaced as a plugin error */ }
-        startPromise = null
-      }
-
-      removeRouteOnWaterBridge()
-
-      // Only stop the container if it was actually launched. If the launch partially failed (address
-      // resolution returned null) or a concurrent stop already handled teardown, launched is false.
-      if (launched) {
-        const manager = getContainerManager()
-        if (manager) {
-          try {
-            await manager.stop(ROUTER_CONTAINER_NAME)
-          } catch (err) {
-            app.debug('Failed to stop router container:', err)
-          }
-        }
-        launched = false
-      }
+    // Chaining onto the shared lifecycle serializes this stop after any in-flight start, so a
+    // start() that was in flight when stop() was called always completes before doStop runs.
+    // doStop never throws, so the chain always resolves and subsequent transitions are not blocked.
+    stop () {
+      lifecycle = lifecycle.then(() => doStop())
+      return lifecycle
     }
   }
 }

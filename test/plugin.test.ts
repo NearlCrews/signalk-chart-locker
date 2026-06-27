@@ -164,6 +164,52 @@ test('stop-during-in-flight-start: no bridge is installed and the container is s
   assert.ok(record.stopped.includes(ROUTER_CONTAINER_NAME))
 })
 
+test('lifecycle serialization: stop-during-start and start-during-stop run in order, no transitions lost or orphaned', async () => {
+  // Under the old flag-based implementation, calling start() while stop() was awaiting an in-flight
+  // start would reset stopRequested, causing the in-flight start to miss the stop signal and
+  // potentially leaving the bridge or container orphaned. This test proves serialization eliminates
+  // that race: all three transitions (start1, stop, start2) execute in submission order with no
+  // transition skipped and no orphan produced.
+  let releaseEnsure!: () => void
+  const ensureBlocker = new Promise<void>(resolve => { releaseEnsure = resolve })
+  let signalFirstEnsure!: () => void
+  const firstEnsureBarrier = new Promise<void>(resolve => { signalFirstEnsure = resolve })
+  let ensureCallCount = 0
+
+  const record = { ensured: [] as Array<{ name: string; config: ContainerConfig }>, stopped: [] as string[] }
+  const manager: ContainerManager = {
+    async whenReady () {},
+    getRuntime () { return { runtime: 'docker' } },
+    async ensureRunning (name, config) {
+      record.ensured.push({ name, config })
+      if (++ensureCallCount === 1) { signalFirstEnsure(); await ensureBlocker }
+    },
+    async resolveContainerAddress () { return '127.0.0.1:8080' },
+    async stop (name) { record.stopped.push(name) }
+  }
+  ;(globalThis as Record<string, unknown>).__signalk_containerManager = manager
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+
+  // Queue three transitions while start1 is blocked mid-launch.
+  // stop() tests stop-during-start; start2() tests start-during-stop (stop was called but has not
+  // started executing, so from the caller's perspective stop is still in flight when start2 is queued).
+  const p1 = plugin.start({}, () => {})
+  await firstEnsureBarrier      // start1 is parked inside its first ensureRunning call
+  const p2 = plugin.stop()      // queued: will run after start1 completes
+  const p3 = plugin.start({}, () => {}) // queued: will run after stop completes
+  releaseEnsure()
+  await Promise.all([p1, p2, p3])
+
+  // All three transitions ran in submission order: start1, stop, start2.
+  // Bridge is installed by start2 (net intent: started). Container was ensured twice, stopped once.
+  // No orphaned bridge or container exists from the first start-stop pair.
+  assert.ok(getRouteOnWaterBridge() !== undefined, 'bridge installed by start2, the last transition')
+  assert.equal(record.ensured.length, 2, 'both start transitions called ensureRunning')
+  assert.deepEqual(record.stopped, [ROUTER_CONTAINER_NAME], 'stop ran exactly once between the two starts')
+  assert.equal(app.errors.length, 0, 'no errors from any transition')
+})
+
 test('stop then start again installs the bridge on the second start', async () => {
   const record = { ensured: [] as Array<{ name: string; config: ContainerConfig }>, stopped: [] as string[] }
   ;(globalThis as Record<string, unknown>).__signalk_containerManager = fakeManager(record)
