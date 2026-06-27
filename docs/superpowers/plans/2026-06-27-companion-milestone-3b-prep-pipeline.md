@@ -1,11 +1,25 @@
 # Milestone 3B: Offline geodata prep pipeline Implementation Plan
 
-> **Status: data-gated.** This plan is complete and ready to execute, but it CANNOT be
-> built or verified without GDAL plus a real NOAA ENC `.000` cell and an OSM extract for a
-> test region. Per the resolved Option A decision, the owner downloads ENC cells; this
-> milestone ships the pipeline, not the data. Execute it when a test cell and an OSM extract
-> are staged on the Pi. The schema and normalization rules below ARE verifiable now against
-> the Milestone 3A contract and were checked against it.
+> **Status: core implemented and verified against a real NOAA cell.** The prep tool is
+> committed at `container/prep/` (`prep_region.py`, `Dockerfile`, `README.md`) and was run
+> against a real downloaded NOAA ENC cell (US3EC06M) plus the Natural Earth admin-0 source. It
+> produced a GeoPackage with 254 real depth-area polygons and 242 country boundaries in the
+> exact 3A schema, and the runtime router read that store through `LocalProvider` and returned
+> a real `ok: true` route over the bathymetry (and an honest `no-coverage` outside the cell).
+> Per the Option A decision the owner downloads ENC cells; this milestone ships the pipeline,
+> not the data. Remaining before this milestone is fully closed: OSM water ingestion at real
+> scale, multi-cell overlapping-band precedence on a real cell set, LNDARE and DRGARE (the
+> test cell carried neither), and the cell-versus-ArcGIS validation gate (which is the
+> Milestone 3C harness).
+>
+> **Implementation note.** The committed tool consolidates the design below into one
+> `prep_region.py` that drives `ogr2ogr` (the S-57 read and the GeoPackage write) and the
+> Python `sqlite3` stdlib (to complete any feature table an ingest did not create). It does
+> NOT use the osgeo Python bindings, so the prep image only needs the GDAL CLI plus a plain
+> `python3`. The image is pinned to the stable `ghcr.io/osgeo/gdal:ubuntu-small-3.10.3`: the
+> rolling `latest` and the Alpine builds of the S-57 driver segfaulted on a valid NOAA cell,
+> so the pin is load-bearing. The osgeo/gdal images are multi-architecture, so prep runs on
+> amd64 and arm64. The task list below is retained as the design and test-intent record.
 
 > **For agentic workers:** when the data is staged, execute task-by-task with
 > superpowers:subagent-driven-development. Steps use checkbox (`- [ ]`) syntax.

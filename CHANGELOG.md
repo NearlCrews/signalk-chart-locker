@@ -35,6 +35,11 @@ everything below is unreleased.
   selects `LocalProvider` when `BINNACLE_REGION_STORE` names a store path, falls back to
   `UnavailableProvider` (declines `fetch-failed`) on an open error, and uses `EmptyProvider`
   (declines `no-coverage`) when no store is configured.
+- The offline geodata prep tool under `container/prep/`: a pinned-GDAL container that reads
+  NOAA ENC S-57 cells and admin-0 and OSM sources and writes one per-region GeoPackage in the
+  `LocalProvider` schema, with R-tree indexes and the usage band taken from the ENC cell name.
+  GDAL stays confined to this prep image, so the runtime image carries none of it. ENC and
+  chart data are downloaded by the owner per region and are never bundled.
 
 ### Changed
 

@@ -69,11 +69,16 @@ on both amd64 and arm64.
 - `container/localprovider/`: the Milestone 3A runtime read path: reads an offline OGC GeoPackage
   via `rusqlite`, answers the engine's provider queries, and is wired into the router via
   `BINNACLE_REGION_STORE`. The `testutil` feature exposes a `StoreBuilder` for integration tests.
+- `container/prep/`: the Milestone 3B offline prep tool: a pinned-GDAL container that reads
+  NOAA ENC S-57 cells and admin-0 and OSM sources and writes a per-region GeoPackage in the
+  `LocalProvider` schema. GDAL lives only here, never in the runtime image.
 - `docs/superpowers/specs/`, `docs/superpowers/plans/`, `docs/superpowers/reviews/`: the design
   spec, the per-milestone plans, and review records.
 
-Milestone 3B (the S-57 to GeoPackage prep pipeline) and 3C (data-parity harness) are next.
-Milestone 4 is the crows-nest cutover behind a feature flag with an in-process fallback.
+Milestone 3B's ENC depth-area core is implemented and was verified against a real NOAA cell
+(the prep tool builds a store the runtime router routes over). Remaining for 3B: OSM water at
+scale and multi-cell precedence. Milestone 3C (data-parity harness) is next. Milestone 4 is the
+crows-nest cutover behind a feature flag with an in-process fallback.
 
 ## Build and test
 

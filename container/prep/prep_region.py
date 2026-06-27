@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""Build one per-region GeoPackage for the binnacle-companion LocalProvider.
+
+This is the Milestone 3B offline prep stage. It runs inside the prep container (GDAL plus
+Python), reads NOAA ENC .000 cells with the GDAL S-57 driver, and writes the exact store
+schema the runtime LocalProvider reads. GDAL lives here and only here: the output GeoPackage
+carries no GDAL dependency, so the runtime image stays free of GDAL, GEOS, PROJ, and
+SpatiaLite.
+
+The output schema (the shared contract with the 3A reader, container/localprovider):
+  enc_depth_areas(fid INTEGER PRIMARY KEY, geom BLOB, band TEXT, drval1 REAL, drval2 REAL)
+  enc_land_areas (fid INTEGER PRIMARY KEY, geom BLOB, band TEXT)
+  osm_water      (fid INTEGER PRIMARY KEY, geom BLOB)
+  boundaries     (fid INTEGER PRIMARY KEY, geom BLOB, country_id TEXT)
+plus the standard GeoPackage metadata tables and one R-tree per feature table named
+rtree_<table>_geom(id, minx, maxx, miny, maxy). Coordinates are WGS84 (EPSG:4326), the
+NOAA ENC and OSM native CRS, so no reprojection.
+
+DRVAL1 maps to drval1 (shallow depth value, meters) and DRVAL2 to drval2 (deep depth value).
+A negative DRVAL1 is a drying height and is preserved with its sign: the reader and the engine
+treat drval1 < 0 as land.
+
+ENC and chart data are downloaded by the owner per region and are never bundled. See README.md.
+"""
+
+import argparse
+import os
+import pathlib
+import sqlite3
+import subprocess
+import sys
+
+# The NOAA ENC cell name's third character is the navigational purpose, which is the usage band.
+BANDS_BY_DIGIT = {
+    "1": "overview",
+    "2": "general",
+    "3": "coastal",
+    "4": "approach",
+    "5": "harbour",
+    "6": "berthing",
+}
+
+# DEPARE and DRGARE are depth areas (they carry DRVAL1 and DRVAL2). LNDARE is land.
+DEPTH_LAYERS = ("DEPARE", "DRGARE")
+LAND_LAYERS = ("LNDARE",)
+
+FEATURE_TABLES = ("enc_depth_areas", "enc_land_areas", "osm_water", "boundaries")
+
+S57_ENV = {**os.environ, "OGR_S57_OPTIONS": "RECODE_BY_DSSI=ON"}
+
+
+def band_for_cell(cell_path):
+    """Resolve the usage band from the ENC cell file name's third character."""
+    name = pathlib.Path(cell_path).name
+    if len(name) < 3 or name[2] not in BANDS_BY_DIGIT:
+        raise ValueError(f"cannot resolve a usage band from cell name {name!r}")
+    return BANDS_BY_DIGIT[name[2]]
+
+
+def run(cmd, env=None):
+    """Run a command, raising on failure with the captured output."""
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"command failed ({result.returncode}): {' '.join(cmd)}\n{result.stderr}")
+    return result.stdout
+
+
+def cell_layers(cell_path):
+    """Return the set of OGR layer names present in a cell."""
+    out = run(["ogrinfo", "-ro", "-q", cell_path], env=S57_ENV)
+    layers = set()
+    for line in out.splitlines():
+        # ogrinfo -q prints lines like "1: DEPARE (Polygon)".
+        part = line.split(":", 1)
+        if len(part) == 2:
+            layers.add(part[1].strip().split(" ")[0])
+    return layers
+
+
+def ingest_cell(cell_path, out_gpkg):
+    """Append a cell's depth and land areas into the store, tagged with its band."""
+    band = band_for_cell(cell_path)
+    present = cell_layers(cell_path)
+    for layer in DEPTH_LAYERS:
+        if layer in present:
+            _ogr_append(
+                cell_path, out_gpkg, "enc_depth_areas",
+                f"SELECT DRVAL1 AS drval1, DRVAL2 AS drval2, '{band}' AS band FROM {layer}",
+            )
+    for layer in LAND_LAYERS:
+        if layer in present:
+            _ogr_append(
+                cell_path, out_gpkg, "enc_land_areas",
+                f"SELECT '{band}' AS band FROM {layer}",
+            )
+
+
+def _ogr_append(src, out_gpkg, table, sql):
+    """ogr2ogr one SELECT into a store table, creating it on first write with an R-tree."""
+    update = ["-update", "-append"] if pathlib.Path(out_gpkg).exists() else []
+    run(
+        ["ogr2ogr", "-f", "GPKG", out_gpkg, src, "-sql", sql,
+         "-nln", table, "-nlt", "PROMOTE_TO_MULTI",
+         "-lco", "GEOMETRY_NAME=geom", "-lco", "FID=fid", "-lco", "SPATIAL_INDEX=YES"]
+        + update,
+        env=S57_ENV,
+    )
+
+
+def ingest_boundaries(src, out_gpkg, country_field):
+    """Ingest admin-0 polygons into boundaries, mapping country_field to country_id."""
+    _ogr_append_plain(
+        src, out_gpkg, "boundaries",
+        f'SELECT "{country_field}" AS country_id FROM "{_first_layer(src)}"',
+    )
+
+
+def ingest_osm_water(src, out_gpkg):
+    """Ingest OSM water polygons into osm_water."""
+    _ogr_append_plain(src, out_gpkg, "osm_water", f'SELECT 1 AS keep FROM "{_first_layer(src)}"')
+
+
+def _first_layer(src):
+    out = run(["ogrinfo", "-ro", "-q", src])
+    for line in out.splitlines():
+        part = line.split(":", 1)
+        if len(part) == 2:
+            return part[1].strip().split(" ")[0]
+    raise RuntimeError(f"no layers found in {src}")
+
+
+def _ogr_append_plain(src, out_gpkg, table, sql):
+    update = ["-update", "-append"] if pathlib.Path(out_gpkg).exists() else []
+    run(
+        ["ogr2ogr", "-f", "GPKG", out_gpkg, src, "-sql", sql, "-dialect", "OGRSQL",
+         "-nln", table, "-nlt", "PROMOTE_TO_MULTI", "-t_srs", "EPSG:4326",
+         "-lco", "GEOMETRY_NAME=geom", "-lco", "FID=fid", "-lco", "SPATIAL_INDEX=YES"]
+        + update,
+    )
+
+
+def ensure_schema(out_gpkg):
+    """Create any feature table and R-tree the ingests did not, so the reader never hits a
+    missing table. An empty table reads as no-coverage, which is the honest result."""
+    conn = sqlite3.connect(out_gpkg)
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS enc_depth_areas (fid INTEGER PRIMARY KEY, geom BLOB NOT NULL, band TEXT NOT NULL, drval1 REAL, drval2 REAL);
+        CREATE TABLE IF NOT EXISTS enc_land_areas  (fid INTEGER PRIMARY KEY, geom BLOB NOT NULL, band TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS osm_water       (fid INTEGER PRIMARY KEY, geom BLOB NOT NULL);
+        CREATE TABLE IF NOT EXISTS boundaries      (fid INTEGER PRIMARY KEY, geom BLOB NOT NULL, country_id TEXT NOT NULL);
+        CREATE VIRTUAL TABLE IF NOT EXISTS rtree_enc_depth_areas_geom USING rtree(id, minx, maxx, miny, maxy);
+        CREATE VIRTUAL TABLE IF NOT EXISTS rtree_enc_land_areas_geom  USING rtree(id, minx, maxx, miny, maxy);
+        CREATE VIRTUAL TABLE IF NOT EXISTS rtree_osm_water_geom       USING rtree(id, minx, maxx, miny, maxy);
+        CREATE VIRTUAL TABLE IF NOT EXISTS rtree_boundaries_geom      USING rtree(id, minx, maxx, miny, maxy);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def report(out_gpkg):
+    conn = sqlite3.connect(out_gpkg)
+    for table in FEATURE_TABLES:
+        n = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        print(f"  {table}: {n} rows")
+    conn.close()
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Build a per-region GeoPackage for LocalProvider.")
+    ap.add_argument("--enc-dir", required=True, help="directory containing ENC .000 cells (searched recursively)")
+    ap.add_argument("--out", required=True, help="output GeoPackage path")
+    ap.add_argument("--boundaries", help="admin-0 polygons (any OGR source) for the boundaries table")
+    ap.add_argument("--country-field", default="ADM0_A3", help="admin-0 field to store as country_id")
+    ap.add_argument("--osm", help="OSM water polygons (any OGR source) for the osm_water table")
+    args = ap.parse_args()
+
+    out = pathlib.Path(args.out)
+    if out.exists():
+        out.unlink()
+
+    cells = sorted(pathlib.Path(args.enc_dir).rglob("*.000"))
+    if not cells:
+        sys.exit(f"no .000 cells found under {args.enc_dir}")
+    # Coarse to fine so a finer band's polygons are appended last, matching the engine's
+    # finest-first read precedence.
+    cells.sort(key=lambda c: c.name[2] if len(c.name) > 2 else "9")
+    print(f"ingesting {len(cells)} cell(s):")
+    for cell in cells:
+        print(f"  {cell.name} -> band {band_for_cell(cell)}")
+        ingest_cell(str(cell), str(out))
+
+    if args.boundaries:
+        ingest_boundaries(args.boundaries, str(out), args.country_field)
+    if args.osm:
+        ingest_osm_water(args.osm, str(out))
+
+    ensure_schema(str(out))
+    print("store contents:")
+    report(str(out))
+    print(f"wrote {out}")
+
+
+if __name__ == "__main__":
+    main()
