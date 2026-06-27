@@ -26,8 +26,9 @@ fn router_port() -> u16 {
 /// Liveness probe used by the container HEALTHCHECK: a successful TCP connect to
 /// the listening port means the server is up. Exits 0 on success, 1 on failure.
 async fn healthcheck() -> i32 {
-    match tokio::net::TcpStream::connect(("127.0.0.1", router_port())).await {
-        Ok(_) => 0,
-        Err(_) => 1,
+    let connect = tokio::net::TcpStream::connect(("127.0.0.1", router_port()));
+    match tokio::time::timeout(std::time::Duration::from_secs(5), connect).await {
+        Ok(Ok(_)) => 0,
+        _ => 1,
     }
 }

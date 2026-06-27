@@ -25,6 +25,5 @@ async fn regions_returns_empty_array() {
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(value.is_array());
-    assert_eq!(value.as_array().unwrap().len(), 0);
+    assert!(value.as_array().expect("expected a JSON array").is_empty());
 }
