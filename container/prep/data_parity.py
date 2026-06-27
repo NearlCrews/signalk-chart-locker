@@ -22,12 +22,14 @@ same way the crows-nest plugin does.
 """
 
 import argparse
+import contextlib
 import json
 import sqlite3
-import subprocess
 import sys
 import urllib.parse
 import urllib.request
+
+from prep_region import run  # shared subprocess runner that fails loud on a non-zero exit
 
 # The ENC Direct ArcGIS Depth_Area layer id per scale band (the same table crows-nest uses).
 DEPTH_AREA_LAYER = {
@@ -39,23 +41,27 @@ ENC_DIRECT_BASE = "https://encdirect.noaa.gov/arcgis/rest/services/encdirect"
 
 def store_bbox(store):
     """The store's depth-area extent, from the R-tree, as (west, south, east, north)."""
-    c = sqlite3.connect(store)
-    row = c.execute(
-        "SELECT min(minx), min(miny), max(maxx), max(maxy) FROM rtree_enc_depth_areas_geom"
-    ).fetchone()
-    c.close()
+    with contextlib.closing(sqlite3.connect(store)) as c:
+        row = c.execute(
+            "SELECT min(minx), min(miny), max(maxx), max(maxy) FROM rtree_enc_depth_areas_geom"
+        ).fetchone()
     if not row or row[0] is None:
         sys.exit("store has no depth areas to bound a sample grid")
     return row  # west, south, east, north
 
 
-def local_drvals(store, lon, lat):
-    """The DRVAL1 values of local depth-area polygons containing the point (GEOS PIP)."""
-    sql = f"SELECT drval1 FROM enc_depth_areas WHERE ST_Intersects(geom, ST_Point({lon},{lat}))"
-    out = subprocess.run(
-        ["ogrinfo", "-ro", "-q", "-dialect", "SQLITE", "-sql", sql, store],
-        capture_output=True, text=True,
-    ).stdout
+def local_drvals(store, band, lon, lat):
+    """The DRVAL1 values of local depth-area polygons of this band containing the point (GEOS PIP).
+
+    Filtering by band matches the online side, which queries one band's layer: without it a coarse
+    deep band could mask a finer band's hazard locally and produce a false PASS. band is an argparse
+    choice, so it is safe to interpolate.
+    """
+    sql = (
+        f"SELECT drval1 FROM enc_depth_areas "
+        f"WHERE band = '{band}' AND ST_Intersects(geom, ST_Point({lon},{lat}))"
+    )
+    out = run(["ogrinfo", "-ro", "-q", "-dialect", "SQLITE", "-sql", sql, store])
     vals = []
     for line in out.splitlines():
         if "drval1" in line.lower() and "=" in line:
@@ -159,7 +165,7 @@ def run_leg_invariant(store, band, contour, legs, leg_samples, timeout):
             if not (oc and not od):
                 continue  # not an online hazard point
             leg_online_hazard = True
-            loc = local_drvals(store, lon, lat)
+            loc = local_drvals(store, band, lon, lat)
             lc, ld, _ = classify(loc, contour)
             if lc and ld:
                 leg_flip = leg_flip or (lon, lat, loc, on)  # local calls the online hazard deep: forbidden
@@ -227,7 +233,7 @@ def main():
             online_errors += 1
             print(f"  online error at {lon},{lat}: {e}")
             continue
-        loc = local_drvals(args.store, lon, lat)
+        loc = local_drvals(args.store, args.band, lon, lat)
         oc, od, ody = classify(on, args.contour)
         lc, ld, ldy = classify(loc, args.contour)
         if oc and lc:
