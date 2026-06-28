@@ -7,6 +7,10 @@ edition = "2021"
 name = "binnacle_tilecache"
 path = "src/lib.rs"
 
+[[bin]]
+name = "tilecache"
+path = "src/main.rs"
+
 [dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
