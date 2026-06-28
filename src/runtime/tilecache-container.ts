@@ -1,6 +1,9 @@
 /** Builds the managed tilecache container config (the one internet-egress container), launches it via the manager, and probes its health. */
 
-import type { ContainerConfig, FetchResponse } from '../shared/types.js'
+import type { ContainerConfig } from '../shared/types.js'
+import { makeContainerHealthcheck, probeContainerHealth, type FetchLike } from './container-health.js'
+
+export type { FetchLike }
 
 export const TILECACHE_CONTAINER_NAME = 'binnacle-tilecache'
 export const TILECACHE_INTERNAL_PORT = 8080
@@ -15,13 +18,7 @@ const TILECACHE_DB_PATH = `${CACHE_DIR}/cache.sqlite`
 /** Conservative default cap (2 GiB), suitable for a microSD deployment. */
 export const DEFAULT_CACHE_CAP_BYTES = 2_147_483_648
 
-const TILECACHE_HEALTHCHECK = {
-  test: ['CMD', '/tilecache', 'healthcheck'],
-  interval: '30s',
-  timeout: '5s',
-  startPeriod: '15s',
-  retries: 3
-}
+const TILECACHE_HEALTHCHECK = makeContainerHealthcheck('/tilecache')
 
 /** Smaller than the router: the proxy is mostly IO-bound. Equal memory and memorySwap disables swap; a high oomScoreAdj makes it die before Signal K. */
 const TILECACHE_RESOURCES = {
@@ -66,15 +63,4 @@ export function buildTilecacheConfig (opts: TilecacheContainerOptions = {}): Con
   return config
 }
 
-export type FetchLike = (url: string) => Promise<FetchResponse>
-
-export async function probeTilecacheHealth (address: string, fetchFn: FetchLike = (url: string) => fetch(url)): Promise<boolean> {
-  try {
-    const response = await fetchFn(`http://${address}/health`)
-    if (!response.ok) return false
-    const body = (await response.json()) as { status?: string }
-    return body.status === 'ok'
-  } catch {
-    return false
-  }
-}
+export const probeTilecacheHealth = probeContainerHealth

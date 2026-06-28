@@ -4,7 +4,7 @@ import type { Plugin, ServerAPI } from '@signalk/server-api'
 import { PLUGIN_ID, PLUGIN_NAME, PLUGIN_DESCRIPTION } from '../shared/plugin-id.js'
 import { requireContainerManager, getContainerManager, ensureRuntimeReady } from '../runtime/container-manager.js'
 import { ROUTER_CONTAINER_NAME, ROUTER_INTERNAL_PORT, DEFAULT_ROUTER_TAG, buildRouterConfig, probeRouterHealth } from '../runtime/router-container.js'
-import { TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT, buildTilecacheConfig } from '../runtime/tilecache-container.js'
+import { TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT, DEFAULT_TILECACHE_TAG, buildTilecacheConfig, probeTilecacheHealth } from '../runtime/tilecache-container.js'
 import { buildSourcePayload, pushTilecacheConfig } from '../runtime/tilecache-config-push.js'
 import { installRouteOnWaterBridge, removeRouteOnWaterBridge, createRouterBridge } from '../bridge/route-on-water-bridge.js'
 import { registerTileRoutes, type TileRouter } from '../http/tile-routes.js'
@@ -61,7 +61,13 @@ export function createPlugin (app: ServerAPI): Plugin {
       const tcAddress = await manager.resolveContainerAddress(TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT)
       if (tcAddress) {
         tilecacheAddress = tcAddress
-        await pushTilecacheConfig(tcAddress, buildSourcePayload())
+        if (!(await probeTilecacheHealth(tcAddress))) {
+          app.debug('Tilecache container did not pass its health probe at startup; tiles will work once it is ready.')
+        }
+        const pushed = await pushTilecacheConfig(tcAddress, buildSourcePayload())
+        if (!pushed) {
+          app.debug('Tilecache config push failed; the proxy has an empty allowlist until the next push.')
+        }
       }
     } catch (err) {
       app.debug('Tilecache container did not start; tile caching is disabled:', err)
@@ -119,7 +125,7 @@ export function createPlugin (app: ServerAPI): Plugin {
           type: 'string',
           title: 'Tile cache container image tag',
           description: 'The image tag to run for the tile cache and proxy container.',
-          default: DEFAULT_ROUTER_TAG
+          default: DEFAULT_TILECACHE_TAG
         },
         tilecacheCacheCapBytes: {
           type: 'number',

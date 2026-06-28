@@ -73,6 +73,9 @@ async function streamToContainer (req: ProxyRequest, res: ProxyResponse, address
       res.end()
       return
     }
+    // The casts bridge two type-system gaps the runtime handles fine: the web ReadableStream from fetch
+    // is not the node:stream/web type Readable.fromWeb is declared with, and the express Response is a
+    // Writable structurally but not nominally. They are load-bearing; do not remove them.
     Readable.fromWeb(upstream.body as unknown as Parameters<typeof Readable.fromWeb>[0]).pipe(res as unknown as Writable)
   } catch {
     if (!res.headersSent) {

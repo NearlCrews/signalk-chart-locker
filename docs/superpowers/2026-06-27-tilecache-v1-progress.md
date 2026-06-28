@@ -109,6 +109,39 @@ steps and the boat-only tests below.
   basemap keep their current direct URLs, so a solo `signalk-binnacle` install is unchanged. The
   PMTiles `no-store` and block-store paths are NOT touched in v1.
 
+## Hardening pass (applied to the v1 branches)
+
+A full audit of the three branches landed these fixes, all gated green (container 25 tests and clippy
+clean and release build, plugin 45 tests, package 14 tests, webapp 1375 tests and svelte-check and
+biome ci and build):
+
+Container (security and correctness):
+- Streaming body size cap: the upstream read now caps bytes as it streams (`AppState::read_capped`),
+  because `Content-Length` is `None` after gzip or brotli decompression, so a compressed bomb from a
+  compromised allowlisted upstream could be read unbounded into memory. Applied to the tile fetch and
+  both style fetches (`fetch_json` previously had no cap at all).
+- Literal-IP SSRF guard: `AppState::guarded_get` rejects a forbidden IP-literal host before connecting,
+  because reqwest does not consult the guarded DNS resolver for a numeric IP host (the Vaultwarden
+  class). The resolver comment no longer overstates its coverage. A few more reserved IPv4 ranges are
+  blocked.
+- microSD write amplification: `last_access` is now read back and the cache touch is throttled to at
+  most once per tile per hour, so a pan no longer writes to the card on every warm-tile read (the touch
+  doc had claimed a throttle that did not exist).
+- Cache write errors are logged instead of silently dropped; the mutex recovers from poisoning; the
+  style-state map is cleared on a config re-push so a changed style is relearned; the maxzoom shift is
+  guarded against overflow; eviction is a single windowed delete instead of one round-trip per row.
+- Hot-path copy removed: `CachedTile.blob` is `Bytes`, so serving a cache hit clones a handle, not the
+  bytes. One shared strong-ETag minter and one shared tile-response builder across the tile and style
+  routes.
+
+Plugin and webapp:
+- One shared container health probe and healthcheck builder; the config push result and the tilecache
+  health are logged; the schema default uses the tilecache tag.
+- The basemap detection fetch has a 2 second timeout, so a wedged server cannot hang map init; the map
+  build is guarded against an unmount during that await; and a companion-proxied base style that fails
+  while online now retries the direct openfreemap style before the blank offline fallback. A test locks
+  that every proxied overlay id exists in the shared registry, so a 404-causing drift cannot slip in.
+
 ## Then E (docs) and the final gate
 
 - Companion CHANGELOG and README, webapp CHANGELOG and README, and the boat-only tests.
