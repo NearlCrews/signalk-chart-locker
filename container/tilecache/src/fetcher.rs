@@ -121,7 +121,7 @@ fn store_200(state: &AppState, source_id: &str, z: u32, x: u32, y: u32, fetched:
         bytes: fetched.body.len() as i64,
         blob: Some(fetched.body.clone()),
     };
-    log_cache_err(state.cache.put(source_id, z, x, y, &tile, now));
+    log_cache_err(state.cache.put(source_id, z, x, y, &tile, false, now));
     log_cache_err(state.cache.evict_to(state.knobs.cap_bytes));
     if if_none_match == Some(etag.as_str()) {
         return FetchOutcome::NotModified { etag };
@@ -141,7 +141,7 @@ fn negative_cache(state: &AppState, source_id: &str, z: u32, x: u32, y: u32, sta
         bytes: 0,
         blob: None,
     };
-    log_cache_err(state.cache.put(source_id, z, x, y, &tile, now));
+    log_cache_err(state.cache.put(source_id, z, x, y, &tile, false, now));
     FetchOutcome::Empty { status }
 }
 
@@ -192,7 +192,7 @@ pub async fn get_tile(
                     let mut refreshed = tile.clone();
                     refreshed.fetched_at = now;
                     refreshed.last_access = now;
-                    log_cache_err(state.cache.put(source_id, z, x, y, &refreshed, now));
+                    log_cache_err(state.cache.put(source_id, z, x, y, &refreshed, false, now));
                     if if_none_match.as_deref() == Some(&tile.strong_etag) {
                         return FetchOutcome::NotModified { etag: tile.strong_etag };
                     }
