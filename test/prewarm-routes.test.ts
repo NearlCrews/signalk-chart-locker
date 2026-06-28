@@ -77,6 +77,34 @@ test('POST /api/prewarm rejects an inverted bbox with 400 and does not forward o
   assert.equal(loadPrewarmConfig(dir).bbox, null, 'an invalid box is never persisted')
 })
 
+test('POST /api/prewarm rejects a non-finite bbox with 400 and does not forward or persist', async () => {
+  const { router, routes } = collector()
+  const dir = mkdtempSync(join(tmpdir(), 'pw-'))
+  let called = false
+  const fetchImpl = async () => { called = true; return { ok: true, status: 200, json: async () => ({}), headers: new Headers(), body: null } as unknown as Response }
+  registerPrewarmRoutes(router, securedApp(), () => 'addr:8080', { dataDir: dir, fetchImpl })
+  const { res, out } = fakeRes()
+  await routes.get('POST /api/prewarm')!({ params: {}, body: { bbox: [NaN, -1, 1, 1], sources: ['seamark'], minzoom: 6, maxzoom: 8 } }, res)
+  assert.equal(out.code, 400)
+  assert.equal(called, false, 'a non-finite bbox is never forwarded to the container')
+  const { loadPrewarmConfig } = await import('../src/runtime/prewarm-store.js')
+  assert.equal(loadPrewarmConfig(dir).bbox, null, 'a non-finite bbox is never persisted')
+})
+
+test('POST /api/prewarm rejects a non-finite minzoom with 400 and does not forward or persist', async () => {
+  const { router, routes } = collector()
+  const dir = mkdtempSync(join(tmpdir(), 'pw-'))
+  let called = false
+  const fetchImpl = async () => { called = true; return { ok: true, status: 200, json: async () => ({}), headers: new Headers(), body: null } as unknown as Response }
+  registerPrewarmRoutes(router, securedApp(), () => 'addr:8080', { dataDir: dir, fetchImpl })
+  const { res, out } = fakeRes()
+  await routes.get('POST /api/prewarm')!({ params: {}, body: { bbox: [-1, -1, 1, 1], sources: ['seamark'], minzoom: NaN, maxzoom: 8 } }, res)
+  assert.equal(out.code, 400)
+  assert.equal(called, false, 'a non-finite minzoom is never forwarded to the container')
+  const { loadPrewarmConfig } = await import('../src/runtime/prewarm-store.js')
+  assert.equal(loadPrewarmConfig(dir).bbox, null, 'a non-finite minzoom is never persisted')
+})
+
 test('POST /api/prewarm/cancel relays a 204 without reading a body', async () => {
   const { router, routes } = collector()
   const fetchImpl = async () => ({ ok: true, status: 204, json: async () => { throw new Error('a 204 has no body') }, headers: new Headers(), body: null } as unknown as Response)

@@ -83,7 +83,8 @@ export function registerPrewarmRoutes (router: PrewarmRouter, app: ServerAPI, ge
     const maxzoom = b.maxzoom ?? current.maxzoom
     // Validate BEFORE persisting: a non-finite or inverted bbox stored as the source of truth would be
     // compared against NaN in the position-warm insideBox check (always false) and warm continuously.
-    if (!isValidBbox(b.bbox) || !Array.isArray(b.sources) || minzoom > maxzoom) {
+    if (!isValidBbox(b.bbox) || !Array.isArray(b.sources) ||
+        !Number.isFinite(minzoom) || !Number.isFinite(maxzoom) || minzoom > maxzoom) {
       res.status(400).json({ error: 'a finite, ordered bbox, a sources array, and minzoom <= maxzoom are required' }); return
     }
     savePrewarmConfig(dataDir, { ...current, bbox: b.bbox, sources: b.sources, minzoom, maxzoom })
