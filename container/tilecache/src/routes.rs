@@ -32,7 +32,19 @@ async fn health() -> Json<serde_json::Value> {
 
 async fn stats(State(st): State<AppState>) -> Json<serde_json::Value> {
     let (rows, bytes) = st.cache.stats().unwrap_or((0, 0));
-    Json(serde_json::json!({ "rows": rows, "bytes": bytes }))
+    let avg: serde_json::Map<String, serde_json::Value> = st
+        .cache
+        .per_source_avg()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(source, mean)| (source, serde_json::json!(mean)))
+        .collect();
+    Json(serde_json::json!({
+        "rows": rows,
+        "bytes": bytes,
+        "cap": st.knobs.cap_bytes,
+        "perSourceAvgBytes": avg,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -182,5 +194,22 @@ mod tests {
         let (status, body) = body_string(resp).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("\"rows\":0"));
+    }
+
+    #[tokio::test]
+    async fn cache_stats_reports_cap_and_per_source_average() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_stub(hits).await;
+        let db = NamedTempFile::new().unwrap();
+        let router = app(dev_state(&db));
+        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr))).unwrap()).await.unwrap();
+        // Warm one tile through the live path so a real 200 row exists.
+        router.clone().oneshot(Request::get("/tile/s/1/0/0").body(Body::empty()).unwrap()).await.unwrap();
+        let resp = router.oneshot(Request::get("/cache/stats").body(Body::empty()).unwrap()).await.unwrap();
+        let (status, body) = body_string(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"cap\":"), "stats reports the byte cap");
+        assert!(body.contains("\"perSourceAvgBytes\""), "stats reports the per-source average");
+        assert!(body.contains("\"s\":"), "the warmed source has an average");
     }
 }
