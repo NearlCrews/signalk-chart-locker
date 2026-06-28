@@ -20,6 +20,9 @@ async fn main() {
     // Production never sets this; it exists for a same-host dev or test against a private upstream.
     let allow_private = std::env::var("TILECACHE_ALLOW_PRIVATE").as_deref() == Ok("1");
 
+    if let Some(parent) = Path::new(&db).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let cache = Arc::new(TileCache::open(Path::new(&db)).expect("open the tile cache DB"));
     let knobs = Knobs { cap_bytes: cap, allow_private_egress: allow_private, ..Default::default() };
     let state = AppState::new(cache, knobs);
