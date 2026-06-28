@@ -23,9 +23,9 @@ pub fn tile_for_lng_lat(lng: f64, lat: f64, z: u32) -> (u32, u32) {
     (xi, yi)
 }
 
-// Clip the request bbox to the source bounds and the Mercator latitude limit, rejecting a non-finite,
-// degenerate, or antimeridian-crossing (min_lng > max_lng) box. Returns the inclusive tile rectangle per
-// zoom through the closure, after clamping the zoom range to the source.
+// Clip the request bbox to the source bounds and the Mercator latitude limit. Returns the clipped bbox,
+// or None if the box is non-finite, degenerate, antimeridian-crossing (min_lng > max_lng), or wholly
+// outside the source bounds.
 fn clip(source: &ChartSource, bbox: [f64; 4]) -> Option<[f64; 4]> {
     let [mut min_lng, mut min_lat, mut max_lng, mut max_lat] = bbox;
     if !bbox.iter().all(|v| v.is_finite()) {
