@@ -8,6 +8,7 @@ import { TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT, DEFAULT_TILECACHE_TA
 import { buildSourcePayload, pushTilecacheConfig } from '../runtime/tilecache-config-push.js'
 import { installRouteOnWaterBridge, removeRouteOnWaterBridge, createRouterBridge } from '../bridge/route-on-water-bridge.js'
 import { registerTileRoutes, type TileRouter } from '../http/tile-routes.js'
+import { registerPrewarmRoutes, type PrewarmRouter } from '../http/prewarm-routes.js'
 
 interface CompanionConfig {
   imageTag?: string
@@ -160,8 +161,12 @@ export function createPlugin (app: ServerAPI): Plugin {
     },
     // Mount the tile and style proxy on the Signal K server so every device reaches the cached tiles
     // through the server, keeping the container plugin-only. The routes read the live tilecache address.
+    // The prewarm routes are admin-gated (fail closed if the security strategy is absent); the tile
+    // routes remain open so every device can fetch cached tiles without authentication. Additional
+    // route groups (PMTiles serve and management, v3) compose by mounting alongside these two.
     registerWithRouter (router) {
       registerTileRoutes(router as unknown as TileRouter, () => tilecacheAddress)
+      registerPrewarmRoutes(router as unknown as PrewarmRouter, app, () => tilecacheAddress)
     }
   }
 }
