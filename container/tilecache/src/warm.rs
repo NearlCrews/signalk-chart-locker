@@ -66,16 +66,10 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
     if req.minzoom > req.maxzoom {
         return Err(StartError::BadZoom(format!("minzoom {} > maxzoom {}", req.minzoom, req.maxzoom)));
     }
-    let mut b = req.bbox;
+    let b = req.bbox;
     if !b.iter().all(|v| v.is_finite()) || b[0] >= b[2] || b[1] >= b[3] {
         return Err(StartError::BadBbox(format!("invalid bbox {b:?}")));
     }
-    // Clamp latitude to the Web Mercator limit rather than rejecting it, matching the shared TS clip that
-    // the panel estimate uses, so a direct POST with a beyond-limit latitude warms the clamped band
-    // instead of failing with a 400 (the estimate would have clamped and shown a count). Longitude order
-    // and finiteness stay hard errors.
-    b[1] = b[1].max(-crate::geom::MAX_MERCATOR_LAT);
-    b[3] = b[3].min(crate::geom::MAX_MERCATOR_LAT);
     // Every source must be in the allowlist; a style source has no tile path.
     let mut total = 0u64;
     {
@@ -436,6 +430,30 @@ mod tests {
             start_warm(&st, WarmRequest { sources: vec![deep], bbox: [-180.0, -85.0, 180.0, 85.0], minzoom: 0, maxzoom: 12 }).await,
             Err(StartError::TooMany(_))
         ));
+    }
+
+    // V2-4: a bbox whose latitude equals or exceeds the Web Mercator limit must succeed and enumerate
+    // the clamped region. geom::clip() clamps before checking for a degenerate box, so no pre-clamp
+    // is needed here and no beyond-limit latitude should ever reach a BadBbox rejection.
+    #[tokio::test]
+    async fn warm_beyond_mercator_latitude_clamps_and_succeeds() {
+        let addr = stub().await;
+        let db = NamedTempFile::new().unwrap();
+        let st = state(&db, dev(), xyz(addr, "img")).await;
+        let src = st.sources.read().await["s"].clone();
+        // Poles: both latitudes exceed the Web Mercator limit in both directions.
+        let result = start_warm(
+            &st,
+            WarmRequest { sources: vec![src.clone()], bbox: [-180.0, -90.0, 180.0, 90.0], minzoom: 0, maxzoom: 0 },
+        )
+        .await;
+        assert!(result.is_ok(), "beyond-limit latitude must not produce BadBbox: {result:?}");
+        let job_id = result.unwrap();
+        let snap = wait_done(&st, &job_id).await;
+        assert_eq!(snap["state"], "done", "job must finish done");
+        // total must match what tile_count_in_bbox reports for the same raw bbox (clip clamps both).
+        let expected = crate::geom::tile_count_in_bbox(&src, [-180.0, -90.0, 180.0, 90.0], 0, 0);
+        assert_eq!(snap["total"].as_u64().unwrap(), expected, "total tiles mismatch: snap={} expected={expected}", snap["total"]);
     }
 
     #[tokio::test]
