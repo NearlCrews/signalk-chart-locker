@@ -7,6 +7,7 @@ import { ROUTER_CONTAINER_NAME, ROUTER_INTERNAL_PORT, DEFAULT_ROUTER_TAG, buildR
 import { TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT, buildTilecacheConfig } from '../runtime/tilecache-container.js'
 import { buildSourcePayload, pushTilecacheConfig } from '../runtime/tilecache-config-push.js'
 import { installRouteOnWaterBridge, removeRouteOnWaterBridge, createRouterBridge } from '../bridge/route-on-water-bridge.js'
+import { registerTileRoutes, type TileRouter } from '../http/tile-routes.js'
 
 interface CompanionConfig {
   imageTag?: string
@@ -150,6 +151,11 @@ export function createPlugin (app: ServerAPI): Plugin {
     stop () {
       lifecycle = lifecycle.then(() => doStop())
       return lifecycle
+    },
+    // Mount the tile and style proxy on the Signal K server so every device reaches the cached tiles
+    // through the server, keeping the container plugin-only. The routes read the live tilecache address.
+    registerWithRouter (router) {
+      registerTileRoutes(router as unknown as TileRouter, () => tilecacheAddress)
     }
   }
 }
