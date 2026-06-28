@@ -37,7 +37,7 @@ export function fakeApp (): Recorder {
     getDataDirPath () { return dir },
     registerResourceProvider () {},
     get () {},
-    streambundle: { getSelfBus () { return { onValue () { return () => {} } } } }
+    streambundle: { getSelfBus (_path?: unknown) { return { onValue () { return () => {} } } } }
   }
 }
 
