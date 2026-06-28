@@ -5,7 +5,6 @@
 
 use crate::cache::CachedTile;
 use crate::source::UpstreamTemplate;
-use crate::ssrf::is_forbidden_ip;
 use crate::state::{now_secs, AppState};
 use crate::upstream::expand_upstream;
 use bytes::Bytes;
@@ -63,37 +62,14 @@ fn to_response(tile: &CachedTile, stale: bool) -> TileResponse {
     }
 }
 
-/// Check the upstream host's resolved IPs against the SSRF guard, unless dev egress is allowed.
-async fn egress_allowed(state: &AppState, url: &str) -> bool {
-    if state.knobs.allow_private_egress {
-        return true;
-    }
-    let Ok(parsed) = reqwest::Url::parse(url) else { return false };
-    let Some(host) = parsed.host_str().map(str::to_string) else { return false };
-    let port = parsed.port_or_known_default().unwrap_or(443);
-    drop(parsed);
-    let resolved = tokio::net::lookup_host((host.as_str(), port)).await;
-    let Ok(addrs) = resolved else { return false };
-    let mut any = false;
-    for a in addrs {
-        any = true;
-        if is_forbidden_ip(a.ip()) {
-            return false;
-        }
-    }
-    any
-}
-
-/// Fetch the upstream, returning (status, content_type, validator, body) or an error on a transport
-/// failure (treated as offline).
+/// Fetch the upstream, returning (status, fetched) or an error on a transport failure (treated as
+/// offline). SSRF is enforced by the client's guarded DNS resolver, so a forbidden host fails to
+/// connect here. An oversize Content-Length is rejected before the body is read.
 async fn fetch_upstream(
     state: &AppState,
     url: &str,
     if_none_match: Option<&str>,
 ) -> Result<(u16, Fetched), ()> {
-    if !egress_allowed(state, url).await {
-        return Err(());
-    }
     let _permit = state.egress.acquire().await.map_err(|_| ())?;
     let mut req = state.client.get(url);
     if let Some(v) = if_none_match {
@@ -101,6 +77,11 @@ async fn fetch_upstream(
     }
     let resp = req.send().await.map_err(|_| ())?;
     let status = resp.status().as_u16();
+    if let Some(len) = resp.content_length() {
+        if len > state.knobs.max_blob_bytes as u64 {
+            return Err(());
+        }
+    }
     let content_type = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -225,7 +206,7 @@ pub async fn get_tile(
     // Re-check: another flight may have filled the cache while we waited.
     if let Ok(Some(tile)) = state.cache.get(source_id, z, x, y) {
         if tile.status == 200 && now_secs() - tile.fetched_at < state.knobs.fresh_secs {
-            state.inflight_release(&key, lock.clone()).await;
+            state.inflight_finish(&key, &lock).await;
             if if_none_match.as_deref() == Some(&tile.strong_etag) {
                 return FetchOutcome::NotModified { etag: tile.strong_etag };
             }
@@ -246,7 +227,7 @@ pub async fn get_tile(
             }
         }
     };
-    state.inflight_release(&key, lock.clone()).await;
+    state.inflight_finish(&key, &lock).await;
     outcome
 }
 

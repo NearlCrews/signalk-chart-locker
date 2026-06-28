@@ -3,10 +3,33 @@
 
 use crate::cache::TileCache;
 use crate::source::ChartSource;
+use crate::ssrf::is_forbidden_ip;
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock, Semaphore};
+
+/// A DNS resolver that drops forbidden (private, loopback, link-local, multicast, unspecified) target
+/// IPs. Installed on the egress client so the SSRF check runs at the resolution reqwest actually
+/// connects to, closing the rebinding and time-of-check-to-time-of-use gap a pre-connect check leaves.
+struct GuardedResolver {
+    allow_private: bool,
+}
+
+impl Resolve for GuardedResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let allow = self.allow_private;
+        Box::pin(async move {
+            let host = name.as_str().to_owned();
+            let iter = tokio::net::lookup_host((host.as_str(), 0)).await?;
+            let addrs: Vec<SocketAddr> = iter.filter(|a| allow || !is_forbidden_ip(a.ip())).collect();
+            let boxed: Addrs = Box::new(addrs.into_iter());
+            Ok(boxed)
+        })
+    }
+}
 
 /// Tuning knobs, defaulted for a conservative microSD deployment.
 #[derive(Debug, Clone)]
@@ -52,6 +75,7 @@ impl AppState {
             .redirect(reqwest::redirect::Policy::none())
             .user_agent("signalk-binnacle-companion-tilecache")
             .timeout(std::time::Duration::from_secs(20))
+            .dns_resolver(Arc::new(GuardedResolver { allow_private: knobs.allow_private_egress }))
             .build()
             .expect("the rustls HTTP client builds with static webpki roots");
         Self {
@@ -71,11 +95,12 @@ impl AppState {
         map.entry(key.to_string()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
     }
 
-    /// Drop a single-flight entry once no one else holds it, so the map does not grow without bound.
-    pub async fn inflight_release(&self, key: &str, lock: Arc<Mutex<()>>) {
+    /// Drop a single-flight entry once this caller is its only holder, so the map does not grow
+    /// without bound (each waiter holds its own clone, so a strong count of 2 means map plus this
+    /// caller and no other waiter). Takes the Arc by reference so it adds no transient clone.
+    pub async fn inflight_finish(&self, key: &str, lock: &Arc<Mutex<()>>) {
         let mut map = self.inflight.lock().await;
-        // 2 = this `lock` plus the map entry; no other waiter holds a clone.
-        if Arc::strong_count(&lock) <= 2 {
+        if Arc::strong_count(lock) <= 2 {
             map.remove(key);
         }
     }
