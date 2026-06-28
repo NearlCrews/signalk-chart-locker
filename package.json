@@ -25,8 +25,13 @@
   "signalk-plugin-enabled-by-default": false,
   "signalk": {
     "displayName": "Binnacle Companion",
-    "requires": ["signalk-container"],
-    "recommends": ["signalk-crows-nest", "signalk-binnacle"]
+    "requires": [
+      "signalk-container"
+    ],
+    "recommends": [
+      "signalk-crows-nest",
+      "signalk-binnacle"
+    ]
   },
   "peerDependencies": {
     "signalk-container": ">=1.20.0"
@@ -54,5 +59,8 @@
     "neostandard": "^0.13.0",
     "tsx": "^4.22.3",
     "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "signalk-binnacle-chart-sources": "file:../signalk-binnacle-chart-sources"
   }
 }
