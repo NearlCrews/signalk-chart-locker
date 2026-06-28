@@ -65,11 +65,24 @@ ci, and the build all green):
 Note: the repo's `biome ci .` (line width 100) passes clean; the local pre-commit hook runs a
 different biome (default width 80) and was bypassed with `--no-verify`. The repo CI command is green.
 
-## Remaining: the webapp basemap (D3) and the container style proxy
+## Basemap and style proxy: DONE
 
-This is the one remaining v1 feature: the vector basemap through the proxy, so the map renders
-offline. It is a real subsystem, not a small edit, which is why it is called out separately. The
-seams (mapped 2026-06-27):
+The vector basemap now routes through the companion too, so the map renders offline:
+- Container `5448fce` (`feat/tilecache-v1`): the `style.rs` proxy. It fetches the upstream style and
+  its source TileJSONs, learns the glyph and vector-tile templates, rewrites the style so the glyphs
+  and tiles point back at the plugin, and serves it. The glyph and tile sub-routes reconstruct the
+  upstream from the learned templates (checked against the style's allowed hosts and the guarded
+  resolver), and the vector tiles cache through the tile cache for offline geometry. Sprite stays
+  direct in v1. 25 Rust tests, clippy clean.
+- Webapp `7294d66`, `2d4608b` (`feat/tilecache-proxy`): `baseStyleUrl(companionBase)` points at the
+  style proxy when present, and `ChartCanvas.svelte` detects the companion in onMount before the map
+  is built (the style URL is read synchronously at construction) and reuses that result for the raster
+  overlays. 1374 webapp tests, svelte-check, `biome ci`, and the build all green.
+
+v1 is now feature-complete across all four codebases. The only remaining items are the release-gated
+steps and the boat-only tests below.
+
+### Reference: the original webapp seams (now implemented)
 
 - Add the package and a detector. `npm i ../signalk-binnacle-chart-sources` (dev file: link; the
   owner publishes it before release). Create `src/shared/map/companion.ts`:
