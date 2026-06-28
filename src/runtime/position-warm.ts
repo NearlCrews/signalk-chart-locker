@@ -13,6 +13,7 @@ export interface WarmTrigger {
 
 /** Whether the position is within the box (a null box is never inside). */
 export function insideBox (pos: Position, bbox: [number, number, number, number] | null): boolean {
+  if (!Number.isFinite(pos.latitude) || !Number.isFinite(pos.longitude)) return false
   if (bbox === null) return false
   return pos.longitude >= bbox[0] && pos.longitude <= bbox[2] && pos.latitude >= bbox[1] && pos.latitude <= bbox[3]
 }
@@ -41,7 +42,8 @@ export function bboxAround (pos: Position, radiusMeters: number): [number, numbe
  * directly-posted config carries a smaller value. The config route floors it too. */
 export const MIN_WARM_INTERVAL_SECS = 60
 
-/** Decide whether to warm now: enabled, outside the box, off backoff, past the interval, and moved past the threshold. */
+/** Decide whether to warm now: enabled, outside the box, off backoff, past the interval, and moved past the threshold,
+ * unless this is the first fix (lastPos is null). */
 export function shouldWarm (pos: Position, box: [number, number, number, number] | null, settings: PositionWarmSettings, trigger: WarmTrigger, nowMs: number): boolean {
   if (!settings.enabled) return false
   if (insideBox(pos, box)) return false

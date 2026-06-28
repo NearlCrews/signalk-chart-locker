@@ -19,9 +19,11 @@ test('haversine is roughly a nautical mile for a minute of latitude', () => {
 })
 
 test('bboxAround brackets the position', () => {
-  const [minLng, minLat, maxLng, maxLat] = bboxAround(here, 1852)
+  const radiusMeters = 1852
+  const [minLng, minLat, maxLng, maxLat] = bboxAround(here, radiusMeters)
   assert.ok(minLng < here.longitude && maxLng > here.longitude)
   assert.ok(minLat < here.latitude && maxLat > here.latitude)
+  assert.ok(haversineMeters(here, { latitude: minLat, longitude: here.longitude }) >= radiusMeters * 0.95)
 })
 
 test('shouldWarm fires outside the box after the move threshold and interval', () => {
