@@ -32,6 +32,12 @@ export interface ContainerResourceLimits {
   oomScoreAdj?: number
 }
 
+/** A bind or named volume with an optional missing-source policy, mirroring signalk-container's VolumeSpec. */
+export interface ContainerVolumeSpec {
+  source: string
+  ifMissing?: 'create' | 'skip' | 'abort'
+}
+
 export interface ContainerConfig {
   image: string
   tag?: string
@@ -40,6 +46,12 @@ export interface ContainerConfig {
   resources?: ContainerResourceLimits
   restart?: string
   env?: Record<string, string>
+  /** Container mount path keyed to a host path, a named volume, or a VolumeSpec, passed through to signalk-container. */
+  volumes?: Record<string, string | ContainerVolumeSpec>
+  /** Container path at which signalk-container mounts the Signal K data directory (the zero-config durable mount). */
+  signalkDataMount?: string
+  /** In-image uid and gid for a non-root image, or false to opt out of host-UID alignment. */
+  user?: { inImageUid?: number, inImageGid?: number } | false
 }
 
 /** Options forwarded to the manager's ensureRunning, so the container is attributed to this plugin in the signalk-container manifest and UI. */

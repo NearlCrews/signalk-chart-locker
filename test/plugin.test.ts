@@ -33,7 +33,7 @@ test('start launches the container and installs the bridge when the runtime is r
   const app = fakeApp()
   const plugin = createPlugin(app as never)
   await plugin.start({}, () => {})
-  assert.equal(record.ensured.length, 1)
+  assert.equal(record.ensured.filter((e) => e.name === ROUTER_CONTAINER_NAME).length, 1)
   assert.equal(record.ensured[0].name, ROUTER_CONTAINER_NAME)
   assert.ok(getRouteOnWaterBridge() !== undefined)
   // Starting plus the running status, in that order.
@@ -67,7 +67,7 @@ test('stop removes the bridge and stops the container', async () => {
   await plugin.start({}, () => {})
   await plugin.stop()
   assert.equal(getRouteOnWaterBridge(), undefined)
-  assert.deepEqual(record.stopped, [ROUTER_CONTAINER_NAME])
+  assert.deepEqual(record.stopped.filter((n) => n === ROUTER_CONTAINER_NAME), [ROUTER_CONTAINER_NAME])
 })
 
 test('stop with no prior start and a manager present is a clean no-op', async () => {
@@ -93,7 +93,7 @@ test('partial failure: launched container is stopped even when address resolutio
   assert.equal(getRouteOnWaterBridge(), undefined)
 
   await plugin.stop()
-  assert.deepEqual(record.stopped, [ROUTER_CONTAINER_NAME])
+  assert.deepEqual(record.stopped.filter((n) => n === ROUTER_CONTAINER_NAME), [ROUTER_CONTAINER_NAME])
   assert.equal(getRouteOnWaterBridge(), undefined)
 })
 
@@ -168,8 +168,8 @@ test('lifecycle serialization: stop-during-start and start-during-stop run in or
   // Bridge is installed by start2 (net intent: started). Container was ensured twice, stopped once.
   // No orphaned bridge or container exists from the first start-stop pair.
   assert.ok(getRouteOnWaterBridge() !== undefined, 'bridge installed by start2, the last transition')
-  assert.equal(record.ensured.length, 2, 'both start transitions called ensureRunning')
-  assert.deepEqual(record.stopped, [ROUTER_CONTAINER_NAME], 'stop ran exactly once between the two starts')
+  assert.equal(record.ensured.filter((e) => e.name === ROUTER_CONTAINER_NAME).length, 2, 'both start transitions ensured the router')
+  assert.deepEqual(record.stopped.filter((n) => n === ROUTER_CONTAINER_NAME), [ROUTER_CONTAINER_NAME], 'router stopped exactly once between the two starts')
   assert.equal(app.errors.length, 0, 'no errors from any transition')
 })
 
@@ -182,5 +182,5 @@ test('stop then start again installs the bridge on the second start', async () =
   await plugin.stop()
   await plugin.start({}, () => {})
   assert.ok(getRouteOnWaterBridge() !== undefined)
-  assert.equal(record.ensured.length, 2)
+  assert.equal(record.ensured.filter((e) => e.name === ROUTER_CONTAINER_NAME).length, 2)
 })

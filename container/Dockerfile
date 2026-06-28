@@ -13,6 +13,10 @@ COPY gpkg ./gpkg
 COPY localprovider ./localprovider
 COPY router ./router
 COPY storage-spike ./storage-spike
+# tilecache is a workspace member, so cargo loads its manifest even to build only the router. Its
+# directory is copied for that manifest load; the router binary does not depend on it, so none of the
+# tilecache networking dependencies are compiled into the router image (it stays offline).
+COPY tilecache ./tilecache
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     cargo build --release --bin router \
