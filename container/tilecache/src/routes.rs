@@ -115,7 +115,13 @@ async fn warm_start(State(st): State<AppState>, Json(body): Json<WarmBody>) -> R
             attribution: String::new(),
         })
         .collect();
-    match crate::warm::start_warm(&st, crate::warm::WarmRequest { sources: placeholders, bbox: body.bbox, minzoom: body.minzoom, maxzoom: body.maxzoom }).await {
+    let req = crate::warm::WarmRequest {
+        sources: placeholders,
+        bbox: body.bbox,
+        minzoom: body.minzoom,
+        maxzoom: body.maxzoom,
+    };
+    match crate::warm::start_warm(&st, req).await {
         Ok(job_id) => (StatusCode::OK, Json(serde_json::json!({ "jobId": job_id }))).into_response(),
         Err(crate::warm::StartError::UnknownSource(_)) => StatusCode::NOT_FOUND.into_response(),
         Err(crate::warm::StartError::TooMany(n)) => (StatusCode::BAD_REQUEST, format!("too many tiles: {n}")).into_response(),
@@ -241,6 +247,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn warm_route_rejects_too_many_tiles_with_400() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_stub(hits).await;
+        let db = NamedTempFile::new().unwrap();
+        let router = app(dev_state(&db));
+        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr))).unwrap()).await.unwrap();
+        // Global bbox at maxzoom 12 projects far past the 2_000_000 tile hard cap, triggering TooMany.
+        let warm = router.oneshot(
+            Request::post("/warm").header("content-type", "application/json")
+                .body(Body::from(r#"{"sources":["s"],"bbox":[-180.0,-85.0,180.0,85.0],"minzoom":0,"maxzoom":12}"#)).unwrap()
+        ).await.unwrap();
+        assert_eq!(warm.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn warm_route_rejects_bad_bbox_and_bad_zoom_with_400() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_stub(hits).await;
+        let db = NamedTempFile::new().unwrap();
+        let router = app(dev_state(&db));
+        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr))).unwrap()).await.unwrap();
+        // Longitude-inverted bbox (west >= east) triggers BadBbox.
+        let bad_bbox = router.clone().oneshot(
+            Request::post("/warm").header("content-type", "application/json")
+                .body(Body::from(r#"{"sources":["s"],"bbox":[10.0,-1.0,-10.0,1.0],"minzoom":0,"maxzoom":0}"#)).unwrap()
+        ).await.unwrap();
+        assert_eq!(bad_bbox.status(), StatusCode::BAD_REQUEST);
+        // minzoom > maxzoom triggers BadZoom.
+        let bad_zoom = router.oneshot(
+            Request::post("/warm").header("content-type", "application/json")
+                .body(Body::from(r#"{"sources":["s"],"bbox":[-1.0,-1.0,1.0,1.0],"minzoom":5,"maxzoom":2}"#)).unwrap()
+        ).await.unwrap();
+        assert_eq!(bad_zoom.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn cache_stats_reports_counters() {
         let db = NamedTempFile::new().unwrap();
         let resp = app(dev_state(&db)).oneshot(Request::get("/cache/stats").body(Body::empty()).unwrap()).await.unwrap();
@@ -266,8 +308,11 @@ mod tests {
         assert!(body.contains("\"jobId\""));
         let job_id = body.split("\"jobId\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
 
-        let st = router.clone().oneshot(Request::get(format!("/warm/{job_id}")).body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(st.status(), StatusCode::OK);
+        let status_resp = router.clone().oneshot(Request::get(format!("/warm/{job_id}")).body(Body::empty()).unwrap()).await.unwrap();
+        let (status_code, status_body) = body_string(status_resp).await;
+        assert_eq!(status_code, StatusCode::OK);
+        assert!(status_body.contains("\"total\""), "status snapshot contains total field");
+        assert!(status_body.contains("\"state\""), "status snapshot contains state field");
 
         let cancel = router.clone().oneshot(Request::post(format!("/warm/{job_id}/cancel")).body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(cancel.status(), StatusCode::NO_CONTENT);
