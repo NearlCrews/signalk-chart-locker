@@ -11,10 +11,10 @@ use bytes::Bytes;
 use sha2::{Digest, Sha256};
 
 /// A fetched upstream body and its metadata, bundled so the store path takes few arguments.
-struct Fetched {
-    content_type: String,
-    validator: Option<String>,
-    body: Bytes,
+pub(crate) struct Fetched {
+    pub(crate) content_type: String,
+    pub(crate) validator: Option<String>,
+    pub(crate) body: Bytes,
 }
 
 /// A tile ready to serve.
@@ -39,7 +39,7 @@ pub enum FetchOutcome {
     Unavailable,
 }
 
-fn acceptable_content_type(ct: &str) -> bool {
+pub(crate) fn acceptable_content_type(ct: &str) -> bool {
     let ct = ct.to_ascii_lowercase();
     ct.starts_with("image/")
         || ct.starts_with("application/x-protobuf")
@@ -80,7 +80,7 @@ fn to_response(tile: &CachedTile, stale: bool) -> TileResponse {
 /// offline). SSRF is enforced by guarded_get (the literal-IP guard plus the client's guarded DNS
 /// resolver), and the body is read under a streaming size cap, so a decompression or chunked bomb
 /// cannot be read unbounded into memory.
-async fn fetch_upstream(
+pub(crate) async fn fetch_upstream(
     state: &AppState,
     url: &str,
     if_none_match: Option<&str>,

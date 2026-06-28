@@ -12,3 +12,4 @@ pub mod ssrf;
 pub mod state;
 pub mod style;
 pub mod upstream;
+pub mod warm;
