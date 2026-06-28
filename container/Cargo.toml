@@ -10,4 +10,5 @@ members = [
     "localprovider",
     "router",
     "storage-spike",
+    "tilecache",
 ]
