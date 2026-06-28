@@ -193,6 +193,9 @@ impl TileCache {
             params![to_free],
         )?;
         inner.total_bytes = inner.conn.query_row("SELECT COALESCE(SUM(bytes), 0) FROM tiles", [], |r| r.get(0))?;
+        if inner.total_bytes > cap_bytes {
+            eprintln!("tilecache: cap exceeded ({} bytes > {} limit); all remaining tiles are pinned", inner.total_bytes, cap_bytes);
+        }
         Ok(())
     }
 
@@ -352,7 +355,7 @@ mod tests {
     fn a_pinned_tile_survives_eviction_that_drops_unpinned_tiles() {
         let (_f, c) = open();
         c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), true, 1).unwrap(); // pinned box tile
-        c.put("s", 0, 0, 1, &tile(10, 200, Some(vec![0; 10])), false, 2).unwrap(); // unpinned, older access wins LRU
+        c.put("s", 0, 0, 1, &tile(10, 200, Some(vec![0; 10])), false, 2).unwrap(); // unpinned; gets evicted because the pinned tile is exempt despite having older access
         c.evict_to(10).unwrap();
         assert!(c.get("s", 0, 0, 0).unwrap().is_some(), "the pinned tile is never evicted");
         assert!(c.get("s", 0, 0, 1).unwrap().is_none(), "the unpinned tile is evicted to make room");
