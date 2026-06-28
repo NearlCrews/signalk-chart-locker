@@ -21,6 +21,13 @@ Guidance for Claude Code working in `signalk-binnacle-companion`.
   self-consistent (build, tests, clippy, and lint green). The Rust is one Cargo workspace, the
   GeoPackage and WKB decoder lives only in `binnacle-gpkg`, and the prep store schema and ENC
   ingests are single sources (`TABLE_SCHEMAS`, `ENC_INGESTS`): extend those seams, never fork them.
+- **Review every implementation plan with a team of 2 agents before finalizing it**, using independent
+  lenses (for example correctness and the trust boundary, plus plan quality and codebase fit), then fix
+  every finding of every severity before execution. A plan does not go to execution unreviewed.
+- **Design every panel build or change with a team of UI/UX experts** (lead with `signalk-ui-designer`
+  plus a second reviewer), kept consistent with the other panels in the project: the same control
+  primitives, shared design tokens and themes, section layout, label voice, and spacing. Reuse the
+  existing control primitive for a field an existing one already covers; never introduce a one-off.
 
 ## What this is
 
@@ -97,8 +104,10 @@ Milestone 3B's ENC core is implemented and verified against real NOAA cells (the
 builds stores the runtime router routes over, avoiding charted land). Milestone 3C's
 classification parity passed against the live NOAA ENC Direct service (`container/prep/data_parity.py`,
 verified on San Francisco Bay). Remaining: OSM water at scale, multi-cell precedence, the 3C
-one-way leg safety invariant, and broader regions. Milestone 4 is the crows-nest cutover behind
-a feature flag with an in-process fallback.
+one-way leg safety invariant, and broader regions. Milestone 4 (the crows-nest cutover behind the
+`routeDraftUseCompanion` flag with an in-process fallback) is implemented in `signalk-crows-nest`
+on branch `feat/m4-companion-cutover` (gates green, not yet merged or released); see
+`docs/superpowers/plans/2026-06-27-companion-milestone-4-crows-nest-cutover.md` and the M3 handoff.
 
 To resume in a fresh session, start from `docs/superpowers/2026-06-27-m3-handoff.md`: it is the
 single continuation guide (current state, the repo map, build and run and prep commands, the
