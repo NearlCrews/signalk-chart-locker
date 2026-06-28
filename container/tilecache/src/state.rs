@@ -4,16 +4,21 @@
 use crate::cache::TileCache;
 use crate::source::ChartSource;
 use crate::ssrf::is_forbidden_ip;
+use bytes::Bytes;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
+/// Global concurrent egress fetches. Bounds the load the proxy puts on the upstream chart providers.
+const EGRESS_CONCURRENCY: usize = 8;
+
 /// A DNS resolver that drops forbidden (private, loopback, link-local, multicast, unspecified) target
-/// IPs. Installed on the egress client so the SSRF check runs at the resolution reqwest actually
-/// connects to, closing the rebinding and time-of-check-to-time-of-use gap a pre-connect check leaves.
+/// IPs when reqwest resolves a hostname. It closes the DNS-rebinding gap a pre-connect check leaves,
+/// but reqwest does NOT consult it for a URL whose host is already a numeric IP literal, so a separate
+/// literal-IP guard runs in `AppState::guarded_get` before every fetch.
 struct GuardedResolver {
     allow_private: bool,
 }
@@ -96,9 +101,49 @@ impl AppState {
             public_base: Arc::new(RwLock::new(String::new())),
             style_state: Arc::new(RwLock::new(HashMap::new())),
             knobs,
-            egress: Arc::new(Semaphore::new(8)),
+            egress: Arc::new(Semaphore::new(EGRESS_CONCURRENCY)),
             inflight: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// A GET that enforces egress safety: it rejects a URL whose host is a forbidden IP literal (the
+    /// DNS resolver never sees a literal), then takes an egress permit and sends the request. Returns
+    /// Err on a rejected host, a permit failure, or a transport error.
+    pub async fn guarded_get(&self, url: &str, if_none_match: Option<&str>) -> Result<reqwest::Response, ()> {
+        if !self.knobs.allow_private_egress {
+            if let Ok(parsed) = reqwest::Url::parse(url) {
+                if let Some(host) = parsed.host_str() {
+                    // host_str brackets an IPv6 literal; strip them before parsing.
+                    let bare = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(host);
+                    if let Ok(ip) = bare.parse::<IpAddr>() {
+                        if is_forbidden_ip(ip) {
+                            return Err(());
+                        }
+                    }
+                }
+            }
+        }
+        let _permit = self.egress.acquire().await.map_err(|_| ())?;
+        let mut req = self.client.get(url);
+        if let Some(v) = if_none_match {
+            req = req.header(reqwest::header::IF_NONE_MATCH, v);
+        }
+        req.send().await.map_err(|_| ())
+    }
+
+    /// Read a response body with a hard cap, streaming chunks so a gzip or brotli decompression bomb or
+    /// a chunked body with no Content-Length cannot be read unbounded into memory. Returns None when the
+    /// body exceeds `max_blob_bytes` (the pre-read Content-Length check is None after decompression, so
+    /// this is the real bound).
+    pub async fn read_capped(&self, mut resp: reqwest::Response) -> Option<Bytes> {
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = resp.chunk().await.ok()? {
+            if buf.len() + chunk.len() > self.knobs.max_blob_bytes {
+                return None;
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        Some(Bytes::from(buf))
     }
 
     /// Get (or create) the per-key single-flight lock, so duplicate concurrent misses coalesce.

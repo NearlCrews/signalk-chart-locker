@@ -4,6 +4,7 @@
 
 pub mod cache;
 pub mod fetcher;
+pub mod response;
 pub mod routes;
 pub mod source;
 pub mod ssrf;

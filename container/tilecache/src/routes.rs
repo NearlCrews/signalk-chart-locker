@@ -8,7 +8,7 @@ use crate::source::ChartSource;
 use crate::state::AppState;
 use axum::{
     extract::{Path, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -52,34 +52,20 @@ async fn config(State(st): State<AppState>, Json(body): Json<ConfigBody>) -> Sta
             map.insert(s.id.clone(), s);
         }
     }
+    // Drop the learned per-style templates so a re-pushed style with a changed URL or allowed hosts is
+    // relearned on the next GET /style, not served from stale glyph and tile templates.
+    st.style_state.write().await.clear();
     if let Some(pb) = body.public_base {
         *st.public_base.write().await = pb;
     }
     StatusCode::NO_CONTENT
 }
 
-fn header_value(s: &str) -> HeaderValue {
-    HeaderValue::from_str(s).unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"))
-}
-
 async fn tile(State(st): State<AppState>, Path((source, z, x, y)): Path<(String, u32, u32, u32)>, headers: HeaderMap) -> Response {
     let if_none_match = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).map(str::to_string);
     match get_tile(&st, &source, z, x, y, if_none_match).await {
-        FetchOutcome::Hit(t) => {
-            let mut h = HeaderMap::new();
-            h.insert(header::CONTENT_TYPE, header_value(&t.content_type));
-            h.insert(header::ETAG, header_value(&t.etag));
-            h.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=86400"));
-            if t.stale {
-                h.insert("x-tilecache", HeaderValue::from_static("stale"));
-            }
-            (StatusCode::OK, h, t.body).into_response()
-        }
-        FetchOutcome::NotModified { etag } => {
-            let mut h = HeaderMap::new();
-            h.insert(header::ETAG, header_value(&etag));
-            (StatusCode::NOT_MODIFIED, h).into_response()
-        }
+        FetchOutcome::Hit(t) => crate::response::tile_http_response(&t.content_type, &t.etag, t.stale, t.body, None),
+        FetchOutcome::NotModified { etag } => crate::response::tile_http_response("", &etag, false, bytes::Bytes::new(), Some(&etag)),
         FetchOutcome::Empty { status } => StatusCode::from_u16(status).unwrap_or(StatusCode::NOT_FOUND).into_response(),
         FetchOutcome::NotAllowed => StatusCode::NOT_FOUND.into_response(),
         FetchOutcome::BadRequest(_) => StatusCode::BAD_REQUEST.into_response(),

@@ -1,18 +1,20 @@
 //! The microSD-aware tile cache: one bundled-SQLite DB, a single serialized connection, WAL,
 //! synchronous=NORMAL (survives boat power loss without corruption), a normal rowid table, a running
-//! byte total (so /cache/stats is O(1) and eviction needs no SUM scan), and LRU eviction under one
-//! global byte cap. Reads serialize through the same connection: tile reads are fast point lookups
-//! and the real cost on a miss is the network fetch, so a read pool is deferred.
+//! byte total (so eviction needs no SUM scan), and LRU eviction under one global byte cap. Reads
+//! serialize through the same connection: tile reads are fast point lookups and the real cost on a
+//! miss is the network fetch, so a read pool is deferred.
 
+use bytes::Bytes;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 /// The cache schema version. A mismatch drops and recreates the table (the cache is disposable, so a
 /// later column change rebuilds rather than reading stale rows).
 const SCHEMA_VERSION: i64 = 1;
 
-/// A stored tile, or a negative-cache marker when `blob` is `None` (a 404 or 204 from upstream).
+/// A stored tile, or a negative-cache marker when `blob` is `None` (a 404 or 204 from upstream). The
+/// blob is a ref-counted `Bytes`, so serving a cache hit clones a handle, not the bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CachedTile {
     pub content_type: String,
@@ -20,8 +22,9 @@ pub struct CachedTile {
     pub upstream_validator: Option<String>,
     pub status: i64,
     pub fetched_at: i64,
+    pub last_access: i64,
     pub bytes: i64,
-    pub blob: Option<Vec<u8>>,
+    pub blob: Option<Bytes>,
 }
 
 /// The outcome of a put: stored, or degraded (the disk is full) so the caller serves the bytes
@@ -58,6 +61,12 @@ impl TileCache {
         Ok(Self { inner: Mutex::new(Inner { conn, total_bytes }) })
     }
 
+    /// Take the connection lock, recovering the guard on a poisoned mutex so a single panic under the
+    /// lock (none is reachable today) cannot wedge the cache for the rest of the process.
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version != SCHEMA_VERSION {
@@ -84,22 +93,24 @@ impl TileCache {
 
     /// Look up a cached tile by key. Does not update last_access (the caller throttles touches).
     pub fn get(&self, source: &str, z: u32, x: u32, y: u32) -> rusqlite::Result<Option<CachedTile>> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.lock();
         inner
             .conn
             .query_row(
-                "SELECT content_type, strong_etag, upstream_validator, status, fetched_at, bytes, blob
+                "SELECT content_type, strong_etag, upstream_validator, status, fetched_at, last_access, bytes, blob
                  FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
                 params![source, z, x, y],
                 |r| {
+                    let blob: Option<Vec<u8>> = r.get(7)?;
                     Ok(CachedTile {
                         content_type: r.get(0)?,
                         strong_etag: r.get(1)?,
                         upstream_validator: r.get(2)?,
                         status: r.get(3)?,
                         fetched_at: r.get(4)?,
-                        bytes: r.get(5)?,
-                        blob: r.get(6)?,
+                        last_access: r.get(5)?,
+                        bytes: r.get(6)?,
+                        blob: blob.map(Bytes::from),
                     })
                 },
             )
@@ -109,7 +120,7 @@ impl TileCache {
     /// Insert or replace a tile, keeping the running byte total in sync. Returns Degraded on a full
     /// disk so the caller serves the bytes without storing them.
     pub fn put(&self, source: &str, z: u32, x: u32, y: u32, tile: &CachedTile, now: i64) -> rusqlite::Result<PutOutcome> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock();
         let old_bytes: Option<i64> = inner
             .conn
             .query_row(
@@ -124,7 +135,7 @@ impl TileCache {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 source, z, x, y, tile.content_type, tile.strong_etag, tile.upstream_validator,
-                tile.status, tile.fetched_at, now, tile.bytes, tile.blob
+                tile.status, tile.fetched_at, now, tile.bytes, tile.blob.as_deref()
             ],
         );
         match result {
@@ -140,7 +151,7 @@ impl TileCache {
     /// Bump a tile's last_access so the LRU keeps the hot tiles. The caller throttles this so a pan
     /// does not turn every read into a write (microSD wear).
     pub fn touch(&self, source: &str, z: u32, x: u32, y: u32, now: i64) -> rusqlite::Result<()> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.lock();
         inner.conn.execute(
             "UPDATE tiles SET last_access = ?5 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
             params![source, z, x, y, now],
@@ -148,31 +159,32 @@ impl TileCache {
         Ok(())
     }
 
-    /// Evict the least-recently-accessed rows until the total is at or below `cap_bytes`.
+    /// Evict the least-recently-accessed rows until the total is at or below `cap_bytes`, in one
+    /// windowed DELETE (the oldest rows whose running total crosses the deficit) rather than a
+    /// round-trip per row, so a large eviction does not hold the connection lock for N statements.
     pub fn evict_to(&self, cap_bytes: i64) -> rusqlite::Result<()> {
-        let mut inner = self.inner.lock().unwrap();
-        while inner.total_bytes > cap_bytes {
-            let oldest: Option<(String, u32, u32, u32, i64)> = inner
-                .conn
-                .query_row(
-                    "SELECT source, z, x, y, bytes FROM tiles ORDER BY last_access ASC LIMIT 1",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-                )
-                .optional()?;
-            let Some((source, z, x, y, bytes)) = oldest else { break };
-            inner.conn.execute(
-                "DELETE FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
-                params![source, z, x, y],
-            )?;
-            inner.total_bytes -= bytes;
+        let mut inner = self.lock();
+        if inner.total_bytes <= cap_bytes {
+            return Ok(());
         }
+        let to_free = inner.total_bytes - cap_bytes;
+        inner.conn.execute(
+            "DELETE FROM tiles WHERE rowid IN (
+                SELECT rowid FROM (
+                    SELECT rowid, SUM(bytes) OVER (ORDER BY last_access ASC, rowid ASC) - bytes AS prior
+                    FROM tiles
+                ) WHERE prior < ?1
+            )",
+            params![to_free],
+        )?;
+        inner.total_bytes = inner.conn.query_row("SELECT COALESCE(SUM(bytes), 0) FROM tiles", [], |r| r.get(0))?;
         Ok(())
     }
 
-    /// Row count and total bytes, both O(1) (the total is maintained on every put and delete).
+    /// Row count and total bytes. The total is O(1) (maintained on every put and delete); the count is
+    /// a `COUNT(*)`, O(n) in SQLite, but `/cache/stats` is called rarely.
     pub fn stats(&self) -> rusqlite::Result<(i64, i64)> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.lock();
         let rows: i64 = inner.conn.query_row("SELECT COUNT(*) FROM tiles", [], |r| r.get(0))?;
         Ok((rows, inner.total_bytes))
     }
@@ -190,8 +202,9 @@ mod tests {
             upstream_validator: None,
             status,
             fetched_at: 0,
+            last_access: 0,
             bytes,
-            blob,
+            blob: blob.map(Bytes::from),
         }
     }
 
@@ -206,9 +219,10 @@ mod tests {
         let (_f, c) = open();
         assert_eq!(c.put("s", 1, 0, 0, &tile(3, 200, Some(vec![1, 2, 3])), 10).unwrap(), PutOutcome::Stored);
         let got = c.get("s", 1, 0, 0).unwrap().unwrap();
-        assert_eq!(got.blob, Some(vec![1, 2, 3]));
+        assert_eq!(got.blob, Some(Bytes::from(vec![1, 2, 3])));
         assert_eq!(got.content_type, "image/png");
         assert_eq!(got.status, 200);
+        assert_eq!(got.last_access, 10);
         assert!(c.get("s", 1, 0, 1).unwrap().is_none());
     }
 

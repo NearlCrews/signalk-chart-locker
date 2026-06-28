@@ -21,7 +21,9 @@ async fn main() {
     let allow_private = std::env::var("TILECACHE_ALLOW_PRIVATE").as_deref() == Ok("1");
 
     if let Some(parent) = Path::new(&db).parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("tilecache: could not create cache directory {}: {e}", parent.display());
+        }
     }
     let cache = Arc::new(TileCache::open(Path::new(&db)).expect("open the tile cache DB"));
     let knobs = Knobs { cap_bytes: cap, allow_private_egress: allow_private, ..Default::default() };

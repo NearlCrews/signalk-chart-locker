@@ -46,10 +46,24 @@ fn acceptable_content_type(ct: &str) -> bool {
         || ct.starts_with("application/vnd.mapbox-vector-tile")
 }
 
-fn strong_etag(body: &[u8]) -> String {
+/// At most one last_access write per tile per hour, so a pan does not turn every warm-tile read into a
+/// microSD write while the LRU still tracks roughly-recent use.
+pub(crate) const TOUCH_THROTTLE_SECS: i64 = 3600;
+
+/// The strong content-address ETag served to the browser. Shared with the style proxy so the two
+/// content-address minters cannot diverge.
+pub(crate) fn strong_etag(body: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(body);
     format!("\"{:x}\"", h.finalize())
+}
+
+/// Log a cache write that failed for a reason other than a graceful disk-full degrade, so a real DB
+/// fault (locking, corruption) is visible in the container logs instead of silently dropped.
+pub(crate) fn log_cache_err<T>(result: rusqlite::Result<T>) {
+    if let Err(e) = result {
+        eprintln!("tilecache: cache write failed: {e}");
+    }
 }
 
 fn to_response(tile: &CachedTile, stale: bool) -> TileResponse {
@@ -58,30 +72,21 @@ fn to_response(tile: &CachedTile, stale: bool) -> TileResponse {
         content_type: tile.content_type.clone(),
         etag: tile.strong_etag.clone(),
         stale,
-        body: Bytes::from(tile.blob.clone().unwrap_or_default()),
+        body: tile.blob.clone().unwrap_or_default(),
     }
 }
 
 /// Fetch the upstream, returning (status, fetched) or an error on a transport failure (treated as
-/// offline). SSRF is enforced by the client's guarded DNS resolver, so a forbidden host fails to
-/// connect here. An oversize Content-Length is rejected before the body is read.
+/// offline). SSRF is enforced by guarded_get (the literal-IP guard plus the client's guarded DNS
+/// resolver), and the body is read under a streaming size cap, so a decompression or chunked bomb
+/// cannot be read unbounded into memory.
 async fn fetch_upstream(
     state: &AppState,
     url: &str,
     if_none_match: Option<&str>,
 ) -> Result<(u16, Fetched), ()> {
-    let _permit = state.egress.acquire().await.map_err(|_| ())?;
-    let mut req = state.client.get(url);
-    if let Some(v) = if_none_match {
-        req = req.header(reqwest::header::IF_NONE_MATCH, v);
-    }
-    let resp = req.send().await.map_err(|_| ())?;
+    let resp = state.guarded_get(url, if_none_match).await?;
     let status = resp.status().as_u16();
-    if let Some(len) = resp.content_length() {
-        if len > state.knobs.max_blob_bytes as u64 {
-            return Err(());
-        }
-    }
     let content_type = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -94,7 +99,7 @@ async fn fetch_upstream(
         .or_else(|| resp.headers().get(reqwest::header::LAST_MODIFIED))
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
-    let body = resp.bytes().await.map_err(|_| ())?;
+    let body = state.read_capped(resp).await.ok_or(())?;
     Ok((status, Fetched { content_type, validator, body }))
 }
 
@@ -112,11 +117,12 @@ fn store_200(state: &AppState, source_id: &str, z: u32, x: u32, y: u32, fetched:
         upstream_validator: fetched.validator,
         status: 200,
         fetched_at: now,
+        last_access: now,
         bytes: fetched.body.len() as i64,
-        blob: Some(fetched.body.to_vec()),
+        blob: Some(fetched.body.clone()),
     };
-    let _ = state.cache.put(source_id, z, x, y, &tile, now);
-    let _ = state.cache.evict_to(state.knobs.cap_bytes);
+    log_cache_err(state.cache.put(source_id, z, x, y, &tile, now));
+    log_cache_err(state.cache.evict_to(state.knobs.cap_bytes));
     if if_none_match == Some(etag.as_str()) {
         return FetchOutcome::NotModified { etag };
     }
@@ -131,10 +137,11 @@ fn negative_cache(state: &AppState, source_id: &str, z: u32, x: u32, y: u32, sta
         upstream_validator: None,
         status: status as i64,
         fetched_at: now,
+        last_access: now,
         bytes: 0,
         blob: None,
     };
-    let _ = state.cache.put(source_id, z, x, y, &tile, now);
+    log_cache_err(state.cache.put(source_id, z, x, y, &tile, now));
     FetchOutcome::Empty { status }
 }
 
@@ -170,7 +177,10 @@ pub async fn get_tile(
                 return FetchOutcome::Empty { status: tile.status as u16 };
             }
         } else if now - tile.fetched_at < state.knobs.fresh_secs {
-            let _ = state.cache.touch(source_id, z, x, y, now);
+            // Throttle the LRU write so a pan does not write to the microSD on every warm-tile read.
+            if now - tile.last_access >= TOUCH_THROTTLE_SECS {
+                log_cache_err(state.cache.touch(source_id, z, x, y, now));
+            }
             if if_none_match.as_deref() == Some(&tile.strong_etag) {
                 return FetchOutcome::NotModified { etag: tile.strong_etag };
             }
@@ -181,7 +191,8 @@ pub async fn get_tile(
                 Ok((304, _)) => {
                     let mut refreshed = tile.clone();
                     refreshed.fetched_at = now;
-                    let _ = state.cache.put(source_id, z, x, y, &refreshed, now);
+                    refreshed.last_access = now;
+                    log_cache_err(state.cache.put(source_id, z, x, y, &refreshed, now));
                     if if_none_match.as_deref() == Some(&tile.strong_etag) {
                         return FetchOutcome::NotModified { etag: tile.strong_etag };
                     }
@@ -215,7 +226,7 @@ pub async fn get_tile(
     }
     let outcome = match fetch_upstream(state, &url, None).await {
         Ok((200, fetched)) => store_200(state, source_id, z, x, y, fetched, if_none_match.as_deref()),
-        Ok((404, _)) | Ok((204, _)) => negative_cache(state, source_id, z, x, y, 404),
+        Ok((status @ (404 | 204), _)) => negative_cache(state, source_id, z, x, y, status),
         Ok(_) => FetchOutcome::Unavailable,
         Err(()) => {
             // Offline: serve any cached 200 within the max-stale bound.

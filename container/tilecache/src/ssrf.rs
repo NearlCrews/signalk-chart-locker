@@ -18,6 +18,10 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
                 || v4.is_documentation()
                 // 100.64.0.0/10 carrier-grade NAT (shared address space).
                 || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
+                // 240.0.0.0/4 reserved, 198.18.0.0/15 benchmarking, 192.0.0.0/24 IETF assignments.
+                || v4.octets()[0] >= 240
+                || (v4.octets()[0] == 198 && (v4.octets()[1] & 0xfe) == 18)
+                || (v4.octets()[0] == 192 && v4.octets()[1] == 0 && v4.octets()[2] == 0)
         }
         IpAddr::V6(v6) => {
             v6.is_loopback()

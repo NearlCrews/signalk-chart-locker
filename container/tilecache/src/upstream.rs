@@ -24,7 +24,9 @@ fn in_range(source: &ChartSource, z: u32, x: u32, y: u32) -> Result<(), BadReque
     if z < source.minzoom || z > source.maxzoom {
         return Err(BadRequest(format!("z {z} out of range for {}", source.id)));
     }
-    let span = 1u64 << z;
+    // checked_shl guards a source whose maxzoom is absurd (>= 64): the shift would overflow, so an
+    // unshiftable z yields span 0 and every x/y is rejected as out of range.
+    let span = 1u64.checked_shl(z).unwrap_or(0);
     if u64::from(x) >= span || u64::from(y) >= span {
         return Err(BadRequest(format!("x/y {x}/{y} out of range at z {z}")));
     }

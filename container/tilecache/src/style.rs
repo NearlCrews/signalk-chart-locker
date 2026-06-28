@@ -10,14 +10,13 @@ use crate::state::{now_secs, AppState, StyleState};
 use crate::cache::CachedTile;
 use axum::{
     extract::{Path, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Router,
 };
 use bytes::Bytes;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 pub fn style_routes() -> Router<AppState> {
@@ -31,31 +30,24 @@ pub fn style_routes() -> Router<AppState> {
 /// client's guarded DNS resolver, which already rejects private and loopback targets.
 fn host_allowed(url: &str, allowed_hosts: &[String]) -> bool {
     match reqwest::Url::parse(url) {
-        Ok(u) => u.host_str().map(|h| allowed_hosts.iter().any(|a| a == h)).unwrap_or(false),
+        Ok(u) => u.host_str().map(|h| allowed_hosts.iter().any(|a| a.eq_ignore_ascii_case(h))).unwrap_or(false),
         Err(_) => false,
     }
 }
 
 async fn fetch_json(state: &AppState, url: &str) -> Option<Value> {
-    let _permit = state.egress.acquire().await.ok()?;
-    let resp = state.client.get(url).send().await.ok()?;
+    let resp = state.guarded_get(url, None).await.ok()?;
     if !resp.status().is_success() {
         return None;
     }
-    let body = resp.bytes().await.ok()?;
+    let body = state.read_capped(resp).await?;
     serde_json::from_slice::<Value>(&body).ok()
 }
 
 async fn fetch_bytes(state: &AppState, url: &str) -> Option<(String, Bytes)> {
-    let _permit = state.egress.acquire().await.ok()?;
-    let resp = state.client.get(url).send().await.ok()?;
+    let resp = state.guarded_get(url, None).await.ok()?;
     if !resp.status().is_success() {
         return None;
-    }
-    if let Some(len) = resp.content_length() {
-        if len > state.knobs.max_blob_bytes as u64 {
-            return None;
-        }
     }
     let content_type = resp
         .headers()
@@ -63,7 +55,7 @@ async fn fetch_bytes(state: &AppState, url: &str) -> Option<(String, Bytes)> {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
-    let body = resp.bytes().await.ok()?;
+    let body = state.read_capped(resp).await?;
     Some((content_type, body))
 }
 
@@ -129,7 +121,10 @@ async fn style_doc(State(state): State<AppState>, Path(source): Path<String>) ->
 
     state.style_state.write().await.insert(source.clone(), StyleState { glyphs, source_tiles });
 
-    let body = serde_json::to_vec(&style).unwrap_or_default();
+    let body = match serde_json::to_vec(&style) {
+        Ok(bytes) => bytes,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
     ([(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
@@ -162,7 +157,9 @@ async fn vector_tile(State(state): State<AppState>, Path((source, name, z, x, y)
     // Cache first (also the offline path: serve a cached tile when the upstream is unreachable).
     if let Ok(Some(tile)) = state.cache.get(&cache_source, z, x, y) {
         if tile.status == 200 {
-            let _ = state.cache.touch(&cache_source, z, x, y, now_secs());
+            if now_secs() - tile.last_access >= crate::fetcher::TOUCH_THROTTLE_SECS {
+                crate::fetcher::log_cache_err(state.cache.touch(&cache_source, z, x, y, now_secs()));
+            }
             return tile_response(&tile, if_none_match.as_deref());
         }
     }
@@ -175,18 +172,18 @@ async fn vector_tile(State(state): State<AppState>, Path((source, name, z, x, y)
     match fetch_bytes(&state, &upstream).await {
         Some((content_type, body)) => {
             let now = now_secs();
-            let etag = format!("\"{:x}\"", Sha256::digest(&body));
             let tile = CachedTile {
-                content_type: content_type.clone(),
-                strong_etag: etag.clone(),
+                content_type,
+                strong_etag: crate::fetcher::strong_etag(&body),
                 upstream_validator: None,
                 status: 200,
                 fetched_at: now,
+                last_access: now,
                 bytes: body.len() as i64,
-                blob: Some(body.to_vec()),
+                blob: Some(body),
             };
-            let _ = state.cache.put(&cache_source, z, x, y, &tile, now);
-            let _ = state.cache.evict_to(state.knobs.cap_bytes);
+            crate::fetcher::log_cache_err(state.cache.put(&cache_source, z, x, y, &tile, now));
+            crate::fetcher::log_cache_err(state.cache.evict_to(state.knobs.cap_bytes));
             tile_response(&tile, if_none_match.as_deref())
         }
         None => StatusCode::BAD_GATEWAY.into_response(),
@@ -201,16 +198,7 @@ async fn style_allowed_hosts(state: &AppState, source: &str) -> Vec<String> {
 }
 
 fn tile_response(tile: &CachedTile, if_none_match: Option<&str>) -> Response {
-    if if_none_match == Some(tile.strong_etag.as_str()) {
-        let mut h = HeaderMap::new();
-        h.insert(header::ETAG, HeaderValue::from_str(&tile.strong_etag).unwrap_or(HeaderValue::from_static("")));
-        return (StatusCode::NOT_MODIFIED, h).into_response();
-    }
-    let mut h = HeaderMap::new();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_str(&tile.content_type).unwrap_or(HeaderValue::from_static("application/octet-stream")));
-    h.insert(header::ETAG, HeaderValue::from_str(&tile.strong_etag).unwrap_or(HeaderValue::from_static("")));
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=86400"));
-    (StatusCode::OK, h, Bytes::from(tile.blob.clone().unwrap_or_default())).into_response()
+    crate::response::tile_http_response(&tile.content_type, &tile.strong_etag, false, tile.blob.clone().unwrap_or_default(), if_none_match)
 }
 
 #[cfg(test)]
