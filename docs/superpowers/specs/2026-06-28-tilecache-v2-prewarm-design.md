@@ -20,7 +20,7 @@ warm when it travels outside the prewarmed box. Writes stay bounded so a microSD
 This is one spec built in two phases so the high-value, lower-risk path lands and can be boat-tested
 before the continuous-warm complexity.
 
-- Phase A (the prewarm box): the shared `tilesInBbox` helper and the bit-exact inverse projection, the
+- Phase A (the prewarm box): the shared `tilesInBbox` helper and the shared inverse projection, the
   container warm-job engine with server-side cap enforcement and box pinning, the admin gate and the
   plugin warm and config routes, the on-demand per-source average for the estimate, and the webapp
   prewarm panel with the estimate gate.
@@ -80,7 +80,7 @@ per-kind `expand_upstream`, the response builder, the SSRF guards). No parallel 
   `state.sources` (404 an unknown id), clamp the zoom range to each source's `[minzoom, maxzoom]`,
   validate the bbox (finite, `minLng < maxLng`, latitude within the Mercator limit), and hard-cap the
   projected tile count (reject an absurd payload, defeating an enumeration denial of service). Enumerate
-  lazily with the bit-exact inverse and fetch each tile through the existing
+  lazily with the same inverse formula and fetch each tile through the existing
   `get_tile` path (single-flight coalescing, the egress semaphore, the negative-cache skip, the body
   cap, and the content-type validation all apply unchanged). Returns a `jobId`.
 - `GET /warm/:jobId`: `{ total, done, skipped, bytes, errors, state }` where `state` is
