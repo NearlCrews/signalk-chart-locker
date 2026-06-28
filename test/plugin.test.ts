@@ -173,6 +173,16 @@ test('lifecycle serialization: stop-during-start and start-during-stop run in or
   assert.equal(app.errors.length, 0, 'no errors from any transition')
 })
 
+test('stop calls the navigation.position unsubscribe returned by streambundle', async () => {
+  setContainerManager(fakeManager())
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  await plugin.start({}, () => {})
+  assert.equal(app.positionUnsubCalled, false)
+  await plugin.stop()
+  assert.equal(app.positionUnsubCalled, true)
+})
+
 test('stop then start again installs the bridge on the second start', async () => {
   const record = managerRecord()
   setContainerManager(fakeManager({ record }))

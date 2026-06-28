@@ -1,6 +1,7 @@
 /** The plugin factory: lifecycle that launches the router container and publishes the in-process bridge. */
 
 import type { Plugin, ServerAPI } from '@signalk/server-api'
+import type { Position } from '../shared/types.js'
 import { PLUGIN_ID, PLUGIN_NAME, PLUGIN_DESCRIPTION } from '../shared/plugin-id.js'
 import { requireContainerManager, getContainerManager, ensureRuntimeReady } from '../runtime/container-manager.js'
 import { ROUTER_CONTAINER_NAME, ROUTER_INTERNAL_PORT, DEFAULT_ROUTER_TAG, buildRouterConfig, probeRouterHealth } from '../runtime/router-container.js'
@@ -9,6 +10,9 @@ import { buildSourcePayload, pushTilecacheConfig } from '../runtime/tilecache-co
 import { installRouteOnWaterBridge, removeRouteOnWaterBridge, createRouterBridge } from '../bridge/route-on-water-bridge.js'
 import { registerTileRoutes, type TileRouter } from '../http/tile-routes.js'
 import { registerPrewarmRoutes, type PrewarmRouter } from '../http/prewarm-routes.js'
+import { createPositionWarmer, type PositionWarmer } from '../runtime/position-warmer.js'
+import { loadPrewarmConfig } from '../runtime/prewarm-store.js'
+import { warmRegion } from '../runtime/tilecache-client.js'
 
 interface CompanionConfig {
   imageTag?: string
@@ -29,6 +33,9 @@ export function createPlugin (app: ServerAPI): Plugin {
   // failure never blocks the router or the bridge. Its address is held for the proxy routes.
   let tilecacheLaunched = false
   let tilecacheAddress: string | null = null
+  // Position-warm lifecycle state (factory scope, like launched and tilecacheAddress).
+  let positionUnsub: (() => void) | null = null
+  let warmer: PositionWarmer | null = null
 
   async function doStart (config: CompanionConfig): Promise<void> {
     app.setPluginStatus('Starting...')
@@ -74,10 +81,24 @@ export function createPlugin (app: ServerAPI): Plugin {
       app.debug('Tilecache container did not start; tile caching is disabled:', err)
     }
 
+    warmer = createPositionWarmer({
+      getConfig: () => loadPrewarmConfig(app.getDataDirPath()),
+      warm: async (bbox, sources, minzoom, maxzoom) => {
+        const address = tilecacheAddress
+        if (address === null) return null
+        return warmRegion(address, { bbox, sources, minzoom, maxzoom })
+      }
+    })
+    positionUnsub = app.streambundle.getSelfBus('navigation.position' as unknown as Parameters<typeof app.streambundle.getSelfBus>[0])
+      .onValue((delta: { value: unknown }) => { warmer?.onPosition(delta.value as Position) })
+
     app.setPluginStatus(`Router at ${address}${tilecacheAddress !== null ? `, tilecache at ${tilecacheAddress}` : ''}.`)
   }
 
   async function doStop (): Promise<void> {
+    if (positionUnsub) { positionUnsub(); positionUnsub = null }
+    warmer = null
+
     removeRouteOnWaterBridge()
 
     // Clear the tilecache address first so the proxy routes report unavailable, then stop its container.

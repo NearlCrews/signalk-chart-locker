@@ -12,6 +12,8 @@ export interface Recorder {
   status: string[]
   errors: string[]
   config: { configPath: string }
+  /** True once the navigation.position unsubscribe returned by getSelfBus().onValue() is called. */
+  positionUnsubCalled: boolean
   setPluginStatus (m: string): void
   setPluginError (m: string): void
   error (...args: unknown[]): void
@@ -26,19 +28,22 @@ export function fakeApp (): Recorder {
   // One real temp directory per app, used for both the config path and the data dir, so the JSON state
   // persistence and the chart discovery in start() have a writable directory and never collide.
   const dir = mkdtempSync(join(tmpdir(), 'companion-test-'))
-  return {
+  let positionUnsubCalled = false
+  const app: Recorder = {
     status: [],
     errors: [],
     config: { configPath: dir },
-    setPluginStatus (m) { this.status.push(m) },
-    setPluginError (m) { this.errors.push(m) },
+    get positionUnsubCalled () { return positionUnsubCalled },
+    setPluginStatus (m) { app.status.push(m) },
+    setPluginError (m) { app.errors.push(m) },
     error () {},
     debug () {},
     getDataDirPath () { return dir },
     registerResourceProvider () {},
     get () {},
-    streambundle: { getSelfBus (_path?: unknown) { return { onValue () { return () => {} } } } }
+    streambundle: { getSelfBus (_path?: unknown) { return { onValue () { return () => { positionUnsubCalled = true } } } } }
   }
+  return app
 }
 
 /** Records the names and configs passed to ensureRunning and the names passed to stop. */
