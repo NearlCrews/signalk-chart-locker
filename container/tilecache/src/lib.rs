@@ -8,4 +8,5 @@ pub mod routes;
 pub mod source;
 pub mod ssrf;
 pub mod state;
+pub mod style;
 pub mod upstream;

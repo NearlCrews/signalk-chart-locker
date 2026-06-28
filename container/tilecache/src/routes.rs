@@ -22,6 +22,7 @@ pub fn app(state: AppState) -> Router {
         .route("/cache/stats", get(stats))
         .route("/config", post(config))
         .route("/tile/:source/:z/:x/:y", get(tile))
+        .merge(crate::style::style_routes())
         .with_state(state)
 }
 

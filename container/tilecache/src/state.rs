@@ -57,6 +57,15 @@ impl Default for Knobs {
     }
 }
 
+/// Per-style upstream templates, learned when the style document is first fetched, so the glyph and
+/// vector-tile sub-resource routes can reconstruct the upstream URL (the placeholders stay in the
+/// outer URL, so the templates cannot be opaquely passed through).
+#[derive(Clone, Default)]
+pub struct StyleState {
+    pub glyphs: Option<String>,
+    pub source_tiles: HashMap<String, Vec<String>>,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub cache: Arc<TileCache>,
@@ -64,6 +73,8 @@ pub struct AppState {
     pub sources: Arc<RwLock<HashMap<String, ChartSource>>>,
     /// The plugin-facing public base (for example /plugins/signalk-binnacle-companion), set by POST /config.
     pub public_base: Arc<RwLock<String>>,
+    /// Per-style learned upstream templates, keyed by source id.
+    pub style_state: Arc<RwLock<HashMap<String, StyleState>>>,
     pub knobs: Knobs,
     pub egress: Arc<Semaphore>,
     pub inflight: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
@@ -83,6 +94,7 @@ impl AppState {
             client,
             sources: Arc::new(RwLock::new(HashMap::new())),
             public_base: Arc::new(RwLock::new(String::new())),
+            style_state: Arc::new(RwLock::new(HashMap::new())),
             knobs,
             egress: Arc::new(Semaphore::new(8)),
             inflight: Arc::new(Mutex::new(HashMap::new())),
