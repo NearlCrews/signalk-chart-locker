@@ -115,9 +115,10 @@ live-proxy path:
 ## 6. The companion plugin
 
 - Persist the box and the settings (the bbox, the selected source ids, the zoom range, and the
-  position-warm settings) via the Signal K applicationData store, NOT `schema()` and NOT
-  `savePluginOptions` (which would surface the values in the schema config screen and create a second
-  input surface).
+  position-warm settings) as a JSON file under `app.getDataDirPath()` (the crows-nest route-draft-budget
+  precedent), NOT `schema()` and NOT `savePluginOptions` (which would surface the values in the schema
+  config screen and create a second input surface). The typed server API exposes no applicationData write
+  method, so a plugin data file is the persistence seam.
 - Port the admin gate. The plugin has no auth today; `registerWithRouter` mounts plain unauthenticated
   routes. Port `ensureApiAdminGate` from crows-nest (`src/status/admin-gate.ts`):
   `app.securityStrategy.addAdminMiddleware(path)`, fail-closed (the route is not mounted if the gate is

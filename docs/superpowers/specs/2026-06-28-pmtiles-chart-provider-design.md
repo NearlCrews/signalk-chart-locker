@@ -94,8 +94,8 @@ multi-device serving without a second cache.
 - Register the chart with the v1 `/signalk/v1/api/resources/charts` shape and the v2
   `registerResourceProvider({ type: 'charts' })` read path, using the preserved `nameToId` id and the
   decoded metadata. The chart resource `url` and `tilemapUrl` point at the plugin serve route in
-  section 5 (Serve). Per-chart override of the name, the description, and the scale is persisted via the
-  applicationData store.
+  section 5 (Serve). Per-chart override of the name, the description, and the scale is persisted as a JSON
+  file under `app.getDataDirPath()` (the typed server API exposes no applicationData write method).
 
 ### Serve
 
