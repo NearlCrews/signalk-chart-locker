@@ -36,6 +36,8 @@ These are project-wide rules copied from the spec and the project CLAUDE.md. The
 - **Deterministic numerics:** FMA contraction is disabled on x86_64 via `container/.cargo/config.toml`; aarch64 relies on Rust's default of no FMA contraction and no fast-math. Preserve expression order. Use `total_cmp`, not `partial_cmp().unwrap()`, on any sort a non-finite float could reach. The inverse projection is same-formula parity (not bit-exact), because the container hard-stops at the cap, so a boundary-tile difference between the TS estimate and the Rust enumeration is harmless.
 - **The trust boundary stays in the webapp and the JS plugin:** the Signal K read (the vessel position for position-warm) stays in the JS plugin. The container never reads Signal K, stays tokenless, and is Signal K agnostic (the warm takes explicit geometry, never a Signal K path). The warm path adds no new SSRF or open-URL hole: it is allowlist-keyed by source id resolved against `state.sources`, routed through `expand_upstream` and the guarded fetch (the literal-IP guard, the guarded resolver, redirects off, the body cap, and the content-type validation), exactly like the live proxy. There is no client-supplied URL. The container serves bytes and a stale marker; it never decides what is safe to show.
 - **The container port stays off the boat LAN:** the browser reaches tiles only through the plugin route, and `signalkAccessiblePorts` keeps the container port private. The plugin reaches the container via the resolved private address.
+- **Plugin POST bodies arrive pre-parsed:** the Signal K server parses JSON request bodies before a plugin's `registerWithRouter` sub-router runs, so a POST handler reads `req.body` as an already-parsed object. This is the established in-repo precedent: `signalk-crows-nest/src/route-draft/endpoint.ts` mounts `router.post('/api/route-draft', ...)` (line 904) and reads `parseRequest(req.body)` (line 631) with no `express.json()` and no body-parser of its own. So the prewarm POST handlers here read `req.body` directly; do not add `express.json()` or a manual JSON body read.
+- **Shared modules this plan creates (consumed by the PMTiles chart provider plan too):** the admin gate is the single `src/shared/admin-gate.ts` (owned here, imported by the chart provider plan, never re-ported), the JSON state persistence is the single sync helper `src/runtime/json-state.ts` (owned here, imported by the chart provider plan), and the extended shared test fake `test/helpers.ts` `fakeApp()` is extended once here and relied on by the chart provider plan. The webapp clients in `signalk-binnacle` share one base and auth helper (see Task 14).
 - **Writing style (prose, comments, commits, docs, file content):** no em dashes, use the Oxford comma, write "and" not the ampersand, "chartplotter" is one word. Never describe any AI or review process in any user-facing or repo-facing writing.
 - **Build and test commands:**
   - Shared package: `npm run typecheck`, `npm test`, `npm run build`.
@@ -430,7 +432,7 @@ Steps:
 
 **Files:**
 - Modify `/home/dietpi/src/signalk-binnacle-companion/container/tilecache/src/cache.rs` (SCHEMA_VERSION line 14, schema lines 70-92, `put` lines 122-149, `evict_to` lines 165-182, add new methods, add tests).
-- Modify `/home/dietpi/src/signalk-binnacle-companion/container/tilecache/src/fetcher.rs` (the four `cache.put` call sites at lines 124, 144, 195, and the `store_200`/`negative_cache`/revalidate paths, to pass `pinned: false`).
+- Modify `/home/dietpi/src/signalk-binnacle-companion/container/tilecache/src/fetcher.rs` (the three `cache.put` call sites at lines 124, 144, 195, the `store_200`/`negative_cache`/revalidate paths, to pass `pinned: false`).
 
 **Interfaces:**
 - Consumes: the existing `CachedTile` struct and `Inner { conn, total_bytes }`.
@@ -439,9 +441,12 @@ Steps:
   - `pub fn put(&self, source: &str, z: u32, x: u32, y: u32, tile: &CachedTile, pinned: bool, now: i64) -> rusqlite::Result<PutOutcome>` (the `pinned` parameter is new).
   - `pub struct WarmRow { pub source: String, pub z: u32, pub x: u32, pub y: u32, pub tile: CachedTile }`
   - `pub struct PutManyOutcome { pub stored: usize, pub bytes_added: i64, pub capped: bool }`
-  - `pub fn put_many_pinned(&self, rows: &[WarmRow], cap_bytes: i64, now: i64) -> rusqlite::Result<PutManyOutcome>`
+  - `pub fn put_many_pinned(&self, rows: &[WarmRow], cap_bytes: i64, now: i64) -> rusqlite::Result<PutManyOutcome>` (the cap check uses the net byte delta on `INSERT OR REPLACE`, so a re-warm of an already-cached row does not trip the cap early).
+  - `pub fn pin(&self, source: &str, z: u32, x: u32, y: u32) -> rusqlite::Result<()>` (mark an already-cached row pinned without re-fetching or changing its bytes; the warm uses it when a fresh tile is skipped so the box is fully eviction-exempt).
   - `pub fn per_source_avg(&self) -> rusqlite::Result<Vec<(String, f64)>>`
   - `evict_to` excludes pinned rows.
+
+The `pinned` column lives only within a schema version: the version-mismatch branch drops and recreates the `tiles` table, so a future `SCHEMA_VERSION` bump (1 to 2 here, and any later bump) wipes the pinned box along with the rest of the cache. The cache is disposable by design and a warm can be re-run, so this is acceptable; the "pinned box durable on the volume" guarantee holds only across restarts within a schema version, not across a schema bump. Documented again in the spec-coverage note at the end.
 
 Steps:
 
@@ -478,12 +483,22 @@ Steps:
       let avg = c.per_source_avg().unwrap();
       assert_eq!(avg, vec![("s".to_string(), 100.0)]);
   }
+
+  #[test]
+  fn pin_marks_an_existing_unpinned_row_eviction_exempt() {
+      let (_f, c) = open();
+      c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, 1).unwrap(); // unpinned, e.g. cached by the live proxy
+      c.pin("s", 0, 0, 0).unwrap();
+      c.evict_to(0).unwrap(); // would drop every unpinned row
+      assert!(c.get("s", 0, 0, 0).unwrap().is_some(), "a pinned row survives eviction");
+      assert_eq!(c.stats().unwrap().1, 10, "pin changes no bytes");
+  }
   ```
   Update the existing `tests` helpers and call sites so they pass the new `pinned` argument: change every `c.put(...)` in the test module to insert `false` before the `now` argument (for example `c.put("s", 1, 0, 0, &tile(3, 200, Some(vec![1, 2, 3])), false, 10)`).
 - [ ] Run it and watch it fail: `cd /home/dietpi/src/signalk-binnacle-companion/container && cargo test -p binnacle-tilecache cache`. Expected FAIL (the `pinned` parameter, `put_many_pinned`, `WarmRow`, and `per_source_avg` do not exist; the schema has no `pinned` column).
 - [ ] Minimal implementation in `cache.rs`:
   - Bump the constant: `const SCHEMA_VERSION: i64 = 2;`
-  - Add the column to the `CREATE TABLE` (after `blob BLOB,`): `pinned INTEGER NOT NULL DEFAULT 0,`. The existing version-mismatch branch already drops and recreates, so this is the v1 drop-and-recreate upgrade path; no migration code is needed.
+  - Add the column to the `CREATE TABLE` (after `blob BLOB,`): `pinned INTEGER NOT NULL DEFAULT 0,`. The existing version-mismatch branch already drops and recreates, so this is the v1 drop-and-recreate upgrade path; no migration code is needed. Document the consequence in the comment near `SCHEMA_VERSION`: a schema bump drops and recreates `tiles`, so it wipes the pinned box along with the cache. That is acceptable (the cache is disposable and a warm can be re-run), but it means the pinned-box durability guarantee holds only within a schema version, not across a bump.
   - Add the `pinned: bool` parameter to `put` and write it (the cache is disposable, so a column add rebuilds):
     ```rust
     pub fn put(&self, source: &str, z: u32, x: u32, y: u32, tile: &CachedTile, pinned: bool, now: i64) -> rusqlite::Result<PutOutcome> {
@@ -542,7 +557,9 @@ Steps:
     /// Store a batch of warm tiles pinned, in one transaction, with an explicit pre-store cap check. A warm
     /// NEVER evicts: when the next sized row would cross `cap_bytes`, it stops and reports `capped`.
     /// Negative-cache rows (zero bytes) always store. Pinned rows are eviction-exempt but still count
-    /// against the cap, so the budget stays honest.
+    /// against the cap, so the budget stays honest. The cap check uses the NET byte delta
+    /// (new bytes minus any existing row's bytes), so re-warming an already-cached tile does not trip the
+    /// cap early on an `INSERT OR REPLACE`.
     pub fn put_many_pinned(&self, rows: &[WarmRow], cap_bytes: i64, now: i64) -> rusqlite::Result<PutManyOutcome> {
         let mut inner = self.lock();
         let base = inner.total_bytes;
@@ -552,14 +569,16 @@ Steps:
         {
             let tx = inner.conn.unchecked_transaction()?;
             for r in rows {
-                if r.tile.bytes > 0 && base + added + r.tile.bytes > cap_bytes {
-                    capped = true;
-                    break;
-                }
                 let old: Option<i64> = tx.query_row(
                     "SELECT bytes FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
                     params![r.source, r.z, r.x, r.y], |row| row.get(0),
                 ).optional()?;
+                let delta = r.tile.bytes - old.unwrap_or(0);
+                // Only a net-positive sized row can cross the cap; a re-warm of equal or smaller bytes never does.
+                if delta > 0 && base + added + delta > cap_bytes {
+                    capped = true;
+                    break;
+                }
                 tx.execute(
                     "INSERT OR REPLACE INTO tiles
                      (source, z, x, y, content_type, strong_etag, upstream_validator, status, fetched_at, last_access, bytes, blob, pinned)
@@ -569,13 +588,25 @@ Steps:
                         r.tile.status, r.tile.fetched_at, now, r.tile.bytes, r.tile.blob.as_deref()
                     ],
                 )?;
-                added += r.tile.bytes - old.unwrap_or(0);
+                added += delta;
                 stored += 1;
             }
             tx.commit()?;
         }
         inner.total_bytes = base + added;
         Ok(PutManyOutcome { stored, bytes_added: added, capped })
+    }
+
+    /// Mark an already-cached row pinned (eviction-exempt) without re-fetching or changing its bytes. A warm
+    /// calls this when it skips a tile that is already cached fresh, so a tile previously stored UNPINNED by
+    /// the live proxy still becomes part of the eviction-exempt box. A no-op when the row is absent.
+    pub fn pin(&self, source: &str, z: u32, x: u32, y: u32) -> rusqlite::Result<()> {
+        let inner = self.lock();
+        inner.conn.execute(
+            "UPDATE tiles SET pinned = 1 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
+            params![source, z, x, y],
+        )?;
+        Ok(())
     }
 
     /// The mean stored byte size per source over real (status 200, blob present) tiles, excluding
@@ -742,6 +773,26 @@ Steps:
       }
 
       #[tokio::test]
+      async fn warm_pins_a_preexisting_unpinned_tile_it_skips() {
+          let addr = stub().await;
+          let db = NamedTempFile::new().unwrap();
+          let st = state(&db, dev(), xyz(addr, "img")).await;
+          // Seed an UNPINNED, fresh 200 row as the live proxy would, so the warm skips the fetch but must
+          // still pin it so the box is fully eviction-exempt.
+          let now = crate::state::now_secs();
+          let seeded = CachedTile {
+              content_type: "image/png".into(), strong_etag: "x".into(), upstream_validator: None,
+              status: 200, fetched_at: now, last_access: now, bytes: 4, blob: Some(vec![1, 2, 3, 4]),
+          };
+          st.cache.put("s", 0, 0, 0, &seeded, false, now).unwrap();
+          let job = start_warm(&st, WarmRequest { sources: vec![st.sources.read().await["s"].clone()], bbox: [-10.0, -10.0, 10.0, 10.0], minzoom: 0, maxzoom: 0 }).await.unwrap();
+          let snap = wait_done(&st, &job).await;
+          assert!(snap["skipped"].as_u64().unwrap() >= 1, "the fresh tile is skipped, not refetched");
+          st.cache.evict_to(0).unwrap();
+          assert!(st.cache.get("s", 0, 0, 0).unwrap().is_some(), "the skipped tile was pinned by the warm");
+      }
+
+      #[tokio::test]
       async fn warm_marks_capped_and_does_not_evict() {
           let addr = stub().await;
           let db = NamedTempFile::new().unwrap();
@@ -763,7 +814,16 @@ Steps:
           unknown.id = "nope".into();
           assert!(matches!(start_warm(&st, WarmRequest { sources: vec![unknown], bbox: [-1.0, -1.0, 1.0, 1.0], minzoom: 0, maxzoom: 0 }).await, Err(StartError::UnknownSource(_))));
           assert!(matches!(start_warm(&st, WarmRequest { sources: vec![known.clone()], bbox: [10.0, 10.0, 5.0, 5.0], minzoom: 0, maxzoom: 0 }).await, Err(StartError::BadBbox(_))));
-          // maxzoom 4 over the whole world is 1+4+16+64+256 = 341 tiles, under the hard cap; force the cap with a tiny hard cap test by zoom span if needed.
+          // A source with a deep max zoom over the whole world projects past WARM_TILE_HARD_CAP (2_000_000):
+          // zoom 11 alone is 4^11 = 4_194_304 tiles, so start_warm rejects it upfront with TooMany. Replace
+          // the stored "s" with a deep-zoom copy so start_warm resolves the real (deep) source for the count.
+          let mut deep = known.clone();
+          deep.maxzoom = 12;
+          st.sources.write().await.insert(deep.id.clone(), deep.clone());
+          assert!(matches!(
+              start_warm(&st, WarmRequest { sources: vec![deep], bbox: [-180.0, -85.0, 180.0, 85.0], minzoom: 0, maxzoom: 12 }).await,
+              Err(StartError::TooMany(_))
+          ));
       }
 
       #[tokio::test]
@@ -861,13 +921,16 @@ Steps:
       if req.minzoom > req.maxzoom {
           return Err(StartError::BadZoom(format!("minzoom {} > maxzoom {}", req.minzoom, req.maxzoom)));
       }
-      let b = req.bbox;
+      let mut b = req.bbox;
       if !b.iter().all(|v| v.is_finite()) || b[0] >= b[2] || b[1] >= b[3] {
           return Err(StartError::BadBbox(format!("invalid bbox {b:?}")));
       }
-      if b[1] < -crate::geom::MAX_MERCATOR_LAT || b[3] > crate::geom::MAX_MERCATOR_LAT {
-          return Err(StartError::BadBbox("latitude beyond the web mercator limit".into()));
-      }
+      // Clamp latitude to the Web Mercator limit rather than rejecting it, matching the shared TS clip that
+      // the panel estimate uses, so a direct POST with a beyond-limit latitude warms the clamped band
+      // instead of failing with a 400 (the estimate would have clamped and shown a count). Longitude order
+      // and finiteness stay hard errors.
+      b[1] = b[1].max(-crate::geom::MAX_MERCATOR_LAT);
+      b[3] = b[3].min(crate::geom::MAX_MERCATOR_LAT);
       // Every source must be in the allowlist; a style source has no tile path.
       let mut total = 0u64;
       {
@@ -947,6 +1010,11 @@ Steps:
           let fresh = tile.status == 200 && now - tile.fetched_at < st.knobs.fresh_secs;
           let neg = tile.status != 200 && now - tile.fetched_at < st.knobs.negative_ttl_secs;
           if fresh || neg {
+              // The tile is current, so skip the fetch, but still pin the existing row: it may have been
+              // cached UNPINNED by the live proxy, and the warmed box must be fully eviction-exempt.
+              if let Err(e) = st.cache.pin(&source.id, z, x, y) {
+                  eprintln!("tilecache: warm pin failed: {e}");
+              }
               return Fetched::Skipped;
           }
       }
@@ -1197,15 +1265,170 @@ Steps:
 
 ## Phase A: the plugin
 
-### Task 8 [Phase A]: port the admin gate to the companion plugin
+### Task 8 [Phase A]: extend the shared test fake (fakeApp)
+
+This is the single, early extension of the shared `test/helpers.ts` `fakeApp()` that the rest of this plan and the PMTiles chart provider plan rely on. After this plan and the chart provider plan, `createPlugin` reads `app.config.configPath` at construction and `doStart` calls `app.getDataDirPath()`, `app.streambundle.getSelfBus(...)`, `app.registerResourceProvider(...)`, and `app.get(...)`. The existing `test/plugin.test.ts` and `test/plugin-integration.test.ts` build the app with `fakeApp()`, so they would throw at construction or in `start()` unless `fakeApp()` provides those. Extend it once, here, and have every later task (and the chart provider plan) rely on it.
 
 **Files:**
-- Create `/home/dietpi/src/signalk-binnacle-companion/src/http/admin-gate.ts` (ported from `signalk-crows-nest/src/status/admin-gate.ts`, retargeted to this plugin id).
+- Modify `/home/dietpi/src/signalk-binnacle-companion/test/helpers.ts` (extend the `Recorder` interface and `fakeApp()`).
+
+**Interfaces:**
+- Consumes: `node:fs` `mkdtempSync`, `node:os` `tmpdir`, `node:path` `join`.
+- Produces: an extended `Recorder` and `fakeApp()` that adds `config: { configPath: string }`, `error (...args: unknown[]): void`, `getDataDirPath (): string`, `registerResourceProvider (provider: unknown): void`, `get (path: string, handler: unknown): void`, and `streambundle: { getSelfBus (path?: unknown): { onValue (cb: (value: unknown) => void): () => void } }`. `configPath` and `getDataDirPath()` return one per-instance temp directory so persistence and discovery have a real writable directory.
+
+Steps:
+
+- [ ] Write the failing test. Create `test/helpers-fakeapp.test.ts`:
+  ```ts
+  import test from 'node:test'
+  import assert from 'node:assert/strict'
+  import { existsSync } from 'node:fs'
+  import { fakeApp } from './helpers.js'
+
+  test('fakeApp exposes the lifecycle dependencies the plugin reads', () => {
+    const app = fakeApp()
+    assert.equal(typeof app.config.configPath, 'string')
+    assert.ok(existsSync(app.config.configPath), 'configPath is a real directory')
+    assert.equal(app.getDataDirPath(), app.config.configPath)
+    assert.equal(typeof app.error, 'function')
+    assert.equal(typeof app.registerResourceProvider, 'function')
+    assert.equal(typeof app.get, 'function')
+    const unsub = app.streambundle.getSelfBus('navigation.position').onValue(() => {})
+    assert.equal(typeof unsub, 'function')
+  })
+  ```
+- [ ] Run it and watch it fail: `cd /home/dietpi/src/signalk-binnacle-companion && npm test`. Expected FAIL (`config`, `getDataDirPath`, `error`, `registerResourceProvider`, `get`, and `streambundle` are not on `fakeApp()`).
+- [ ] Minimal implementation. Edit `test/helpers.ts`. Add the imports at the top:
+  ```ts
+  import { mkdtempSync } from 'node:fs'
+  import { tmpdir } from 'node:os'
+  import { join } from 'node:path'
+  ```
+  Extend the `Recorder` interface:
+  ```ts
+  export interface Recorder {
+    status: string[]
+    errors: string[]
+    config: { configPath: string }
+    setPluginStatus (m: string): void
+    setPluginError (m: string): void
+    error (...args: unknown[]): void
+    debug (...args: unknown[]): void
+    getDataDirPath (): string
+    registerResourceProvider (provider: unknown): void
+    get (path: string, handler: unknown): void
+    streambundle: { getSelfBus (path?: unknown): { onValue (cb: (value: unknown) => void): () => void } }
+  }
+  ```
+  Replace `fakeApp()`:
+  ```ts
+  export function fakeApp (): Recorder {
+    // One real temp directory per app, used for both the config path and the data dir, so the JSON state
+    // persistence and the chart discovery in start() have a writable directory and never collide.
+    const dir = mkdtempSync(join(tmpdir(), 'companion-test-'))
+    return {
+      status: [],
+      errors: [],
+      config: { configPath: dir },
+      setPluginStatus (m) { this.status.push(m) },
+      setPluginError (m) { this.errors.push(m) },
+      error () {},
+      debug () {},
+      getDataDirPath () { return dir },
+      registerResourceProvider () {},
+      get () {},
+      streambundle: { getSelfBus () { return { onValue () { return () => {} } } } }
+    }
+  }
+  ```
+- [ ] Run it and watch it pass: `cd /home/dietpi/src/signalk-binnacle-companion && npm test`. Expected PASS, and the existing `test/plugin.test.ts`, `test/plugin-integration.test.ts`, and `test/container-manager.test.ts` still PASS unchanged (they call `fakeApp()` and now receive the richer fake). Then `npm run typecheck` and `npm run lint`. Expected PASS.
+- [ ] Commit: `test(companion): extend the shared fakeApp with the plugin lifecycle deps`
+
+### Task 9 [Phase A]: shared sync JSON state helper
+
+The prewarm box persistence (Task 11) and the PMTiles per-chart override persistence (the chart provider plan) both persist a small JSON state file under a Signal K directory. Hoist that idiom into one sync helper here so the two never diverge into a sync copy and an async copy. Sync matches a small single-writer state file and the existing prewarm store. The chart provider plan imports this helper rather than rolling its own async `readFile`/`writeFile`.
+
+**Files:**
+- Create `/home/dietpi/src/signalk-binnacle-companion/src/runtime/json-state.ts`.
+- Create `/home/dietpi/src/signalk-binnacle-companion/test/json-state.test.ts`.
+- Reference: `signalk-crows-nest` persists a JSON state file under `app.getDataDirPath()` (the route-draft budget, `src/plugin/plugin.ts:286` builds the path); the companion standardizes that persistence on this sync helper.
+
+**Interfaces:**
+- Consumes: `node:fs` `mkdirSync`/`readFileSync`/`writeFileSync`, `node:path` `dirname`.
+- Produces:
+  - `export function readJsonState<T> (path: string, fallback: T): T` (parse the file, returning `fallback` on a missing or corrupt file).
+  - `export function writeJsonState (path: string, value: unknown): void` (create the parent directory if needed, then write pretty JSON).
+
+Steps:
+
+- [ ] Write the failing test. Create `test/json-state.test.ts`:
+  ```ts
+  import test from 'node:test'
+  import assert from 'node:assert/strict'
+  import { mkdtempSync, writeFileSync } from 'node:fs'
+  import { tmpdir } from 'node:os'
+  import { join } from 'node:path'
+  import { readJsonState, writeJsonState } from '../src/runtime/json-state.js'
+
+  test('readJsonState returns the fallback when the file is missing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'json-state-'))
+    assert.deepEqual(readJsonState(join(dir, 'x.json'), { a: 1 }), { a: 1 })
+  })
+
+  test('writeJsonState then readJsonState round-trips, creating the parent directory', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'json-state-'))
+    const path = join(dir, 'nested', 'x.json')
+    writeJsonState(path, { a: 2, b: ['c'] })
+    assert.deepEqual(readJsonState(path, {}), { a: 2, b: ['c'] })
+  })
+
+  test('a corrupt file falls back rather than throwing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'json-state-'))
+    const path = join(dir, 'x.json')
+    writeFileSync(path, 'not json')
+    assert.deepEqual(readJsonState(path, { ok: true }), { ok: true })
+  })
+  ```
+- [ ] Run it and watch it fail: `cd /home/dietpi/src/signalk-binnacle-companion && npm test`. Expected FAIL (`src/runtime/json-state.ts` does not exist).
+- [ ] Minimal implementation. Create `src/runtime/json-state.ts`:
+  ```ts
+  /** A small sync JSON state helper: read a JSON file with a typed fallback, or write one (creating its
+   * parent directory). Shared by the prewarm store and the PMTiles per-chart override store so the
+   * persist-a-small-state-file idiom lives in one place rather than as a sync copy and an async copy. Sync
+   * is appropriate for a single-writer state file the plugin owns. */
+
+  import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+  import { dirname } from 'node:path'
+
+  /** Read and parse the JSON at `path`, returning `fallback` on a missing or corrupt file. */
+  export function readJsonState<T> (path: string, fallback: T): T {
+    try {
+      return JSON.parse(readFileSync(path, 'utf8')) as T
+    } catch {
+      return fallback
+    }
+  }
+
+  /** Write `value` as pretty JSON to `path`, creating the parent directory if it is absent. */
+  export function writeJsonState (path: string, value: unknown): void {
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, JSON.stringify(value, null, 2), 'utf8')
+  }
+  ```
+- [ ] Run it and watch it pass: `cd /home/dietpi/src/signalk-binnacle-companion && npm test`. Expected PASS. Then `npm run typecheck` and `npm run lint`. Expected PASS.
+- [ ] Commit: `feat(companion): add a shared sync json-state helper`
+
+### Task 10 [Phase A]: port the admin gate to the companion plugin (shared module)
+
+Port the gate ONCE to `src/shared/admin-gate.ts` (the `src/shared` directory already holds `plugin-id.ts`). This single module gates the plugin's whole `/api` subtree and is imported by both the prewarm routes (Task 12) and the PMTiles chart-management routes (the chart provider plan); neither re-ports it, and the test lives only here. Because `ensureApiAdminGate` is idempotent per app (a `WeakSet`), `addAdminMiddleware('/plugins/signalk-binnacle-companion/api')` runs exactly once even though both `/api/prewarm` and `/api/charts` callers invoke it.
+
+**Files:**
+- Create `/home/dietpi/src/signalk-binnacle-companion/src/shared/admin-gate.ts` (ported from `signalk-crows-nest/src/status/admin-gate.ts`, retargeted to this plugin id).
 - Create `/home/dietpi/src/signalk-binnacle-companion/test/admin-gate.test.ts`.
 - Reference: `/home/dietpi/src/signalk-binnacle-companion/src/shared/plugin-id.ts` for `PLUGIN_ID`.
 
 **Interfaces:**
-- Consumes: `ServerAPI` from `@signalk/server-api`, `PLUGIN_ID` from `../shared/plugin-id.js`.
+- Consumes: `ServerAPI` from `@signalk/server-api`, `PLUGIN_ID` from `./plugin-id.js`.
 - Produces: `export function ensureApiAdminGate (app: ServerAPI): boolean` (installs `securityStrategy.addAdminMiddleware('/plugins/<PLUGIN_ID>/api')` once per app, idempotent, fails closed).
 
 Steps:
@@ -1214,7 +1437,7 @@ Steps:
   ```ts
   import { test } from 'node:test'
   import assert from 'node:assert/strict'
-  import { ensureApiAdminGate } from '../src/http/admin-gate.js'
+  import { ensureApiAdminGate } from '../src/shared/admin-gate.js'
   import type { ServerAPI } from '@signalk/server-api'
 
   function fakeApp (withSecurity: boolean): { app: ServerAPI, gated: string[] } {
@@ -1238,8 +1461,8 @@ Steps:
     assert.equal(ensureApiAdminGate(app), false)
   })
   ```
-- [ ] Run it and watch it fail: `cd /home/dietpi/src/signalk-binnacle-companion && npm test`. Expected FAIL (`src/http/admin-gate.ts` does not exist).
-- [ ] Minimal implementation. Create `src/http/admin-gate.ts`:
+- [ ] Run it and watch it fail: `cd /home/dietpi/src/signalk-binnacle-companion && npm test`. Expected FAIL (`src/shared/admin-gate.ts` does not exist).
+- [ ] Minimal implementation. Create `src/shared/admin-gate.ts`:
   ```ts
   /**
    * Admin-gate the plugin's /api subtree, once per app. Plugin routers receive no authentication by
@@ -1247,10 +1470,12 @@ Steps:
    * exactly once per app and reports whether it is in place, so a caller mounts its route only when the gate
    * holds: a route that cannot be gated fails CLOSED (unmounted) rather than answering unauthenticated
    * callers. On an unsecured Signal K server every client is treated as admin, the standard Signal K behavior.
+   * Shared: both the prewarm routes and the PMTiles chart-management routes gate the same /api subtree
+   * through this one module, and the per-app WeakSet installs the middleware exactly once.
    */
 
   import type { ServerAPI } from '@signalk/server-api'
-  import { PLUGIN_ID } from '../shared/plugin-id.js'
+  import { PLUGIN_ID } from './plugin-id.js'
 
   /** Subtree to admin-gate, an absolute path under the mounted router. */
   const API_PATH = `/plugins/${PLUGIN_ID}/api`
@@ -1287,9 +1512,9 @@ Steps:
   }
   ```
 - [ ] Run it and watch it pass: `cd /home/dietpi/src/signalk-binnacle-companion && npm test`. Expected PASS. Then `npm run typecheck` and `npm run lint`. Expected PASS.
-- [ ] Commit: `feat(companion): port the admin gate for the prewarm api subtree`
+- [ ] Commit: `feat(companion): port the shared admin gate for the api subtree`
 
-### Task 9 [Phase A]: plugin prewarm state persistence (the single source of truth)
+### Task 11 [Phase A]: plugin prewarm state persistence (the single source of truth)
 
 **Files:**
 - Create `/home/dietpi/src/signalk-binnacle-companion/src/runtime/prewarm-store.ts`.
@@ -1313,7 +1538,7 @@ Steps:
   ```ts
   import { test } from 'node:test'
   import assert from 'node:assert/strict'
-  import { mkdtempSync } from 'node:fs'
+  import { mkdtempSync, writeFileSync } from 'node:fs'
   import { tmpdir } from 'node:os'
   import { join } from 'node:path'
   import { loadPrewarmConfig, savePrewarmConfig, DEFAULT_PREWARM_CONFIG } from '../src/runtime/prewarm-store.js'
@@ -1332,7 +1557,7 @@ Steps:
 
   test('a corrupt file falls back to the default rather than throwing', () => {
     const dir = mkdtempSync(join(tmpdir(), 'prewarm-'))
-    require('node:fs').writeFileSync(join(dir, 'prewarm.json'), 'not json')
+    writeFileSync(join(dir, 'prewarm.json'), 'not json')
     assert.deepEqual(loadPrewarmConfig(dir), DEFAULT_PREWARM_CONFIG)
   })
   ```
@@ -1341,10 +1566,12 @@ Steps:
   ```ts
   /** Persists the prewarm box and the position-warm settings as a JSON state file under the Signal K data
    * directory. This is the single source of truth; the values are deliberately NOT in schema() or
-   * savePluginOptions, so they never surface as a second input surface in the plugin config screen. */
+   * savePluginOptions, so they never surface as a second input surface in the plugin config screen.
+   * Persistence goes through the shared sync json-state helper so the prewarm store and the chart override
+   * store use one idiom. */
 
-  import { readFileSync, writeFileSync } from 'node:fs'
   import { join } from 'node:path'
+  import { readJsonState, writeJsonState } from './json-state.js'
 
   export interface PositionWarmSettings {
     enabled: boolean
@@ -1383,28 +1610,25 @@ Steps:
 
   /** Read the persisted config, falling back to the default on a missing or corrupt file. */
   export function loadPrewarmConfig (dataDir: string): PrewarmConfig {
-    try {
-      const raw = readFileSync(join(dataDir, FILE), 'utf8')
-      const parsed = JSON.parse(raw) as Partial<PrewarmConfig>
-      return {
-        ...DEFAULT_PREWARM_CONFIG,
-        ...parsed,
-        positionWarm: { ...DEFAULT_PREWARM_CONFIG.positionWarm, ...(parsed.positionWarm ?? {}) }
-      }
-    } catch {
-      return DEFAULT_PREWARM_CONFIG
+    const parsed = readJsonState<Partial<PrewarmConfig>>(join(dataDir, FILE), {})
+    return {
+      ...DEFAULT_PREWARM_CONFIG,
+      ...parsed,
+      positionWarm: { ...DEFAULT_PREWARM_CONFIG.positionWarm, ...(parsed.positionWarm ?? {}) }
     }
   }
 
   /** Write the config atomically enough for a single-writer plugin (one JSON file). */
   export function savePrewarmConfig (dataDir: string, config: PrewarmConfig): void {
-    writeFileSync(join(dataDir, FILE), JSON.stringify(config, null, 2), 'utf8')
+    writeJsonState(join(dataDir, FILE), config)
   }
   ```
 - [ ] Run it and watch it pass: `cd /home/dietpi/src/signalk-binnacle-companion && npm test`. Expected PASS. Then `npm run typecheck` and `npm run lint`. Expected PASS.
 - [ ] Commit: `feat(companion): persist the prewarm box and settings under the data dir`
 
-### Task 10 [Phase A]: plugin prewarm routes (admin-gated) and wiring
+### Task 12 [Phase A]: plugin prewarm routes (admin-gated) and wiring
+
+The POST handlers read `req.body` as already-parsed JSON: the Signal K server parses JSON request bodies before the plugin sub-router runs (see Global Constraints), so no `express.json()` is added here.
 
 **Files:**
 - Create `/home/dietpi/src/signalk-binnacle-companion/src/http/prewarm-routes.ts`.
@@ -1412,7 +1636,7 @@ Steps:
 - Modify `/home/dietpi/src/signalk-binnacle-companion/src/plugin/plugin.ts` (the `registerWithRouter` at lines 163-165, and pass `app.getDataDirPath()` plus the tilecache address getter).
 
 **Interfaces:**
-- Consumes: `ensureApiAdminGate` from `../http/admin-gate.js`, `loadPrewarmConfig`/`savePrewarmConfig`/`PrewarmConfig` from `../runtime/prewarm-store.js`, a tilecache address getter `() => string | null`, an injectable fetch.
+- Consumes: `ensureApiAdminGate` from `../shared/admin-gate.js`, `loadPrewarmConfig`/`savePrewarmConfig`/`PrewarmConfig` from `../runtime/prewarm-store.js`, a tilecache address getter `() => string | null`, an injectable fetch.
 - Produces: `export interface PrewarmRouter { get(path, handler); post(path, handler) }` (a structural subset of express), `export interface PrewarmRequest { params: Record<string, string>; body: unknown }`, `export interface PrewarmResponse { status(code): PrewarmResponse; json(value): void; end(): void }`, and `export function registerPrewarmRoutes (router: PrewarmRouter, app: ServerAPI, getAddress: () => string | null, deps?: { dataDir?: string, fetchImpl?: ProxyFetch }): boolean`.
 - Routes mounted only when `ensureApiAdminGate(app)` is true (fail closed):
   - `POST /api/prewarm` body `{ bbox, sources, minzoom, maxzoom }`: persist the box, forward `POST /warm` to the container, return `{ jobId }`.
@@ -1490,6 +1714,41 @@ Steps:
     assert.equal(out.code, 404)
   })
 
+  test('POST /api/prewarm rejects an inverted bbox with 400 and does not forward or persist', async () => {
+    const { router, routes } = collector()
+    const dir = mkdtempSync(join(tmpdir(), 'pw-'))
+    let called = false
+    const fetchImpl = async () => { called = true; return { ok: true, status: 200, json: async () => ({}), headers: new Headers(), body: null } as unknown as Response }
+    registerPrewarmRoutes(router, securedApp(), () => 'addr:8080', { dataDir: dir, fetchImpl })
+    const { res, out } = fakeRes()
+    await routes.get('POST /api/prewarm')!({ params: {}, body: { bbox: [1, 1, -1, -1], sources: ['seamark'], minzoom: 6, maxzoom: 8 } }, res)
+    assert.equal(out.code, 400)
+    assert.equal(called, false, 'an invalid box is never forwarded to the container')
+    const { loadPrewarmConfig } = await import('../src/runtime/prewarm-store.js')
+    assert.equal(loadPrewarmConfig(dir).bbox, null, 'an invalid box is never persisted')
+  })
+
+  test('POST /api/prewarm/cancel relays a 204 without reading a body', async () => {
+    const { router, routes } = collector()
+    const fetchImpl = async () => ({ ok: true, status: 204, json: async () => { throw new Error('a 204 has no body') }, headers: new Headers(), body: null } as unknown as Response)
+    registerPrewarmRoutes(router, securedApp(), () => 'addr:8080', { dataDir: mkdtempSync(join(tmpdir(), 'pw-')), fetchImpl })
+    const { res, out } = fakeRes()
+    await routes.get('POST /api/prewarm/cancel/:jobId')!({ params: { jobId: 'warm-1' }, body: undefined }, res)
+    assert.equal(out.code, 204)
+    assert.equal(out.ended, true)
+  })
+
+  test('POST /api/prewarm/config floors the position-warm interval at 60 seconds', async () => {
+    const { router, routes } = collector()
+    const dir = mkdtempSync(join(tmpdir(), 'pw-'))
+    registerPrewarmRoutes(router, securedApp(), () => 'addr:8080', { dataDir: dir })
+    const { res, out } = fakeRes()
+    await routes.get('POST /api/prewarm/config')!({ params: {}, body: { positionWarm: { intervalSecs: 5 } } }, res)
+    assert.equal(out.code, 204)
+    const { loadPrewarmConfig } = await import('../src/runtime/prewarm-store.js')
+    assert.equal(loadPrewarmConfig(dir).positionWarm.intervalSecs, 60)
+  })
+
   test('routes report 503 when the container address is unset', async () => {
     const { router, routes } = collector()
     registerPrewarmRoutes(router, securedApp(), () => null, { dataDir: mkdtempSync(join(tmpdir(), 'pw-')) })
@@ -1506,7 +1765,7 @@ Steps:
    * Mounted only when the admin gate holds, so an ungatable server leaves them unmounted (fail closed). */
 
   import type { ServerAPI } from '@signalk/server-api'
-  import { ensureApiAdminGate } from './admin-gate.js'
+  import { ensureApiAdminGate } from '../shared/admin-gate.js'
   import { loadPrewarmConfig, savePrewarmConfig, type PrewarmConfig } from '../runtime/prewarm-store.js'
 
   export interface PrewarmRequest {
@@ -1530,6 +1789,16 @@ Steps:
   interface Deps {
     dataDir?: string
     fetchImpl?: FetchImpl
+  }
+
+  /** The floor for the position-warm interval, enforced server-side as well as in the panel. */
+  const MIN_WARM_INTERVAL_SECS = 60
+
+  /** A finite, correctly ordered lon/lat bbox: [minLng, minLat, maxLng, maxLat]. */
+  function isValidBbox (value: unknown): value is [number, number, number, number] {
+    return Array.isArray(value) && value.length === 4 &&
+      value.every((n) => typeof n === 'number' && Number.isFinite(n)) &&
+      value[0] < value[2] && value[1] < value[3]
   }
 
   /** Mount the prewarm routes behind the admin gate. Returns whether they were mounted. */
@@ -1557,17 +1826,32 @@ Steps:
       }
     }
 
+    // Relay a no-content upstream (the 204 cancel) without reading a JSON body: a 204 carries none, so
+    // r.json() would throw and mask the real status.
+    const relayNoContent = async (res: PrewarmResponse, upstream: Promise<Response>): Promise<void> => {
+      try {
+        const r = await upstream
+        res.status(r.status).end()
+      } catch {
+        res.status(502).json({ error: 'tilecache unreachable' })
+      }
+    }
+
     router.post('/api/prewarm', (req, res) => {
       const address = withAddress(res); if (address === null) return
       const b = (req.body ?? {}) as Partial<PrewarmConfig>
-      if (!Array.isArray(b.bbox) || b.bbox.length !== 4 || !Array.isArray(b.sources)) {
-        res.status(400).json({ error: 'bbox and sources are required' }); return
-      }
       const current = loadPrewarmConfig(dataDir)
-      savePrewarmConfig(dataDir, { ...current, bbox: b.bbox as [number, number, number, number], sources: b.sources, minzoom: b.minzoom ?? current.minzoom, maxzoom: b.maxzoom ?? current.maxzoom })
+      const minzoom = b.minzoom ?? current.minzoom
+      const maxzoom = b.maxzoom ?? current.maxzoom
+      // Validate BEFORE persisting: a non-finite or inverted bbox stored as the source of truth would be
+      // compared against NaN in the position-warm insideBox check (always false) and warm continuously.
+      if (!isValidBbox(b.bbox) || !Array.isArray(b.sources) || minzoom > maxzoom) {
+        res.status(400).json({ error: 'a finite, ordered bbox, a sources array, and minzoom <= maxzoom are required' }); return
+      }
+      savePrewarmConfig(dataDir, { ...current, bbox: b.bbox, sources: b.sources, minzoom, maxzoom })
       void relay(res, fetchImpl(`http://${address}/warm`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sources: b.sources, bbox: b.bbox, minzoom: b.minzoom ?? current.minzoom, maxzoom: b.maxzoom ?? current.maxzoom })
+        body: JSON.stringify({ sources: b.sources, bbox: b.bbox, minzoom, maxzoom })
       }))
     })
 
@@ -1578,7 +1862,7 @@ Steps:
 
     router.post('/api/prewarm/cancel/:jobId', (req, res) => {
       const address = withAddress(res); if (address === null) return
-      void relay(res, fetchImpl(`http://${address}/warm/${encodeURIComponent(req.params.jobId)}/cancel`, { method: 'POST' }))
+      void relayNoContent(res, fetchImpl(`http://${address}/warm/${encodeURIComponent(req.params.jobId)}/cancel`, { method: 'POST' }))
     })
 
     router.get('/api/prewarm/config', (_req, res) => {
@@ -1587,8 +1871,12 @@ Steps:
 
     router.post('/api/prewarm/config', (req, res) => {
       const current = loadPrewarmConfig(dataDir)
-      const next = { ...current, ...(req.body as Partial<PrewarmConfig> ?? {}), positionWarm: { ...current.positionWarm, ...(((req.body as Partial<PrewarmConfig>)?.positionWarm) ?? {}) } }
-      savePrewarmConfig(dataDir, next)
+      const incoming = (req.body as Partial<PrewarmConfig> | undefined) ?? {}
+      const positionWarm = { ...current.positionWarm, ...(incoming.positionWarm ?? {}) }
+      // Floor the interval server-side (the panel enforces it too) so a direct POST cannot set a
+      // sub-60-second loop that hammers the egress path.
+      positionWarm.intervalSecs = Math.max(MIN_WARM_INTERVAL_SECS, positionWarm.intervalSecs)
+      savePrewarmConfig(dataDir, { ...current, ...incoming, positionWarm })
       res.status(204).end()
     })
 
@@ -1610,7 +1898,7 @@ Steps:
 - [ ] Run it and watch it pass: `cd /home/dietpi/src/signalk-binnacle-companion && npm test`. Expected PASS. Then `npm run typecheck`, `npm run lint`, and `npm run build`. Expected PASS.
 - [ ] Commit: `feat(companion): add admin-gated prewarm and config routes`
 
-### Task 11 [Phase A]: pin the new tilecache image tag and bump the shared dependency
+### Task 13 [Phase A]: pin the new tilecache image tag and bump the shared dependency
 
 **Files:**
 - Modify `/home/dietpi/src/signalk-binnacle-companion/src/runtime/tilecache-container.ts` (`DEFAULT_TILECACHE_TAG`, line 11).
@@ -1635,19 +1923,25 @@ Steps:
 
 ## Phase A: the webapp
 
-### Task 12 [Phase A]: webapp prewarm API client
+### Task 14 [Phase A]: webapp companion API base helper and prewarm API client
+
+This task also creates the ONE shared webapp helper that both companion webapp clients use for their base URL: `src/shared/companion/companion-api.ts`. The PMTiles chart-management client (the chart provider plan) imports the same helper, so both clients build `${origin}/plugins/signalk-binnacle-companion/api` one way. Authentication follows the existing webapp scheme: a Bearer token via the shared `authInit(token, init)` from `$shared/signalk` (the same helper `route-draft-client.ts`, the resource clients, and the history client use), with `base` always the server origin and the client owning the path. There is no `credentials` use and no panel-local auth.
 
 **Files:**
+- Create `/home/dietpi/src/signalk-binnacle/src/shared/companion/companion-api.ts`.
 - Create `/home/dietpi/src/signalk-binnacle/src/features/prewarm/prewarm-client.ts`.
 - Create `/home/dietpi/src/signalk-binnacle/src/features/prewarm/prewarm-client.test.ts`.
 
 **Interfaces:**
-- Consumes: the plugin routes under `${origin}/plugins/signalk-binnacle-companion/api/...`, an injectable `fetch`.
-- Produces:
+- Consumes: `authInit` from `$shared/signalk`, the plugin routes under `${origin}/plugins/signalk-binnacle-companion/api/...`, an injectable `fetch`.
+- Produces (in `companion-api.ts`):
+  - `export const COMPANION_API_PATH = '/plugins/signalk-binnacle-companion/api'`
+  - `export function companionApiUrl (origin: string, path: string): string` (returns `${origin}${COMPANION_API_PATH}${path}`)
+- Produces (in `prewarm-client.ts`):
   - `export interface WarmStatus { total: number, done: number, skipped: number, bytes: number, errors: number, state: 'running' | 'done' | 'cancelled' | 'capped' | 'error' }`
   - `export interface CacheStats { rows: number, bytes: number, cap: number, perSourceAvgBytes: Record<string, number> }`
   - `export interface PrewarmClient { postPrewarm; getStatus; cancel; getConfig; postConfig; getCacheStats }` with `getStatus` returning `WarmStatus | null` (null on a 404, the job is gone).
-  - `export function createPrewarmClient (origin: string, fetchImpl?: typeof fetch): PrewarmClient`
+  - `export function createPrewarmClient (origin: string, token: string | undefined, fetchImpl?: typeof fetch): PrewarmClient`
 
 Steps:
 
@@ -1659,34 +1953,54 @@ Steps:
   const ok = (body: unknown, status = 200): Response => ({ ok: status < 400, status, json: async () => body } as unknown as Response)
 
   describe('prewarm client', () => {
-    it('posts a prewarm and returns the jobId', async () => {
+    it('posts a prewarm with the bearer token and returns the jobId', async () => {
       const fetchImpl = vi.fn(async () => ok({ jobId: 'warm-3' }))
-      const client = createPrewarmClient('http://h', fetchImpl as unknown as typeof fetch)
+      const client = createPrewarmClient('http://h', 'tok', fetchImpl as unknown as typeof fetch)
       const res = await client.postPrewarm({ bbox: [-1, -1, 1, 1], sources: ['seamark'], minzoom: 6, maxzoom: 8 })
       expect(res).toEqual({ jobId: 'warm-3' })
-      expect(fetchImpl).toHaveBeenCalledWith('http://h/plugins/signalk-binnacle-companion/api/prewarm', expect.objectContaining({ method: 'POST' }))
+      expect(fetchImpl).toHaveBeenCalledWith(
+        'http://h/plugins/signalk-binnacle-companion/api/prewarm',
+        expect.objectContaining({ method: 'POST', headers: expect.objectContaining({ Authorization: 'Bearer tok' }) })
+      )
     })
 
     it('maps a 404 status to null (the job is gone)', async () => {
       const fetchImpl = vi.fn(async () => ok({}, 404))
-      const client = createPrewarmClient('http://h', fetchImpl as unknown as typeof fetch)
+      const client = createPrewarmClient('http://h', 'tok', fetchImpl as unknown as typeof fetch)
       expect(await client.getStatus('warm-9')).toBeNull()
     })
 
-    it('reads the cache stats', async () => {
+    it('reads the cache stats without a token on an unsecured server', async () => {
       const stats = { rows: 2, bytes: 100, cap: 1000, perSourceAvgBytes: { seamark: 50 } }
-      const client = createPrewarmClient('http://h', (async () => ok(stats)) as unknown as typeof fetch)
+      const fetchImpl = vi.fn(async () => ok(stats))
+      const client = createPrewarmClient('http://h', undefined, fetchImpl as unknown as typeof fetch)
       expect(await client.getCacheStats()).toEqual(stats)
+      expect(fetchImpl).toHaveBeenCalledWith('http://h/plugins/signalk-binnacle-companion/api/cache/stats', undefined)
     })
   })
   ```
 - [ ] Run it and watch it fail: `cd /home/dietpi/src/signalk-binnacle && npx vitest run src/features/prewarm/prewarm-client.test.ts`. Expected FAIL (module does not exist).
-- [ ] Minimal implementation. Create `prewarm-client.ts`:
+- [ ] Minimal implementation, part 1. Create the shared base helper `src/shared/companion/companion-api.ts`:
+  ```ts
+  /** The one place the webapp builds the companion plugin api base. Both companion webapp clients (the
+   * prewarm client here and the PMTiles chart-management client) call companionApiUrl(origin, path), so
+   * the base path is spelled once. base is always the server origin; the caller owns the rest of the path. */
+
+  export const COMPANION_API_PATH = '/plugins/signalk-binnacle-companion/api'
+
+  export function companionApiUrl (origin: string, path: string): string {
+    return `${origin}${COMPANION_API_PATH}${path}`
+  }
+  ```
+- [ ] Minimal implementation, part 2. Create `prewarm-client.ts`:
   ```ts
   /** The webapp client for the companion prewarm and config routes. The panel never calls the container
-   * directly; it always goes through the admin-gated plugin routes, so the container port stays private. */
+   * directly; it always goes through the admin-gated plugin routes, so the container port stays private.
+   * Auth follows the webapp scheme: a bearer token through the shared authInit, the origin as the base,
+   * and the client owning the path. */
 
-  const API = '/plugins/signalk-binnacle-companion/api'
+  import { authInit } from '$shared/signalk'
+  import { companionApiUrl } from '$shared/companion/companion-api'
 
   export interface WarmStatus {
     total: number
@@ -1720,38 +2034,40 @@ Steps:
     getCacheStats (): Promise<CacheStats>
   }
 
-  export function createPrewarmClient (origin: string, fetchImpl: typeof fetch = fetch): PrewarmClient {
-    const url = (path: string): string => `${origin}${API}${path}`
+  export function createPrewarmClient (origin: string, token: string | undefined, fetchImpl: typeof fetch = fetch): PrewarmClient {
+    const url = (path: string): string => companionApiUrl(origin, path)
     const json = async <T>(r: Response): Promise<T> => (await r.json()) as T
+    const jsonPost = (body: unknown): RequestInit | undefined =>
+      authInit(token, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
     return {
       async postPrewarm (body) {
-        const r = await fetchImpl(url('/prewarm'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), credentials: 'same-origin' })
+        const r = await fetchImpl(url('/prewarm'), jsonPost(body))
         return json<{ jobId: string }>(r)
       },
       async getStatus (jobId) {
-        const r = await fetchImpl(url(`/prewarm/status/${encodeURIComponent(jobId)}`), { credentials: 'same-origin' })
+        const r = await fetchImpl(url(`/prewarm/status/${encodeURIComponent(jobId)}`), authInit(token))
         if (r.status === 404) return null
         return json<WarmStatus>(r)
       },
       async cancel (jobId) {
-        await fetchImpl(url(`/prewarm/cancel/${encodeURIComponent(jobId)}`), { method: 'POST', credentials: 'same-origin' })
+        await fetchImpl(url(`/prewarm/cancel/${encodeURIComponent(jobId)}`), authInit(token, { method: 'POST' }))
       },
       async getConfig () {
-        return json(await fetchImpl(url('/prewarm/config'), { credentials: 'same-origin' }))
+        return json(await fetchImpl(url('/prewarm/config'), authInit(token)))
       },
       async postConfig (config) {
-        await fetchImpl(url('/prewarm/config'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(config), credentials: 'same-origin' })
+        await fetchImpl(url('/prewarm/config'), jsonPost(config))
       },
       async getCacheStats () {
-        return json<CacheStats>(await fetchImpl(url('/cache/stats'), { credentials: 'same-origin' }))
+        return json<CacheStats>(await fetchImpl(url('/cache/stats'), authInit(token)))
       }
     }
   }
   ```
 - [ ] Run it and watch it pass: `cd /home/dietpi/src/signalk-binnacle && npx vitest run src/features/prewarm/prewarm-client.test.ts`. Expected PASS.
-- [ ] Commit: `feat(binnacle): add the prewarm api client`
+- [ ] Commit: `feat(binnacle): add the companion api base helper and the prewarm client`
 
-### Task 13 [Phase A]: webapp estimate and draw-to-bbox logic (pure)
+### Task 15 [Phase A]: webapp estimate and draw-to-bbox logic (pure)
 
 **Files:**
 - Create `/home/dietpi/src/signalk-binnacle/src/features/prewarm/estimate.ts`.
@@ -1860,7 +2176,7 @@ Steps:
 - [ ] Run it and watch it pass: `cd /home/dietpi/src/signalk-binnacle && npx vitest run src/features/prewarm/estimate.test.ts`. Expected PASS.
 - [ ] Commit: `feat(binnacle): add prewarm estimate and draw-to-bbox helpers`
 
-### Task 14 [Phase A]: webapp prewarm panel
+### Task 16 [Phase A]: webapp prewarm panel
 
 Design the panel with the UI/UX team (`signalk-ui-designer` plus a second reviewer) before building, kept consistent with the existing `signalk-binnacle` panels: the same control primitives, design tokens, themes, section layout, label voice, and spacing, in the existing SlideOver shell. Reuse the existing control primitive for any field an existing one already covers; never introduce a one-off.
 
@@ -1965,6 +2281,7 @@ Steps:
   ```
 - [ ] Minimal implementation, part 3: build `PrewarmPanel.svelte` in the SlideOver shell, Svelte 5 runes. The component:
   - Mounts only when `detectCompanion(location.origin)` resolves non-null (feature-detect); otherwise renders nothing.
+  - Builds the client with the auth token: `createPrewarmClient(location.origin, auth.token)`, so every call carries the bearer token through `authInit`, matching the webapp's other authenticated server calls. The token is read reactively from the auth controller, so an upgrade re-binds the client.
   - Reads `auth.writeBlocked`; when true, shows the controls read-only with a note that a write token is needed (the server-side admin gate is the authority; this only avoids showing a control that will 401).
   - Lists `prewarmableSources()` as checkboxes (reuse `LayerToggle` or the shared checkbox primitive; do not introduce a one-off).
   - Zoom min and max controls using the shared number primitive.
@@ -1980,7 +2297,7 @@ Steps:
 
 ## Phase B: off-plan position-warm
 
-### Task 15 [Phase B]: plugin position-warm decision logic (pure)
+### Task 17 [Phase B]: plugin position-warm decision logic (pure)
 
 **Files:**
 - Create `/home/dietpi/src/signalk-binnacle-companion/src/runtime/position-warm.ts`.
@@ -2044,6 +2361,15 @@ Steps:
     assert.equal(shouldWarm({ latitude: 37.8001, longitude: -122.4 }, [-122, 37, -121, 38], settings, recent, 1_090_000), false)
   })
 
+  test('shouldWarm floors the interval at 60 s even if the settings ask for less', () => {
+    const recent: WarmTrigger = { lastPos: { latitude: 30, longitude: -120 }, lastWarmMs: 1_000_000, backoffUntilMs: 0 }
+    const fast = { ...settings, intervalSecs: 5 }
+    // 10 s later, well moved, but under the 60 s floor: no warm.
+    assert.equal(shouldWarm(here, [-122, 37, -121, 38], fast, recent, 1_010_000), false)
+    // 61 s later, well moved: fires.
+    assert.equal(shouldWarm(here, [-122, 37, -121, 38], fast, recent, 1_061_000), true)
+  })
+
   test('shouldWarm backs off after an all-errors warm', () => {
     const backed: WarmTrigger = { lastPos: null, lastWarmMs: 0, backoffUntilMs: 2_000_000 }
     assert.equal(shouldWarm(here, [-122, 37, -121, 38], settings, backed, 1_500_000), false)
@@ -2096,13 +2422,18 @@ Steps:
     return [pos.longitude - dLng, pos.latitude - dLat, pos.longitude + dLng, pos.latitude + dLat]
   }
 
+  /** The interval floor: a position-warm never fires more often than this, even if a persisted or
+   * directly-posted config carries a smaller value. The config route floors it too. */
+  export const MIN_WARM_INTERVAL_SECS = 60
+
   /** Decide whether to warm now: enabled, outside the box, off backoff, past the interval, and moved past the threshold. */
   export function shouldWarm (pos: Position, box: [number, number, number, number] | null, settings: PositionWarmSettings, trigger: WarmTrigger, nowMs: number): boolean {
     if (!settings.enabled) return false
     if (insideBox(pos, box)) return false
     if (nowMs < trigger.backoffUntilMs) return false
     if (trigger.lastPos !== null) {
-      if (nowMs - trigger.lastWarmMs < settings.intervalSecs * 1000) return false
+      const intervalMs = Math.max(MIN_WARM_INTERVAL_SECS, settings.intervalSecs) * 1000
+      if (nowMs - trigger.lastWarmMs < intervalMs) return false
       if (haversineMeters(pos, trigger.lastPos) < settings.moveThresholdMeters) return false
     }
     return true
@@ -2111,21 +2442,99 @@ Steps:
 - [ ] Run it and watch it pass: `cd /home/dietpi/src/signalk-binnacle-companion && npm test`. Expected PASS. Then `npm run typecheck` and `npm run lint`. Expected PASS.
 - [ ] Commit: `feat(companion): add position-warm decision logic`
 
-### Task 16 [Phase B]: wire the position-warm loop into the plugin lifecycle
+### Task 18 [Phase B]: wire the position-warm loop into the plugin lifecycle
 
 **Files:**
+- Create `/home/dietpi/src/signalk-binnacle-companion/src/runtime/tilecache-client.ts` (the shared warm POST and status-poll helper, so the position-warmer wiring and any future caller do not re-roll the `http://<address>/warm` fetch and poll).
+- Create `/home/dietpi/src/signalk-binnacle-companion/test/tilecache-client.test.ts`.
 - Create `/home/dietpi/src/signalk-binnacle-companion/src/runtime/position-warmer.ts` (the stateful loop binding the decision logic to the container warm and the navigation.position stream).
 - Create `/home/dietpi/src/signalk-binnacle-companion/test/position-warmer.test.ts`.
-- Modify `/home/dietpi/src/signalk-binnacle-companion/src/plugin/plugin.ts` (subscribe in `doStart` after the tilecache address resolves, unsubscribe in `doStop`).
+- Modify `/home/dietpi/src/signalk-binnacle-companion/src/plugin/plugin.ts` (subscribe in `doStart` after the tilecache address resolves, unsubscribe in `doStop`; keep the position-warm lifecycle state in the `createPlugin` factory scope alongside the existing `launched` and `tilecacheAddress` state).
 
 **Interfaces:**
-- Consumes: `shouldWarm`, `bboxAround`, `WarmTrigger` from `./position-warm.js`; `loadPrewarmConfig` from `./prewarm-store.js`; a warm poster `(bbox, sources, minzoom, maxzoom) => Promise<WarmStatus | null>`; a clock `() => number`.
-- Produces:
+- Consumes: `shouldWarm`, `bboxAround`, `WarmTrigger` from `./position-warm.js`; `loadPrewarmConfig` from `./prewarm-store.js`; `warmRegion`/`WarmResult` from `./tilecache-client.js`; a warm poster `(bbox, sources, minzoom, maxzoom) => Promise<WarmResult | null>`; a clock `() => number`.
+- Produces (in `tilecache-client.ts`):
+  - `export interface WarmResult { errors: number, total: number }`
+  - `export async function warmRegion (address: string, req: { bbox: [number, number, number, number], sources: string[], minzoom: number, maxzoom: number }, fetchImpl?: typeof fetch): Promise<WarmResult | null>` (POST `/warm`, then poll `GET /warm/:jobId` until the job is no longer running or it 404s; returns the terminal `{ errors, total }`, or null on any failure or a gone job).
+- Produces (in `position-warmer.ts`):
   - `export interface PositionWarmer { onPosition (pos: Position): void }`
-  - `export function createPositionWarmer (deps: { getConfig: () => PrewarmConfig, warm: (bbox: [number, number, number, number], sources: string[], minzoom: number, maxzoom: number) => Promise<{ errors: number, total: number } | null>, now?: () => number, backoffSecs?: number }): PositionWarmer`
-- Subscription in `plugin.ts`: `const unsub = app.streambundle.getSelfBus('navigation.position').onValue((d) => warmer.onPosition(d.value as Position))`, stored and called in `doStop` (the crows-nest pattern at `position-monitor.ts:239` and `:251`).
+  - `export function createPositionWarmer (deps: { getConfig: () => PrewarmConfig, warm: (bbox: [number, number, number, number], sources: string[], minzoom: number, maxzoom: number) => Promise<WarmResult | null>, now?: () => number, backoffSecs?: number }): PositionWarmer`
+- Subscription in `plugin.ts`: `positionUnsub = app.streambundle.getSelfBus('navigation.position').onValue((d) => warmer?.onPosition(d.value as Position))`, where `positionUnsub` and `warmer` are factory-scope state, called and cleared in `doStop` (the crows-nest pattern at `src/monitoring/position-monitor.ts:239` and `:251`).
 
 Steps:
+
+- [ ] Write the failing test for the shared warm client. Create `test/tilecache-client.test.ts`:
+  ```ts
+  import test from 'node:test'
+  import assert from 'node:assert/strict'
+  import { warmRegion } from '../src/runtime/tilecache-client.js'
+
+  test('warmRegion posts the warm and polls to the terminal result', async () => {
+    const calls: string[] = []
+    const fetchImpl = (async (url: string) => {
+      calls.push(url)
+      if (url.endsWith('/warm')) return { ok: true, status: 200, json: async () => ({ jobId: 'warm-7' }) } as unknown as Response
+      return { ok: true, status: 200, json: async () => ({ state: 'done', errors: 0, total: 4 }) } as unknown as Response
+    })
+    const result = await warmRegion('addr:8080', { bbox: [-1, -1, 1, 1], sources: ['seamark'], minzoom: 6, maxzoom: 7 }, fetchImpl as unknown as typeof fetch)
+    assert.deepEqual(result, { errors: 0, total: 4 })
+    assert.equal(calls[0], 'http://addr:8080/warm')
+    assert.ok(calls[1].startsWith('http://addr:8080/warm/warm-7'))
+  })
+
+  test('warmRegion returns null when the job is gone (404)', async () => {
+    const fetchImpl = (async (url: string) =>
+      url.endsWith('/warm')
+        ? ({ ok: true, status: 200, json: async () => ({ jobId: 'warm-8' }) } as unknown as Response)
+        : ({ ok: false, status: 404, json: async () => ({}) } as unknown as Response))
+    const result = await warmRegion('addr:8080', { bbox: [-1, -1, 1, 1], sources: ['seamark'], minzoom: 6, maxzoom: 7 }, fetchImpl as unknown as typeof fetch)
+    assert.equal(result, null)
+  })
+  ```
+- [ ] Run it and watch it fail: `cd /home/dietpi/src/signalk-binnacle-companion && npm test`. Expected FAIL (`tilecache-client.ts` does not exist).
+- [ ] Minimal implementation. Create `src/runtime/tilecache-client.ts`:
+  ```ts
+  /** The shared warm client: POST a warm to the tilecache container and poll it to a terminal result. The
+   * position-warm loop uses it so the warm POST and the status poll are spelled once, not re-rolled inline.
+   * Returns the terminal { errors, total }, or null on any failure or a job the container no longer has. */
+
+  export interface WarmResult {
+    errors: number
+    total: number
+  }
+
+  const POLL_ATTEMPTS = 20
+  const POLL_INTERVAL_MS = 500
+
+  export async function warmRegion (
+    address: string,
+    req: { bbox: [number, number, number, number], sources: string[], minzoom: number, maxzoom: number },
+    fetchImpl: typeof fetch = fetch
+  ): Promise<WarmResult | null> {
+    try {
+      const start = await fetchImpl(`http://${address}/warm`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(req)
+      })
+      if (!start.ok) return null
+      const { jobId } = (await start.json()) as { jobId: string }
+      // Poll briefly so the caller learns whether the warm was all-errors (offline) for its backoff decision.
+      for (let i = 0; i < POLL_ATTEMPTS; i++) {
+        const status = await fetchImpl(`http://${address}/warm/${encodeURIComponent(jobId)}`)
+        if (status.status === 404) return null
+        const snap = (await status.json()) as { errors: number, total: number, state: string }
+        if (snap.state !== 'running') return { errors: snap.errors, total: snap.total }
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+      }
+      return null
+    } catch {
+      return null
+    }
+  }
+  ```
+- [ ] Run it and watch it pass: `cd /home/dietpi/src/signalk-binnacle-companion && npm test`. Expected PASS. Then `npm run typecheck` and `npm run lint`. Expected PASS.
+- [ ] Commit: `feat(companion): add the shared tilecache warm client`
 
 - [ ] Write the failing test. Create `test/position-warmer.test.ts`:
   ```ts
@@ -2195,6 +2604,7 @@ Steps:
 
   import type { Position } from '../shared/types.js'
   import type { PrewarmConfig } from './prewarm-store.js'
+  import type { WarmResult } from './tilecache-client.js'
   import { shouldWarm, bboxAround, type WarmTrigger } from './position-warm.js'
 
   export interface PositionWarmer {
@@ -2203,7 +2613,7 @@ Steps:
 
   interface Deps {
     getConfig: () => PrewarmConfig
-    warm: (bbox: [number, number, number, number], sources: string[], minzoom: number, maxzoom: number) => Promise<{ errors: number, total: number } | null>
+    warm: (bbox: [number, number, number, number], sources: string[], minzoom: number, maxzoom: number) => Promise<WarmResult | null>
     now?: () => number
     backoffSecs?: number
   }
@@ -2247,40 +2657,31 @@ Steps:
     }
   }
   ```
-  Wire it into `plugin.ts`. Add a module-level `let positionUnsub: (() => void) | null = null` and a `let warmer: PositionWarmer | null = null`. After the tilecache address resolves in `doStart`, build the warmer and subscribe:
+  Wire it into `plugin.ts`. Keep the position-warm lifecycle state in the `createPlugin` factory scope, alongside the existing `launched`, `tilecacheLaunched`, and `tilecacheAddress` state (not at module level, so two plugin instances never share it):
+  ```ts
+  // position-warm lifecycle state (factory scope, like launched and tilecacheAddress):
+  let positionUnsub: (() => void) | null = null
+  let warmer: PositionWarmer | null = null
+  ```
+  After the tilecache address resolves in `doStart`, build the warmer (its `warm` poster delegates to the shared `warmRegion`, reading the live `tilecacheAddress`) and subscribe:
   ```ts
   warmer = createPositionWarmer({
     getConfig: () => loadPrewarmConfig(app.getDataDirPath()),
     warm: async (bbox, sources, minzoom, maxzoom) => {
       const address = tilecacheAddress
       if (address === null) return null
-      try {
-        const start = await fetch(`http://${address}/warm`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sources, bbox, minzoom, maxzoom }) })
-        if (!start.ok) return null
-        const { jobId } = await start.json() as { jobId: string }
-        // Poll briefly to learn whether it was all-errors (offline) for the backoff decision.
-        for (let i = 0; i < 20; i++) {
-          const s = await fetch(`http://${address}/warm/${jobId}`)
-          if (s.status === 404) return null
-          const snap = await s.json() as { errors: number, total: number, state: string }
-          if (snap.state !== 'running') return { errors: snap.errors, total: snap.total }
-          await new Promise((r) => setTimeout(r, 500))
-        }
-        return null
-      } catch {
-        return null
-      }
+      return warmRegion(address, { bbox, sources, minzoom, maxzoom })
     }
   })
   positionUnsub = app.streambundle.getSelfBus('navigation.position' as unknown as Parameters<typeof app.streambundle.getSelfBus>[0])
-    .onValue((delta: { value: unknown }) => { if (warmer) warmer.onPosition(delta.value as Position) })
+    .onValue((delta: { value: unknown }) => { warmer?.onPosition(delta.value as Position) })
   ```
-  In `doStop`, unsubscribe first: `if (positionUnsub) { positionUnsub(); positionUnsub = null }` and `warmer = null`. Import `createPositionWarmer`, `loadPrewarmConfig`, and the `Position` type.
+  In `doStop`, unsubscribe first: `if (positionUnsub) { positionUnsub(); positionUnsub = null }` and `warmer = null`. Import `createPositionWarmer` and `type PositionWarmer` from `../runtime/position-warmer.js`, `loadPrewarmConfig` from `../runtime/prewarm-store.js`, `warmRegion` from `../runtime/tilecache-client.js`, and the `Position` type.
 - [ ] Run it and watch it pass: `cd /home/dietpi/src/signalk-binnacle-companion && npm test`. Expected PASS. Then `npm run typecheck`, `npm run lint`, and `npm run build`. Expected PASS.
 - [ ] Add a `doStop` unsubscribe test. Extend `test/plugin.test.ts` (or `plugin-integration.test.ts`) so the fake `app.streambundle.getSelfBus` returns a spy unsubscribe and assert it is called on stop. Run `npm test`. Expected PASS.
 - [ ] Commit: `feat(companion): run the off-plan position-warm loop with offline backoff`
 
-### Task 17 [Phase B]: webapp position-warm settings
+### Task 19 [Phase B]: webapp position-warm settings
 
 **Files:**
 - Modify `/home/dietpi/src/signalk-binnacle/src/features/prewarm/PrewarmPanel.svelte` (add the position-warm section).
@@ -2330,7 +2731,7 @@ Steps:
 
 ## Release
 
-### Task 18 [Phase A and B]: docs and release per the SignalK plugin pre-push checklist
+### Task 20 [Phase A and B]: docs and release per the SignalK plugin pre-push checklist
 
 **Files:**
 - Modify `CHANGELOG.md` and `README.md` in `/home/dietpi/src/signalk-binnacle-companion`, `/home/dietpi/src/signalk-binnacle`, and `/home/dietpi/src/signalk-binnacle-chart-sources`.
@@ -2359,14 +2760,22 @@ Steps:
 
 - Section 4 (shared package: `tileForLngLat`, `tilesInBbox`, `tileCountInBbox`, zoom clamp, bounds clip, latitude limit, antimeridian rejection): Task 1, Task 2. The container mirror is Task 3.
 - Section 5 routes (`POST /warm`, `GET /warm/:jobId`, `POST /warm/:jobId/cancel`, `/cache/stats` per-source average): Task 5, Task 6, Task 7.
-- Section 5 cap enforcement and pinning (pre-store cap check, `pinned` column with schema-version bump and drop-and-recreate, pinned-exempt eviction, batched warm puts in a transaction, warm concurrency sub-budget): Task 4, Task 6.
-- Section 5 validation (zoom clamp, bbox finite and ordered and within the Mercator limit, tile-count hard cap, lazy enumeration with the shared inverse): Task 3, Task 6, Task 7.
-- Section 6 (applicationData persistence resolved to a JSON state file under `getDataDirPath()`, the admin gate ported from crows-nest, `POST /api/prewarm`, `GET /api/prewarm/status/:jobId`, `POST /api/prewarm/cancel/:jobId`, `GET|POST /api/prewarm/config`, `GET /api/cache/stats` proxy): Task 8, Task 9, Task 10.
-- Section 6 position-warm loop (subscribe `navigation.position`, outside-box trigger, move threshold, interval at least 60 s, about 16 tiles via zoom plus or minus one, all-errors backoff, `doStop` unsubscribe, no auto re-warm on start): Task 15, Task 16.
-- Section 7 (feature-detect via `detectCompanion`, write-token gate, panel-scoped `TerraDrawRectangleMode`, source checkboxes from the registry, zoom controls, live estimate gate via `tileCountInBbox` times the average from `/api/cache/stats` against the free cap, progress poll with a 404-means-gone re-warm, `UnitField` for unit-bearing fields): Task 12, Task 13, Task 14. Phase B position-warm settings: Task 17.
-- Section 8 (trust rules, SSRF, tokenless container, SI units): preserved across Task 6 (warm reuses the guarded fetch and the allowlist, no client URL), Task 10 (the admin gate and the plugin-only container reach), and Task 14 and Task 16 (the Signal K read stays in the plugin).
-- Section 10 build and release order: the task sequence follows it (package, container, plugin, webapp, docs); Task 11 pins the image tag and bumps the dependency, Task 18 is the release.
+- Section 5 cap enforcement and pinning (pre-store cap check with the net byte delta, `pinned` column with schema-version bump and drop-and-recreate, pinned-exempt eviction, the `pin` of a skipped fresh tile so the box is fully eviction-exempt, batched warm puts in a transaction, warm concurrency sub-budget): Task 4, Task 6.
+- Section 5 validation (zoom clamp, bbox finite and ordered, latitude clamped to the Mercator limit in both the estimate and `start_warm`, tile-count hard cap with an explicit over-cap test, lazy enumeration with the shared inverse): Task 3, Task 6, Task 7.
+- Section 6 (applicationData persistence resolved to a JSON state file under `getDataDirPath()` through the shared sync json-state helper, the shared admin gate, `POST /api/prewarm` with finite-and-ordered bbox validation before persist, `GET /api/prewarm/status/:jobId`, `POST /api/prewarm/cancel/:jobId` relayed as no-content, `GET|POST /api/prewarm/config` with the interval floored server-side, `GET /api/cache/stats` proxy): Task 9 (json-state), Task 10 (admin gate), Task 11 (prewarm store), Task 12 (routes). Task 8 extends the shared test fake these tasks need.
+- Section 6 position-warm loop (subscribe `navigation.position`, outside-box trigger, move threshold, interval floored at 60 s in both `shouldWarm` and the config route, about 16 tiles via zoom plus or minus one, all-errors backoff, `doStop` unsubscribe with the lifecycle state in the factory scope, no auto re-warm on start, the warm POST and poll factored into the shared `tilecache-client`): Task 17, Task 18.
+- Section 7 (feature-detect via `detectCompanion`, write-token gate, panel-scoped `TerraDrawRectangleMode`, source checkboxes from the registry, zoom controls, live estimate gate via `tileCountInBbox` times the average from `/api/cache/stats` against the free cap, progress poll with a 404-means-gone re-warm, `UnitField` for unit-bearing fields, the client built with the auth token): Task 14 (base helper and client), Task 15 (estimate), Task 16 (panel). Phase B position-warm settings: Task 19.
+- Section 8 (trust rules, SSRF, tokenless container, SI units): preserved across Task 6 (warm reuses the guarded fetch and the allowlist, no client URL), Task 10 (the shared admin gate and the plugin-only container reach), and Task 16 and Task 18 (the Signal K read stays in the plugin).
+- Section 10 build and release order: the task sequence follows it (package, container, plugin, webapp, docs); Task 13 pins the image tag and bumps the dependency, Task 20 is the release.
 - Section 11 decisions in force: all reflected (two phases, compact `/warm` contract with same-formula parity, estimate-and-refuse plus server-side cap, pinned box, panel as single input and plugin as single source of truth, admin gate fail-closed).
+
+### Cross-plan modules (shared with the PMTiles chart provider plan)
+
+- The admin gate is `src/shared/admin-gate.ts` with its single test `test/admin-gate.test.ts`, created here in Task 10. The chart provider plan imports `ensureApiAdminGate` from it and does not re-create the module or the test.
+- The sync JSON state helper is `src/runtime/json-state.ts`, created here in Task 9 and used by the prewarm store (Task 11). The chart provider plan's override store imports it.
+- The shared test fake `test/helpers.ts` `fakeApp()` is extended once here in Task 8. The chart provider plan relies on the extended fake (it reads `app.config.configPath`, `getDataDirPath`, `registerResourceProvider`, and `get`).
+- The webapp companion API base helper is `src/shared/companion/companion-api.ts`, created here in Task 14. The chart-management client in the chart provider plan imports `companionApiUrl` from it, and both webapp clients authenticate with the shared `authInit` bearer scheme.
+- After Task 12 and Task 18, the plugin's `registerWithRouter`, `doStart`, and `doStop` already mount the prewarm routes and run the position-warm loop. The chart provider plan's edits to those three are ADDITIVE to this result (it shows the full merged bodies), not a replacement.
 
 ### Placeholder scan
 
@@ -2375,13 +2784,13 @@ Scanned the plan for `TODO`, `FIXME`, `similar to Task`, `...` standing in for c
 ### Type-consistency check
 
 - Shared package: `tileForLngLat(lng, lat, z): { x, y }`, `tileCountInBbox(source, bbox, [zmin, zmax]): number`, `tilesInBbox(...): ZXY[]`, `MAX_MERCATOR_LAT: number`. The Rust mirror returns `(u32, u32)` and `u64`, same formula and constant.
-- Container: `cache.put` gains `pinned: bool`; the four `fetcher.rs` call sites are updated. `put_many_pinned(rows: &[WarmRow], cap_bytes: i64, now: i64) -> PutManyOutcome`. `WarmState` serializes lowercase, matching the webapp `WarmStatus['state']` union (`running | done | cancelled | capped | error`). `/cache/stats` JSON `{ rows, bytes, cap, perSourceAvgBytes }` matches the webapp `CacheStats`.
-- Plugin: `PrewarmConfig` and `PositionWarmSettings` are one definition in `prewarm-store.ts`, consumed by the routes, the position-warmer, and the persistence. The route shapes match the webapp client paths under `/plugins/signalk-binnacle-companion/api`.
-- Webapp: `CacheStats` and `WarmStatus` in `prewarm-client.ts` are the only definitions; `estimate.ts` and the panel import them. `canPrewarm` and `isTerminal` live once in `estimate.ts` and are shared by the panel and the test.
+- Container: `cache.put` gains `pinned: bool`; the three `fetcher.rs` call sites are updated. `put_many_pinned(rows: &[WarmRow], cap_bytes: i64, now: i64) -> PutManyOutcome` (cap check on the net byte delta), `pin(source, z, x, y)` marks an existing row eviction-exempt. `WarmState` serializes lowercase, matching the webapp `WarmStatus['state']` union (`running | done | cancelled | capped | error`). `/cache/stats` JSON `{ rows, bytes, cap, perSourceAvgBytes }` matches the webapp `CacheStats`.
+- Plugin: `PrewarmConfig` and `PositionWarmSettings` are one definition in `prewarm-store.ts`, consumed by the routes, the position-warmer, and the persistence. `WarmResult` is one definition in `tilecache-client.ts`, consumed by the position-warmer. JSON persistence flows through `json-state.ts`. The route shapes match the webapp client paths under `/plugins/signalk-binnacle-companion/api`.
+- Webapp: `CacheStats` and `WarmStatus` in `prewarm-client.ts` are the only definitions; `estimate.ts` and the panel import them. `canPrewarm` and `isTerminal` live once in `estimate.ts` and are shared by the panel and the test. `companionApiUrl` (in `companion-api.ts`) and `authInit` (from `$shared/signalk`) are the one base and one auth scheme for both companion webapp clients. `createPrewarmClient(origin, token, fetchImpl?)` carries the bearer token on every call.
 
 ### Resolved ambiguities (flagged for the reviewer)
 
-1. "applicationData store" (spec section 6): the typed `@signalk/server-api` exposes only `readPluginOptions`/`savePluginOptions` (both surface in the schema config screen, the second input surface the spec forbids) and `getDataDirPath()`. Resolved to a JSON state file under `getDataDirPath()`, mirroring how crows-nest persists its route-draft budget (`plugin.ts:286`). This keeps the values out of `schema()` and out of `savePluginOptions`, satisfying the spec's single-input-surface rule.
+1. "applicationData store" (spec section 6): the typed `@signalk/server-api` exposes only `readPluginOptions`/`savePluginOptions` (both surface in the schema config screen, the second input surface the spec forbids) and `getDataDirPath()`. Resolved to a JSON state file under `getDataDirPath()` through the shared sync `json-state.ts` helper, mirroring where crows-nest persists its route-draft budget (`plugin.ts:286` builds the path under `getDataDirPath()`). This keeps the values out of `schema()` and out of `savePluginOptions`, satisfying the spec's single-input-surface rule.
 2. "Fetch each tile through the existing `get_tile` path" (spec section 5) versus "a warm never evicts" and "stored pinned": the live `get_tile` path stores through `store_200`, which always calls `evict_to` and stores unpinned. Reusing it verbatim would violate both the never-evict and the pinning requirements. Resolved by reusing the fetch primitives (`expand_upstream`, `fetch_upstream`, `read_capped`, `acceptable_content_type`, `strong_etag`, and the egress guards) but giving the warm its own store path (`put_many_pinned` with the pre-store cap check, pinned, batched, no eviction). The spec's intent (no parallel fetcher, all SSRF and body and content-type guards apply unchanged) is honored; only the store differs, which the spec itself requires two paragraphs later.
 3. Byte-valued estimate through `UnitField` (spec section 7): bytes are not a Signal K unit category, so `UnitField` displays a humanized byte value with a fixed unit label rather than resolving a server preference; the genuinely unit-bearing position-warm fields (radius, move threshold) resolve the server length preference through the units store, as the rule requires.
 4. The basemap (`style` source) is excluded from prewarm: the warm `expand_upstream` path rejects style sources, so the panel filters them out (`prewarmableSources()`). Basemap prewarming would need the style sub-resource expansion path and is out of scope for v2 (v3 PMTiles territory).

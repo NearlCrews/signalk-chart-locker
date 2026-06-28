@@ -23,6 +23,8 @@ These apply to every task. Each task's requirements implicitly include this sect
 - `engines.node` floor: companion `>=20.3.0`, webapp `>=22`. All code must run on the lowest declared version. The `pmtiles` library is pure JS with no native code.
 - Do not add a `prepare` or `prepack` lifecycle script to `package.json` (it corrupts the App Store install-simulation CI step).
 - Reuse before adding: the webapp already has `pmtiles-metadata.ts` (header decode and bounds logic), `SlideOver.svelte`, the `shared/ui` primitives, and `panels.css` tokens. Mirror them; do not re-implement.
+- Plugin POST bodies arrive pre-parsed: the Signal K server parses JSON request bodies before a plugin's `registerWithRouter` sub-router runs, so a POST handler reads `req.body` as an already-parsed object. This is the established in-repo precedent: `signalk-crows-nest/src/route-draft/endpoint.ts` mounts `router.post('/api/route-draft', ...)` (line 904) and reads `parseRequest(req.body)` (line 631) with no `express.json()` and no body-parser of its own. So the chart-management POST handler reads `req.body` directly; do not add `express.json()` or a manual JSON body read.
+- Shared modules owned by the tile cache v2 prewarm plan, imported here, never re-created: the admin gate `src/shared/admin-gate.ts` (with its test `test/admin-gate.test.ts`), the sync JSON state helper `src/runtime/json-state.ts`, the extended shared test fake `test/helpers.ts` `fakeApp()`, and the webapp base helper `src/shared/companion/companion-api.ts` (`companionApiUrl`). This plan executes after that one, so these exist when this plan runs; this plan imports them and adds nothing duplicate. The webapp authenticates with the shared `authInit` bearer scheme from `$shared/signalk`, the same as the prewarm client and the existing resource clients.
 
 ---
 
@@ -1139,7 +1141,7 @@ git commit -m "feat(charts): add the debounced discovery watch with realpath con
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { PassThrough } from 'node:stream'
-import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ChartRegistry, type ChartRecord } from '../src/charts/chart-registry.js'
@@ -1169,7 +1171,9 @@ async function fixtureRecord (): Promise<{ record: ChartRecord, cleanup: () => P
   return {
     size: bytes.length,
     record: {
-      identifier: 'sf-pmtiles', fileName: 'sf.pmtiles', filePath: file, name: 'sf', description: '',
+      // The registry stores the realpath at discovery, so the fixture does too; the serve route re-checks
+      // realpath equality, and on macOS the tmp dir is itself a symlink.
+      identifier: 'sf-pmtiles', fileName: 'sf.pmtiles', filePath: await realpath(file), name: 'sf', description: '',
       type: 'tilelayer', scale: 250000,
       decoded: { minzoom: 0, maxzoom: 14, format: 'mvt', vectorLayers: [] }
     },
@@ -1248,6 +1252,51 @@ test('an If-None-Match that matches returns 304', async () => {
   }
 })
 
+test('an If-None-Match that matches returns 304 even when a Range header is present', async () => {
+  const { routes, registry } = collect()
+  const { record, cleanup } = await fixtureRecord()
+  registry.set(record)
+  try {
+    const first = new FakeRes()
+    routes['/pmtiles/:file'](req('sf.pmtiles'), first)
+    await finished(first)
+    const etag = first.outHeaders.etag
+    const res = new FakeRes()
+    routes['/pmtiles/:file'](req('sf.pmtiles', { range: 'bytes=0-6', 'if-none-match': etag }), res)
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(res.statusCode, 304, 'If-None-Match wins over Range')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a path swapped to a symlink escaping the directory after registration returns 404', async () => {
+  const { routes, registry } = collect()
+  const dir = await mkdtemp(join(tmpdir(), 'serve-'))
+  const outside = await mkdtemp(join(tmpdir(), 'outside-'))
+  const file = join(dir, 'sf.pmtiles')
+  await writeFile(file, buildPmtilesFixture())
+  const secret = join(outside, 'secret.pmtiles')
+  await writeFile(secret, buildPmtilesFixture())
+  registry.set({
+    identifier: 'sf-pmtiles', fileName: 'sf.pmtiles', filePath: await realpath(file), name: 'sf', description: '',
+    type: 'tilelayer', scale: 250000, decoded: { minzoom: 0, maxzoom: 14, format: 'mvt', vectorLayers: [] }
+  })
+  try {
+    // Swap the discovered real file for a symlink pointing outside the directory; the serve realpath check
+    // sees the changed resolution and rejects it.
+    await unlink(file)
+    await symlink(secret, file)
+    const res = new FakeRes()
+    routes['/pmtiles/:file'](req('sf.pmtiles'), res)
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(res.statusCode, 404)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+    await rm(outside, { recursive: true, force: true })
+  }
+})
+
 test('an If-Range that does not match returns the full 200, not a 206', async () => {
   const { routes, registry } = collect()
   const { record, cleanup, size } = await fixtureRecord()
@@ -1295,7 +1344,7 @@ Expected: FAIL with a module-not-found error for `../src/http/pmtiles-routes.js`
  * read-only; an unknown id returns 404, an id can never reach a file outside the discovered set. */
 
 import { createReadStream } from 'node:fs'
-import { stat } from 'node:fs/promises'
+import { realpath, stat } from 'node:fs/promises'
 import { type Writable } from 'node:stream'
 import { nameToId } from '../charts/chart-id.js'
 import type { ChartRegistry } from '../charts/chart-registry.js'
@@ -1357,6 +1406,18 @@ async function serve (req: ServeRequest, res: ServeResponse, registry: ChartRegi
     res.status(404).end('Not found')
     return
   }
+  // Re-validate containment at serve time: the registry stored the realpath at discovery, so if a symlink
+  // swap or a file replacement between the debounced rescan and now changed where the path resolves, the
+  // realpath no longer matches the stored one and we reject. This closes the rescan-to-serve TOCTOU window.
+  try {
+    if (await realpath(filePath) !== filePath) {
+      res.status(404).end('Not found')
+      return
+    }
+  } catch {
+    res.status(404).end('Not found')
+    return
+  }
   let size: number
   let etag: string
   try {
@@ -1372,9 +1433,11 @@ async function serve (req: ServeRequest, res: ServeResponse, registry: ChartRegi
   res.setHeader('ETag', etag)
   res.setHeader('Content-Type', 'application/octet-stream')
 
+  // If-None-Match takes precedence over Range (RFC 9110): a matching validator returns 304 regardless of a
+  // Range header, rather than a 206.
   const rangeHeader = header(req.headers.range)
   const ifNoneMatch = header(req.headers['if-none-match'])
-  if (!rangeHeader && ifNoneMatch === etag) {
+  if (ifNoneMatch === etag) {
     res.status(304).end()
     return
   }
@@ -1416,7 +1479,7 @@ function pipeStream (stream: NodeJS.ReadableStream, res: ServeResponse): void {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `node --import tsx --test test/pmtiles-routes.test.ts`
-Expected: PASS, all six tests.
+Expected: PASS, all eight tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1428,6 +1491,8 @@ git commit -m "feat(charts): serve pmtiles archives with a strong ETag and Range
 ---
 
 ### Task 8: wire the chart provider into the plugin lifecycle
+
+This plan runs after the tile cache v2 prewarm plan, so `src/plugin/plugin.ts` already mounts the prewarm routes in `registerWithRouter`, runs the position-warm loop in `doStart`, and tears it down in `doStop`. Every edit below is ADDITIVE to that post-v2 result: the merged `registerWithRouter` mounts the tile routes, the prewarm routes, AND the pmtiles serve route; `doStart` keeps the container wiring and the position-warm setup AND adds `setupCharts`; `doStop` keeps the position-warm unsubscribe and the container teardown AND adds `teardownCharts`. The code blocks below show the full merged bodies, not a replacement of the v2 work. This task also relies on the shared `fakeApp()` extended in the v2 plan (it provides `config.configPath`, `getDataDirPath`, `registerResourceProvider`, `get`, and `streambundle`), so the existing plugin tests keep passing.
 
 **Files:**
 - Modify: `src/plugin/plugin.ts`
@@ -1564,6 +1629,9 @@ Add a config-path narrowing near the top of `createPlugin`, alongside the existi
   const configPath = (app as unknown as ConfigAwareApp).config.configPath
   const registry = new ChartRegistry()
   let discovery: DiscoveryHandle | undefined
+  // The charts directory resolved from the active config, captured so the override re-apply closure
+  // (Task 11) rescans the configured directory, not the default. Set in setupCharts.
+  let activeChartsDir: string | undefined
 
   function chartsDirFor (config: CompanionConfig): string {
     const override = config.chartsPath?.trim()
@@ -1575,9 +1643,10 @@ Add a config-path narrowing near the top of `createPlugin`, alongside the existi
       app.setPluginStatus('Charts disabled: signalk-pmtiles-plugin is enabled. Disable it to let the companion provide PMTiles charts.')
       return
     }
+    activeChartsDir = chartsDirFor(config)
     registerChartProvider(app as unknown as ChartRouteApp, registry)
     discovery = await startDiscovery({
-      chartsDir: chartsDirFor(config),
+      chartsDir: activeChartsDir,
       registry,
       onError: (message) => app.debug(`Chart discovery: ${message}`)
     })
@@ -1590,13 +1659,13 @@ Add a config-path narrowing near the top of `createPlugin`, alongside the existi
   }
 ```
 
-At the end of `doStart` (after the container wiring, before the final `setPluginStatus`), add:
+In `doStart`, after the v2 position-warm setup and before the final `setPluginStatus`, add:
 
 ```ts
     await setupCharts(config)
 ```
 
-Note: keep the final router and tilecache status line, but let the chart conflict status set above stand when the third-party plugin is enabled. Guard the trailing `setPluginStatus` so it does not overwrite the conflict message:
+Note: keep the final router and tilecache status line, but let the chart conflict status set above stand when the third-party plugin is enabled. Guard the trailing `setPluginStatus` (the v2 final line) so it does not overwrite the conflict message:
 
 ```ts
     if (registry.records().length > 0 || discovery !== undefined) {
@@ -1604,17 +1673,24 @@ Note: keep the final router and tilecache status line, but let the chart conflic
     }
 ```
 
-In `doStop`, before `removeRouteOnWaterBridge()` returns, add:
+In `doStop`, add `teardownCharts()` alongside the v2 teardown (the position-warm unsubscribe and the bridge and container stop). The merged `doStop` head reads:
 
 ```ts
+  async function doStop (): Promise<void> {
+    if (positionUnsub) { positionUnsub(); positionUnsub = null }
+    warmer = null
     teardownCharts()
+    removeRouteOnWaterBridge()
+    // ...the existing tilecache and router stop from the prior milestones follows unchanged...
+  }
 ```
 
-In `registerWithRouter`, mount the serve route in addition to the tile routes:
+In `registerWithRouter`, mount the serve route in ADDITION to the tile routes and the v2 prewarm routes (this is the full merged body; `registerPrewarmRoutes` and `PrewarmRouter` are already imported by the v2 work):
 
 ```ts
     registerWithRouter (router) {
       registerTileRoutes(router as unknown as TileRouter, () => tilecacheAddress)
+      registerPrewarmRoutes(router as unknown as PrewarmRouter, app, () => tilecacheAddress)
       registerPmtilesServeRoute(router as unknown as ServeRouter, registry)
     }
 ```
@@ -1663,12 +1739,11 @@ git commit -m "feat(charts): wire discovery, registration, and the serve route i
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `src/shared/map/pmtiles.test.ts` in `signalk-binnacle`:
+Add to `src/shared/map/pmtiles.test.ts` in `signalk-binnacle`. The file already imports `createArchiveSource` and `NoStoreSource` from `./pmtiles` (line 2) and `BlockCachedSource` from `./pmtiles-block-cache` (line 3), so add ONLY the new symbol it needs and reuse the existing imports; do not re-import `createArchiveSource`, `NoStoreSource`, or `BlockCachedSource`, and do not introduce a `./block-cached-source` path (the barrel is `./pmtiles-block-cache`):
 
 ```ts
+// New import to add (the rest are already at the top of the file):
 import { FetchSource } from 'pmtiles';
-import { createArchiveSource, NoStoreSource } from './pmtiles';
-import { BlockCachedSource } from './block-cached-source';
 
 describe('createArchiveSource provided-path switch', () => {
   it('uses a plain FetchSource for a companion-provided archive (default cache, no block cache)', () => {
@@ -1700,7 +1775,7 @@ Expected: FAIL: the provided-path case returns a `BlockCachedSource`, not a `Fet
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `src/shared/map/pmtiles.ts`, add the import and a detector, and update `createArchiveSource`:
+In `src/shared/map/pmtiles.ts`, EDIT the existing line-2 `pmtiles` import to add `FetchSource` (do not add a second `import ... from 'pmtiles'`), then add a detector and update `createArchiveSource`. The edited import line reads:
 
 ```ts
 import { FetchSource, PMTiles, Protocol, type RangeResponse, type Source } from 'pmtiles';
@@ -1761,103 +1836,26 @@ git commit -m "feat(charts): route companion-provided pmtiles through the defaul
 
 The chart-management panel, the per-chart override, and the deferred upload. Fixes third-party pains 6 and 7. The browser upload of an archive is noted and deferred (large archives).
 
-### Task 10: the admin-gate port
+### Task 10: rely on the shared admin gate (no new module)
+
+The admin gate is the single `src/shared/admin-gate.ts` created and tested by the tile cache v2 prewarm plan (its `ensureApiAdminGate` and `test/admin-gate.test.ts`). This plan does NOT re-create the module or the test: porting it a second time would put two `gatedApps` `WeakSet`s and two `addAdminMiddleware('/plugins/signalk-binnacle-companion/api')` installs on the same subtree. The chart-management routes (Task 11) import `ensureApiAdminGate` from `../shared/admin-gate.js`, and because that one module's per-app `WeakSet` is idempotent, the middleware installs exactly once even though both the prewarm routes and the chart-management routes gate the same `/api` subtree.
 
 **Files:**
-- Create: `src/shared/admin-gate.ts`
-- Test: `test/admin-gate.test.ts`
+- None created. This task only confirms reliance on the shared module.
 
 **Interfaces:**
-- Consumes: `ServerAPI` from `@signalk/server-api`, `PLUGIN_ID` from `../shared/plugin-id.js`.
-- Produces: `function ensureApiAdminGate(app: ServerAPI): boolean` (gates `/plugins/<PLUGIN_ID>/api`, idempotent per app, fails closed when no security strategy is present).
+- Consumes: `ensureApiAdminGate` from `../shared/admin-gate.js` (already present after the v2 plan), used by Task 11.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Confirm the shared gate is present**
 
-```ts
-// test/admin-gate.test.ts
-import { test } from 'node:test'
-import assert from 'node:assert/strict'
-import { ensureApiAdminGate } from '../src/shared/admin-gate.js'
-import { PLUGIN_ID } from '../src/shared/plugin-id.js'
+The v2 prewarm plan has created `src/shared/admin-gate.ts` and `test/admin-gate.test.ts`. Confirm the import resolves and the existing gate test passes before wiring the management routes:
 
-function gatedApp (): { app: unknown, paths: string[] } {
-  const paths: string[] = []
-  const app = {
-    error () {},
-    securityStrategy: { addAdminMiddleware (path: string) { paths.push(path) } }
-  }
-  return { app, paths }
-}
+Run: `node --import tsx --test test/admin-gate.test.ts && npm run typecheck`
+Expected: PASS (the gate test is the v2 one; typecheck resolves `../shared/admin-gate.js`).
 
-test('installs the admin middleware on the /api subtree once and reports true', () => {
-  const { app, paths } = gatedApp()
-  assert.equal(ensureApiAdminGate(app as never), true)
-  assert.equal(ensureApiAdminGate(app as never), true)
-  assert.deepEqual(paths, [`/plugins/${PLUGIN_ID}/api`])
-})
+- [ ] **Step 2: No commit**
 
-test('fails closed when the server exposes no admin middleware', () => {
-  const errors: string[] = []
-  const app = { error (m: string) { errors.push(m) } }
-  assert.equal(ensureApiAdminGate(app as never), false)
-  assert.equal(errors.length, 1)
-})
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `node --import tsx --test test/admin-gate.test.ts`
-Expected: FAIL with a module-not-found error for `../src/shared/admin-gate.js`.
-
-- [ ] **Step 3: Write minimal implementation**
-
-```ts
-// src/shared/admin-gate.ts
-/** Admin-gate the plugin's /api subtree once per app. Plugin routers receive no authentication by
- * default, so every /api route sits behind the server's admin middleware. A route that cannot be
- * gated fails closed (it is not mounted) rather than answering unauthenticated callers. The serve
- * route is intentionally not under /api: it is open read-only, like the v1 tile and style routes. */
-
-import type { ServerAPI } from '@signalk/server-api'
-import { PLUGIN_ID } from './plugin-id.js'
-
-const API_PATH = `/plugins/${PLUGIN_ID}/api`
-
-// The ServerAPI type does not expose securityStrategy, so narrow to the one method we call.
-interface SecurityAwareApp {
-  securityStrategy: { addAdminMiddleware: (path: string) => void }
-}
-
-const gatedApps = new WeakSet<object>()
-
-export function ensureApiAdminGate (app: ServerAPI): boolean {
-  if (gatedApps.has(app)) return true
-  try {
-    const securityAware = app as unknown as Partial<SecurityAwareApp>
-    if (typeof securityAware.securityStrategy?.addAdminMiddleware === 'function') {
-      securityAware.securityStrategy.addAdminMiddleware(API_PATH)
-      gatedApps.add(app)
-      return true
-    }
-    app.error(`Cannot admin-gate ${API_PATH}: securityStrategy.addAdminMiddleware is unavailable`)
-  } catch (error) {
-    app.error(`Cannot admin-gate ${API_PATH}: ${String(error)}`)
-  }
-  return false
-}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `node --import tsx --test test/admin-gate.test.ts`
-Expected: PASS, both tests.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/shared/admin-gate.ts test/admin-gate.test.ts
-git commit -m "feat(charts): port the admin gate for the management api subtree"
-```
+This task creates nothing. The import is exercised by Task 11's commit.
 
 ---
 
@@ -1871,11 +1869,13 @@ git commit -m "feat(charts): port the admin gate for the management api subtree"
 - Test: `test/chart-overrides.test.ts`
 - Test: `test/chart-management-routes.test.ts`
 
+The override store persists through the shared sync `json-state.ts` helper from the v2 plan, so the chart override store and the prewarm store use one persistence idiom rather than a sync copy and an async copy. The store methods are therefore synchronous. The management POST handler reads `req.body` as already-parsed JSON (see Global Constraints: the Signal K server parses bodies before the plugin sub-router runs), so no `express.json()` is added.
+
 **Interfaces:**
-- Consumes: `ChartRegistry`, `chartResource` (Task 4), `ChartNamer`, `defaultNamer` (Task 6), `DecodedPmtiles` (Task 3), `ensureApiAdminGate` (Task 10).
+- Consumes: `ChartRegistry`, `chartResource` (Task 4), `ChartNamer`, `defaultNamer` (Task 6), `DecodedPmtiles` (Task 3), `ensureApiAdminGate` from `../shared/admin-gate.js` (the v2 shared gate, Task 10), `readJsonState`/`writeJsonState` from `../runtime/json-state.js` (the v2 helper).
 - Produces:
   - `interface ChartOverride { name?: string; description?: string; scale?: number }`
-  - `class OverrideStore` with `constructor(filePath: string)`, `load(): Promise<void>`, `get(id: string): ChartOverride | undefined`, `set(id: string, override: ChartOverride): Promise<void>`, `namer(): ChartNamer`
+  - `class OverrideStore` with `constructor(filePath: string)`, `load(): void`, `get(id: string): ChartOverride | undefined`, `set(id: string, override: ChartOverride): void`, `namer(): ChartNamer`
   - `interface ManagementRouter { get(path: string, handler: (req: ManagementRequest, res: ManagementResponse) => void): void; post(path: string, handler: (req: ManagementRequest, res: ManagementResponse) => void): void }`
   - `interface ManagementRequest { params: Record<string, string>; body: unknown }`
   - `interface ManagementResponse { json(body: unknown): void; status(code: number): ManagementResponse }`
@@ -1897,10 +1897,10 @@ test('the override store persists and reloads per-chart overrides', async () => 
   const file = join(dir, 'pmtiles-overrides.json')
   try {
     const store = new OverrideStore(file)
-    await store.load()
-    await store.set('sf-pmtiles', { name: 'San Francisco Bay', description: 'NOAA ENC' })
+    store.load()
+    store.set('sf-pmtiles', { name: 'San Francisco Bay', description: 'NOAA ENC' })
     const reloaded = new OverrideStore(file)
-    await reloaded.load()
+    reloaded.load()
     assert.deepEqual(reloaded.get('sf-pmtiles'), { name: 'San Francisco Bay', description: 'NOAA ENC' })
   } finally {
     await rm(dir, { recursive: true, force: true })
@@ -1912,8 +1912,8 @@ test('the namer applies an override over the decoded name, falling back to defau
   const file = join(dir, 'pmtiles-overrides.json')
   try {
     const store = new OverrideStore(file)
-    await store.load()
-    await store.set('sf-pmtiles', { name: 'Renamed', scale: 80000 })
+    store.load()
+    store.set('sf-pmtiles', { name: 'Renamed', scale: 80000 })
     const namer = store.namer()
     const decoded = { minzoom: 0, maxzoom: 14, format: 'mvt' as const, vectorLayers: [], name: 'Decoded Name' }
     assert.deepEqual(namer('sf.pmtiles', decoded), { name: 'Renamed', description: '', scale: 80000 })
@@ -1934,13 +1934,13 @@ Expected: FAIL with a module-not-found error for `../src/charts/overrides.js`.
 ```ts
 // src/charts/overrides.ts
 /** Per-chart overrides of the name, description, and scale, persisted server-side in a JSON file
- * under the plugin data directory (the same persistence seam as the route-draft budget). Keyed by
- * chart identifier. The namer applies an override over the decoded name and the defaults. */
+ * under the plugin data directory through the shared sync json-state helper (the same persistence seam
+ * as the prewarm store). Keyed by chart identifier. The namer applies an override over the decoded
+ * name and the defaults. */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
 import { type ChartNamer, defaultNamer } from './discovery.js'
 import type { DecodedPmtiles } from './pmtiles-metadata.js'
+import { readJsonState, writeJsonState } from '../runtime/json-state.js'
 
 export interface ChartOverride {
   name?: string
@@ -1956,22 +1956,17 @@ export class OverrideStore {
     this.#filePath = filePath
   }
 
-  async load (): Promise<void> {
-    try {
-      this.#map = JSON.parse(await readFile(this.#filePath, 'utf8')) as Record<string, ChartOverride>
-    } catch {
-      this.#map = {}
-    }
+  load (): void {
+    this.#map = readJsonState<Record<string, ChartOverride>>(this.#filePath, {})
   }
 
   get (id: string): ChartOverride | undefined {
     return this.#map[id]
   }
 
-  async set (id: string, override: ChartOverride): Promise<void> {
+  set (id: string, override: ChartOverride): void {
     this.#map[id] = override
-    await mkdir(dirname(this.#filePath), { recursive: true })
-    await writeFile(this.#filePath, JSON.stringify(this.#map, null, 2))
+    writeJsonState(this.#filePath, this.#map)
   }
 
   namer (): ChartNamer {
@@ -2057,10 +2052,8 @@ test('GET /api/charts lists valid charts, decode errors, and the conflict flag',
 test('POST /api/charts/:id/override persists the override and triggers a re-apply', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'mgmt-'))
   try {
-    const ctx = collect()
-    ;(ctx.overrides as unknown as { ['#filePath']: string })
     const overrides = new OverrideStore(join(dir, 'overrides.json'))
-    await overrides.load()
+    overrides.load()
     const get: Record<string, (req: ManagementRequest, res: FakeRes) => void> = {}
     const post: Record<string, (req: ManagementRequest, res: FakeRes) => void> = {}
     const registry = new ChartRegistry()
@@ -2071,7 +2064,7 @@ test('POST /api/charts/:id/override persists the override and triggers a re-appl
       registry, overrides, () => { applied++ }
     )
     const res = new FakeRes()
-    await post['/api/charts/:id/override']({ params: { id: 'sf-pmtiles' }, body: { name: 'Renamed' } }, res)
+    post['/api/charts/:id/override']({ params: { id: 'sf-pmtiles' }, body: { name: 'Renamed' } }, res)
     assert.equal(res.statusCode, 200)
     assert.deepEqual(overrides.get('sf-pmtiles'), { name: 'Renamed' })
     assert.equal(applied, 1)
@@ -2080,11 +2073,11 @@ test('POST /api/charts/:id/override persists the override and triggers a re-appl
   }
 })
 
-test('POST with a non-object body returns 400', async () => {
+test('POST with a non-object body returns 400', () => {
   const ctx = collect()
   ctx.registry.set(record())
   const res = new FakeRes()
-  await ctx.post['/api/charts/:id/override']({ params: { id: 'sf-pmtiles' }, body: 'nope' }, res)
+  ctx.post['/api/charts/:id/override']({ params: { id: 'sf-pmtiles' }, body: 'nope' }, res)
   assert.equal(res.statusCode, 400)
 })
 ```
@@ -2160,10 +2153,9 @@ export function registerChartManagementRoutes (
       res.status(400).json({ error: 'Body must be an object with name, description, or scale.' })
       return
     }
-    void overrides.set(req.params.id, override).then(() => {
-      onOverride()
-      res.json({ identifier: req.params.id, override })
-    })
+    overrides.set(req.params.id, override)
+    onOverride()
+    res.json({ identifier: req.params.id, override })
   })
 }
 ```
@@ -2189,19 +2181,27 @@ Add factory-scope state near `const registry`:
   const overrides = new OverrideStore(join((app as unknown as { getDataDirPath: () => string }).getDataDirPath(), 'pmtiles-overrides.json'))
 ```
 
-In `setupCharts`, load the overrides and pass the override namer, and re-scan on an override change:
+Extend the `setupCharts` from Task 8 so it loads the overrides (sync) and passes the override namer to discovery. The final merged `setupCharts` reads:
 
 ```ts
-    await overrides.load()
+  async function setupCharts (config: CompanionConfig): Promise<void> {
+    if (isThirdPartyPmtilesEnabled(configPath)) {
+      app.setPluginStatus('Charts disabled: signalk-pmtiles-plugin is enabled. Disable it to let the companion provide PMTiles charts.')
+      return
+    }
+    activeChartsDir = chartsDirFor(config)
+    overrides.load()
+    registerChartProvider(app as unknown as ChartRouteApp, registry)
     discovery = await startDiscovery({
-      chartsDir: chartsDirFor(config),
+      chartsDir: activeChartsDir,
       registry,
       namer: overrides.namer(),
       onError: (message) => app.debug(`Chart discovery: ${message}`)
     })
+  }
 ```
 
-In `registerWithRouter`, mount the gated management routes after the serve route:
+In `registerWithRouter`, mount the gated management routes after the serve route (the merged body from Task 8 plus this gated block):
 
 ```ts
       if (ensureApiAdminGate(app)) {
@@ -2209,12 +2209,12 @@ In `registerWithRouter`, mount the gated management routes after the serve route
           router as unknown as ManagementRouter,
           registry,
           overrides,
-          () => { void (async () => { const { rescanCharts } = await import('../charts/discovery.js'); await rescanCharts({ chartsDir: chartsDirFor({}), registry, namer: overrides.namer() }) })() }
+          () => { void (async () => { const { rescanCharts } = await import('../charts/discovery.js'); await rescanCharts({ chartsDir: activeChartsDir ?? chartsDirFor({}), registry, namer: overrides.namer() }) })() }
         )
       }
 ```
 
-Note: the re-apply closure rescans with the current charts directory and the latest override namer, so a saved override is reflected in the registry, the resource provider, and the v1 routes without a restart. Keep `chartsDirFor` available at factory scope (it already is).
+Note: the re-apply closure rescans the ACTIVE charts directory (`activeChartsDir`, captured in `setupCharts` from the configured `chartsPath`), not `chartsDirFor({})`, so a configured override directory is honored. It also uses the latest override namer, so a saved override is reflected in the registry, the resource provider, and the v1 routes without a restart. `activeChartsDir` and `chartsDirFor` are factory-scope (from Task 8).
 
 - [ ] **Step 10: Run the full plugin suite, typecheck, and lint**
 
@@ -2243,9 +2243,10 @@ git commit -m "feat(charts): add per-chart overrides and the admin-gated managem
 - Produces:
   - `interface ManagedChart { identifier: string; fileName: string; name: string; description: string; scale: number; bounds?: [number, number, number, number]; minzoom: number; maxzoom: number; format: string; override: { name?: string; description?: string; scale?: number } }`
   - `interface ManagedChartsResponse { charts: ManagedChart[]; invalid: Array<{ fileName: string; error: string }> }`
-  - `function fetchManagedCharts(companionBase: string, token?: string): Promise<ManagedChartsResponse | undefined>`
-  - `function putChartOverride(companionBase: string, token: string | undefined, id: string, override: { name?: string; description?: string; scale?: number }): Promise<boolean>`
-  - `ChartsManagementPanel` (a Svelte component taking the companion base url and a token, designed by the UI/UX team and consistent with the existing panels)
+  - `function fetchManagedCharts(origin: string, token: string | undefined, fetchImpl?: typeof fetch): Promise<ManagedChartsResponse | undefined>`
+  - `function putChartOverride(origin: string, token: string | undefined, id: string, override: { name?: string; description?: string; scale?: number }, fetchImpl?: typeof fetch): Promise<boolean>`
+  - `ChartsManagementPanel` (a Svelte component taking the server origin and a token, designed by the UI/UX team and consistent with the existing panels)
+- The client uses the SAME base and auth as the prewarm client: `companionApiUrl(origin, path)` from `$shared/companion/companion-api` (created in the v2 plan) and the bearer `authInit(token, init)` from `$shared/signalk`. No `authHeaders` helper of its own.
 
 - [ ] **Step 1: Run the panel design first**
 
@@ -2258,29 +2259,30 @@ Before writing the panel, run the project's UI/UX design step (lead with the `si
 import { describe, it, expect, vi } from 'vitest';
 import { fetchManagedCharts, putChartOverride } from './charts-management-client';
 
-const BASE = 'http://pi.local/plugins/signalk-binnacle-companion';
+const ORIGIN = 'http://pi.local';
+const API = `${ORIGIN}/plugins/signalk-binnacle-companion/api`;
 
 describe('charts-management-client', () => {
-  it('fetches and parses the managed charts list', async () => {
+  it('fetches and parses the managed charts list with the bearer token', async () => {
     const payload = { charts: [{ identifier: 'sf-pmtiles', fileName: 'sf.pmtiles', name: 'sf', description: '', scale: 250000, minzoom: 0, maxzoom: 14, format: 'mvt', override: {} }], invalid: [] };
     const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), { status: 200 }));
-    const result = await fetchManagedCharts(BASE, 'tok', fetchImpl);
+    const result = await fetchManagedCharts(ORIGIN, 'tok', fetchImpl);
     expect(result?.charts[0].identifier).toBe('sf-pmtiles');
-    expect(fetchImpl).toHaveBeenCalledWith(`${BASE}/api/charts`, expect.objectContaining({ headers: { Authorization: 'Bearer tok' } }));
+    expect(fetchImpl).toHaveBeenCalledWith(`${API}/charts`, expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer tok' }) }));
   });
 
   it('returns undefined on a non-ok response', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response('nope', { status: 403 }));
-    expect(await fetchManagedCharts(BASE, 'tok', fetchImpl)).toBeUndefined();
+    expect(await fetchManagedCharts(ORIGIN, 'tok', fetchImpl)).toBeUndefined();
   });
 
-  it('posts an override and reports success', async () => {
+  it('posts an override with the bearer token and reports success', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
-    const ok = await putChartOverride(BASE, 'tok', 'sf-pmtiles', { name: 'Renamed' }, fetchImpl);
+    const ok = await putChartOverride(ORIGIN, 'tok', 'sf-pmtiles', { name: 'Renamed' }, fetchImpl);
     expect(ok).toBe(true);
     expect(fetchImpl).toHaveBeenCalledWith(
-      `${BASE}/api/charts/sf-pmtiles/override`,
-      expect.objectContaining({ method: 'POST' }),
+      `${API}/charts/sf-pmtiles/override`,
+      expect.objectContaining({ method: 'POST', headers: expect.objectContaining({ Authorization: 'Bearer tok' }) }),
     );
   });
 });
@@ -2295,8 +2297,12 @@ Expected: FAIL with a module-not-found error for `./charts-management-client`.
 
 ```ts
 // src/features/charts-management/charts-management-client.ts
-// Talks to the companion chart-management routes. Admin-gated, so calls carry the Bearer token on a
-// secured server. Never throws: a failed read returns undefined so the panel keeps its last list.
+// Talks to the companion chart-management routes. Admin-gated, so calls carry the bearer token through
+// the shared authInit, with companionApiUrl as the base, exactly like the prewarm client and the other
+// resource clients. Never throws: a failed read returns undefined so the panel keeps its last list.
+
+import { authInit } from '$shared/signalk';
+import { companionApiUrl } from '$shared/companion/companion-api';
 
 export interface ManagedChart {
   identifier: string;
@@ -2316,17 +2322,13 @@ export interface ManagedChartsResponse {
   invalid: Array<{ fileName: string; error: string }>;
 }
 
-function authHeaders(token?: string): Record<string, string> {
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
 export async function fetchManagedCharts(
-  companionBase: string,
-  token?: string,
+  origin: string,
+  token: string | undefined,
   fetchImpl: typeof fetch = fetch,
 ): Promise<ManagedChartsResponse | undefined> {
   try {
-    const response = await fetchImpl(`${companionBase}/api/charts`, { headers: authHeaders(token) });
+    const response = await fetchImpl(companionApiUrl(origin, '/charts'), authInit(token));
     if (!response.ok) return undefined;
     return (await response.json()) as ManagedChartsResponse;
   } catch {
@@ -2335,18 +2337,21 @@ export async function fetchManagedCharts(
 }
 
 export async function putChartOverride(
-  companionBase: string,
+  origin: string,
   token: string | undefined,
   id: string,
   override: { name?: string; description?: string; scale?: number },
   fetchImpl: typeof fetch = fetch,
 ): Promise<boolean> {
   try {
-    const response = await fetchImpl(`${companionBase}/api/charts/${encodeURIComponent(id)}/override`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders(token) },
-      body: JSON.stringify(override),
-    });
+    const response = await fetchImpl(
+      companionApiUrl(origin, `/charts/${encodeURIComponent(id)}/override`),
+      authInit(token, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(override),
+      }),
+    );
     return response.ok;
   } catch {
     return false;
@@ -2361,7 +2366,7 @@ Expected: PASS, all three tests.
 
 - [ ] **Step 6: Write the panel and the barrel from the agreed design**
 
-Create `src/features/charts-management/ChartsManagementPanel.svelte` per the layout agreed in Step 1: a `SlideOver` shell whose body lists each `ManagedChart` (name, description, parsed header bounds and zoom and format, and a valid marker), with an editable name and description per chart wired to `putChartOverride`, plus a section listing each `invalid` file with its decode error and a deferred-upload note. Use the existing `shared/ui` primitives and `panels.css` tokens; do not add one-off controls or colors. Create `src/features/charts-management/index.ts` to export the panel and the client.
+Create `src/features/charts-management/ChartsManagementPanel.svelte` per the layout agreed in Step 1: a `SlideOver` shell whose body lists each `ManagedChart` (name, description, parsed header bounds and zoom and format, and a valid marker), with an editable name and description per chart wired to `putChartOverride`, plus a section listing each `invalid` file with its decode error and a deferred-upload note. The panel calls `fetchManagedCharts(location.origin, auth.token)` and `putChartOverride(location.origin, auth.token, ...)`, reading the token reactively from the auth controller so the calls carry the bearer token like the other authenticated server calls. Use the existing `shared/ui` primitives and `panels.css` tokens; do not add one-off controls or colors. Create `src/features/charts-management/index.ts` to export the panel and the client.
 
 - [ ] **Step 7: Run the webapp check and the feature tests**
 
@@ -2377,6 +2382,33 @@ git commit -m "feat(charts): add the companion chart-management panel"
 
 ---
 
+## Release
+
+### Task 13: docs and release per the SignalK plugin pre-push checklist
+
+This milestone adds a runtime dependency (`pmtiles@^4.4.1`) and a user-facing capability (the plugin serves local PMTiles charts, the webapp routes the provided path through the default browser cache, and the management panel), so it needs its own release. Spec section 9 notes there is NO container rebuild for this milestone: it is plugin and webapp only. If this milestone ships together with the tile cache v2 prewarm milestone, the single combined release task in that plan (its Task 20) may absorb this one, but a release MUST exist; do not leave the new dependency and capability unreleased.
+
+**Files:**
+- Modify `CHANGELOG.md`, `README.md`, and `version` in `/home/dietpi/src/signalk-binnacle-companion` and `/home/dietpi/src/signalk-binnacle`, plus any architecture docs (`CLAUDE.md`, `docs/`) made stale by this work.
+
+**Interfaces:**
+- Consumes: the completed Phase A and Phase B work, all gates green.
+- Produces: dated and anchored CHANGELOG entries, the README "What's New" overwritten to the new version (single most-recent release, never an accumulating list), version bumps for the plugin and the webapp, and a refreshed `signalk.recommends` list.
+
+Steps:
+
+- [ ] Verify the new dependency: `pmtiles@^4.4.1` resolves and installs (`npm install`), `npm audit --omit=dev` is clean of moderate-and-above (the registry audits runtime deps, and `pmtiles` is now one), and it runs on the lowest advertised `engines.node` (`>=20.3.0`); `pmtiles` is pure JS with no native code, so the matrix on Node 22 and 24 across Linux, macOS, and Windows passes.
+- [ ] Run `/simplify` on the full diff across the plugin and the webapp and apply the findings (reuse, simplification, efficiency, and altitude). Fix every finding of every severity; skip only the factually refuted.
+- [ ] Bring related packages current: `npm outdated`, bump the ranges, refresh the lockfiles, and reinstall, in each repo.
+- [ ] Refresh `signalk.recommends` in the plugin `package.json` to cross-link the author's companion and related published SignalK plugins, only where the functional pairing is real.
+- [ ] Write the CHANGELOG entries (dated, anchored) and overwrite each README "What's New" to the new version. Describe what changed (the local PMTiles chart provider with a strong ETag and Range serving, the provided-path browser-cache switch, the chart-management panel), never how it was produced or reviewed. No em dashes, use the Oxford comma, write "and" not the ampersand, "chartplotter" is one word.
+- [ ] Bump `version` in the plugin and the webapp `package.json`. Confirm there is no `prepare` or `prepack` script in the plugin `package.json`.
+- [ ] Prove the pipeline: in each repo run the full gate (the plugin: `npm test && npm run typecheck && npm run lint && npm run build`; the webapp: `npm run check && npm run lint && npm run build`). All green. There is no container or Rust work in this milestone, so no `cargo` gate.
+- [ ] Publish in order: the plugin, then the webapp. Confirm a SignalK plugin-ci run exists on the published commit and the registry scores the new version.
+- [ ] Commit: `docs: pmtiles chart provider release notes and version bumps`
+
+---
+
 ## Self-Review
 
 **1. Spec coverage**
@@ -2388,10 +2420,11 @@ git commit -m "feat(charts): add the companion chart-management panel"
 - Serve: strong file-identity ETag (size and mtime ns, never a header hash), Accept-Ranges, 206 with Content-Range via `createReadStream(start, end)`, If-Range mismatch to full 200, If-None-Match to 304, 416 unsatisfiable, open read-only (spec 5 Serve, 8): Task 7. Covered.
 - Mutual exclusion: real disable when signalk-pmtiles-plugin is enabled, surfaced in plugin status, no swallowed errors (spec 5 Mutual exclusion, 11): Task 5 (`isThirdPartyPmtilesEnabled`), Task 8 (status message, skip registration). Covered.
 - Teardown: unwatch, clear the chart set (the effective unregister, since no unregisterResourceProvider API exists) (spec 5 Mutual exclusion, 11): Task 8 (`teardownCharts`), documented in Task 4. Covered.
+- Serve precedence and TOCTOU: If-None-Match takes precedence over Range (a match returns 304 even with a Range), and the serve handler re-validates the stored realpath at serve time so a symlink swap or file replacement after the debounced rescan is rejected (spec 5 Serve, 8): Task 7. Covered.
 - Webapp provided-path switch: exact url-path match, plain source with default cache, retire `cache: 'no-store'` and the IndexedDB block cache on the provided path, keep both for non-provided (spec 6, 11): Task 9. Covered.
-- Management panel and per-chart override (spec 6, 7 Phase B): Tasks 10, 11, 12. Covered. Browser upload deferred and noted in Task 12.
-- Dependencies and release (spec 9): Task 1 adds the pure-JS `pmtiles` dependency. The CHANGELOG, README "What's New", and version bumps are a release step outside this plan, flagged in the handoff.
-- Testing (spec 10): every behavior listed has a test in Tasks 1 through 12.
+- Management gate, panel, and per-chart override (spec 6, 7 Phase B): the admin gate is the shared `src/shared/admin-gate.ts` from the tile cache v2 prewarm plan (Task 10 confirms reliance, no re-port), the override store and the gated management routes are Task 11, the panel is Task 12. Covered. Browser upload deferred and noted in Task 12.
+- Dependencies and release (spec 9): Task 1 adds the pure-JS `pmtiles` dependency, and Task 13 is the release (version bump, dated anchored CHANGELOG, README "What's New", `npm audit --omit=dev` clean with `pmtiles` now audited, `signalk.recommends` refresh, and a plugin-ci run on the published commit; no container rebuild). Covered.
+- Testing (spec 10): every behavior listed has a test in Tasks 1 through 12; Task 13 is the release.
 
 **2. Placeholder scan**
 
@@ -2405,10 +2438,20 @@ No "TBD", "TODO", "implement later", "add appropriate error handling", or "simil
 - `ChartRegistry` method names (`set`, `delete`, `clear`, `has`, `filePathFor`, `records`, `list`, `get`, `setError`, `clearError`, `errors`) are used consistently in Tasks 6, 7, 8, 11.
 - `serveUrl` and the `SERVE_BASE` constant (Task 4) and the serve route path `/pmtiles/:file` (Task 7) share the same `/plugins/signalk-binnacle-companion/pmtiles/` prefix that the webapp matches in Task 9 (`COMPANION_PMTILES_PREFIX`).
 - `ChartNamer` and `defaultNamer` (Task 6) are reused by `OverrideStore.namer()` (Task 11) with the same return shape `{ name, description, scale }`.
-- `ensureApiAdminGate` (Task 10) returns `boolean`, consumed as a guard in Task 11 wiring.
+- `OverrideStore` (Task 11) is synchronous (`load(): void`, `set(id, override): void`) and persists through the shared `readJsonState`/`writeJsonState` from `src/runtime/json-state.js` (the v2 helper); the management route handler and its tests call it synchronously.
+- `ensureApiAdminGate` (imported from `../shared/admin-gate.js`, the v2 shared module) returns `boolean`, consumed as a guard in Task 11 wiring. Task 10 only confirms reliance and creates nothing.
 - The management response shape (`{ charts, invalid }`) produced in Task 11 matches `ManagedChartsResponse` consumed by the webapp client in Task 12.
+- The webapp client (Task 12) takes `(origin, token, fetchImpl?)`, builds its URL with `companionApiUrl` (the v2 shared base helper), and authenticates with the shared `authInit` bearer scheme, identical to the prewarm client.
+
+### Cross-plan modules (owned by the tile cache v2 prewarm plan, imported here)
+
+- The admin gate `src/shared/admin-gate.ts` and its test `test/admin-gate.test.ts` are the v2 plan's; this plan imports `ensureApiAdminGate` and re-creates neither (Task 10).
+- The sync JSON state helper `src/runtime/json-state.ts` is the v2 plan's; the override store imports it (Task 11).
+- The shared test fake `test/helpers.ts` `fakeApp()` is extended by the v2 plan; the plugin-charts test relies on the extended fake (Task 8).
+- The webapp base helper `src/shared/companion/companion-api.ts` (`companionApiUrl`) is the v2 plan's; the chart-management client imports it (Task 12).
+- The plugin's `registerWithRouter`, `doStart`, and `doStop` edits here (Task 8, Task 11) are ADDITIVE to the post-v2 plugin, which already mounts the prewarm routes and runs the position-warm loop. The merged bodies are shown in those tasks.
 
 Resolved ambiguities recorded for the executor:
 - The serve route path tail is the `.pmtiles` filename (param `:file`), resolved to the record via `nameToId`. This keeps the resource identifier as `file-pmtiles` (preserving the id scheme and webapp layer state) while the public url ends in `.pmtiles`, so the webapp's existing `pmtilesUrl` recognition needs no change. The spec's `:id` is this filename param.
 - "Unregister the resource provider" in teardown is implemented as clearing the chart set, because Signal K exposes no `unregisterResourceProvider` and Express no subrouter deregistration. The provider then serves an empty set.
-- Per-chart overrides persist to a JSON file under `app.getDataDirPath()` (the same seam as the crows-nest route-draft budget), since the ServerAPI exposes no applicationData write method and a loopback HTTP write to the server's applicationData would reintroduce the very pattern the spec retires.
+- Per-chart overrides persist to a JSON file under `app.getDataDirPath()` (where crows-nest also keeps its route-draft budget) through the shared sync json-state helper, since the ServerAPI exposes no applicationData write method and a loopback HTTP write to the server's applicationData would reintroduce the very pattern the spec retires.
