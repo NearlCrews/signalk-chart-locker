@@ -1,5 +1,8 @@
 /** Shared test fakes and global cleanup, hoisted so the lifecycle and runtime tests share one definition. */
 
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { ContainerConfig, ContainerManager, ContainerRuntimeInfo } from '../src/shared/types.js'
 import { CONTAINER_MANAGER_GLOBAL_KEY } from '../src/runtime/container-manager.js'
 import { removeRouteOnWaterBridge } from '../src/bridge/route-on-water-bridge.js'
@@ -8,18 +11,33 @@ import { removeRouteOnWaterBridge } from '../src/bridge/route-on-water-bridge.js
 export interface Recorder {
   status: string[]
   errors: string[]
+  config: { configPath: string }
   setPluginStatus (m: string): void
   setPluginError (m: string): void
+  error (...args: unknown[]): void
   debug (...args: unknown[]): void
+  getDataDirPath (): string
+  registerResourceProvider (provider: unknown): void
+  get (path: string, handler: unknown): void
+  streambundle: { getSelfBus (path?: unknown): { onValue (cb: (value: unknown) => void): () => void } }
 }
 
 export function fakeApp (): Recorder {
+  // One real temp directory per app, used for both the config path and the data dir, so the JSON state
+  // persistence and the chart discovery in start() have a writable directory and never collide.
+  const dir = mkdtempSync(join(tmpdir(), 'companion-test-'))
   return {
     status: [],
     errors: [],
+    config: { configPath: dir },
     setPluginStatus (m) { this.status.push(m) },
     setPluginError (m) { this.errors.push(m) },
-    debug () {}
+    error () {},
+    debug () {},
+    getDataDirPath () { return dir },
+    registerResourceProvider () {},
+    get () {},
+    streambundle: { getSelfBus () { return { onValue () { return () => {} } } } }
   }
 }
 
