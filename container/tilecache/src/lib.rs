@@ -3,6 +3,8 @@
 //! egress; the routing engine stays in its own offline image.
 
 pub mod cache;
+pub mod fetcher;
 pub mod source;
 pub mod ssrf;
+pub mod state;
 pub mod upstream;
