@@ -22,6 +22,43 @@
 - House writing rules: no em dashes, Oxford commas, write "and" not "&", "chartplotter" is one word, no AI-process talk in any commit, changelog, README, or comment. Run the project's full gate green before each "done" and fix every review finding of every severity.
 - Build order is A (shared package), B (tilecache crate and image), C (plugin), D (webapp). Each repo must still work installed alone.
 
+## Review corrections (applied before execution)
+
+A two-agent review of this plan found the issues below. Every one is folded into execution; where a task description conflicts with a correction here, this section wins.
+
+CRITICAL and HIGH:
+- Workspace and images: adding `tilecache` to `container/Cargo.toml` members means `cargo build` for ANY member parses every member manifest, so `container/Dockerfile` (the router image) must also `COPY tilecache ./tilecache`, and the new `container/tilecache/Dockerfile` must `COPY` every member dir. The router BINARY gains no new dep and no egress (source is copied, not linked); the gate wording changes from "router image unchanged" to "the router binary gains no new dependency and no egress."
+- Shared-package dependency mechanic: `file:../signalk-binnacle-chart-sources` is a DEV-only mechanic for building and testing at the desk. It cannot ship: both consumers publish to npm. Task A3 (release-gated, the owner runs it) publishes `signalk-binnacle-chart-sources` to npm and switches both consumers to a version range. Until then CI and fresh clones of the consumers that need the sibling will not resolve it, which is acceptable on a feature branch (same posture as an unreleased plugin). The shared package needs `"prepare": "tsc"` so a `file:` install builds `dist/`, and `engines.node >= 20`.
+- `ContainerConfig.volumes` real shape (from the installed signalk-container types, confirm in `~/.signalk/node_modules/signalk-container`): `volumes?: Record<string, string | { source: string, ifMissing?: 'create' | 'skip' | 'abort' }>` keyed by the in-container mount path, plus `signalkDataMount?: string` (the zero-config durable default) and `user?: string | false`. C1 adds all three. The default cache lives under `signalkDataMount`; `TILECACHE_DB` is a sub-path there. A user-managed external-SSD volume uses the `{ source, ifMissing }` form.
+- Companion `package.json` must add `signalk-binnacle-chart-sources` to `dependencies` (C1 or C2), not only import it.
+- Split B3 into B3a fetch, validate, store, mint strong ETag; B3b revalidation and negative-cache; B3c single-flight and per-host semaphore and 429 or Retry-After; B3d serve-stale-when-offline and max-stale. One failing test and commit each.
+- Registry data: GEBCO is WMS (`wmsTiles('https://wms.gebco.net/mapserv', 'GEBCO_LATEST')`), not xyz. Transcribe every `ChartSource` directly from the real webapp modules at A2 execution: `streaming-sources.ts` (GEBCO wms, EMODnet wms plus `quality_index` style facet, BlueTopo WMTS 512 plus uncertainty wms facet, NOAA ENC wms LAYERS `0,1,2,3,4,5,6,7,10` and quality `8,9`), `seamark-sources.ts`, `ocean-sources.ts`, `boundary-sources.ts`, `mpa-sources.ts`, `base-style.ts`. Add a per-source test that pins each entry's expanded URL against the real module value, so registry drift is caught.
+- Webapp async threading: `STREAMING_CHART_SOURCES` and the other `*_SOURCES` are module-level consts consumed synchronously (`ChartCanvas.svelte:334 .map(createStreamingChartOverlay)`), and `baseStyleUrl()` is called synchronously at map init (`themed-map.ts:80`). `detectCompanion` is async. D must convert these const exports to companion-aware factories (or pass a resolved companion base into the builders) and await detection BEFORE map construction. Name the real consumers in each D task.
+- Basemap rewrite (its own task, D3 plus a container task in B4): the openfreemap Liberty style references its vector tiles via a TileJSON `source.url`, so the container must walk the style JSON `glyphs`, `sprite` (both `.json` and `.png`), and each `sources[].url`, fetch each TileJSON, and rewrite its nested `tiles[]` too. The container learns its public base (`/plugins/signalk-binnacle-companion`) from `POST /config`. Test the served style AND its TileJSON sub-document are fully plugin-relative.
+- GIBS carries a `{date}`. Encode the date in the source `id` (`gibs-sst-YYYY-MM-DD`) so "id fully determines every non-z/x/y parameter" holds. Daily re-push is a v2 concern; v1 pushes the static registry once at start (document the limitation).
+
+MEDIUM:
+- Cache table: use a NORMAL rowid table with `PRIMARY KEY (source, z, x, y)` as a UNIQUE index (NOT `WITHOUT ROWID`: KB blobs in the key btree are slower and worse for microSD). Keep a running byte total updated on put and delete (no `SUM(bytes)` scan; `/cache/stats` stays O(1)). Schema mismatch on `user_version` drops and recreates the table (tested). `synchronous=NORMAL`. Document the NFS-WAL caveat for a user volume.
+- Concurrency: one writer connection plus a small read-connection pool (or accept a single serialized connection and DROP the "concurrent reads" claim). Pick the pool for the spec's read path.
+- reqwest TLS: pin reqwest and select the `ring`-backed rustls feature explicitly; confirm `aws-lc-rs` is not in the lock (it needs cmake, absent from `rust:1-bookworm`).
+- v1 is registry-only: `buildSourcePayload` pushes ONLY the shared registry, not Signal K chart resources (a chart resource pointing at a LAN tile server would be blocked by the SSRF private-IP guard, and no D task routes chart-resource rendering through the proxy in v1). Chart-resource proxying is deferred. Drop the `chartResources` parameter.
+- `TILECACHE_CAP_BYTES` default: 2 GiB (`2_147_483_648`). Plugin `schema()` exposes the tilecache image tag, the cap, and the optional external-SSD volume source.
+- Default image ref: add `DEFAULT_TILECACHE_IMAGE` mirroring `DEFAULT_ROUTER_IMAGE` in `router-container.ts`. Building and pushing the image is release-gated (the owner), like the router image.
+- CI: add a tilecache or workspace job to `.github/workflows/ci.yml` (the existing rust jobs are scoped to `container/engine`, so they would miss the new crate).
+- B2 parity test: assert WMS-query EQUIVALENCE (parsed params and a bbox within tolerance), not cross-language string identity (JS and Rust format `f64` differently).
+- WMS sources stay `tileSize: 256` (all current ones are), so the proxied and direct paths request the same image.
+
+LOW and NIT:
+- Mercator: drop "matches MapLibre exactly"; it is bit-exact across the TS and Rust copies (same formula, constant, and IEEE-754) and sub-ULP versus MapLibre, which is irrelevant since the cache key is z/x/y, not the bbox. Test against a precomputed value with a tolerance.
+- `AppState` also carries the single-flight map, the per-host semaphore, the negative-cache TTL, the max-stale bound, and the per-blob size cap.
+- Streaming proxy: on a bodyless upstream status (`304`, `416`, `204`), set headers and `res.end()` without piping (`Readable.fromWeb(null)` throws). Clear the resolved-address holder to null in `doStop` so `/tiles/ready` reports unavailable after stop.
+- Name: use `proxyTileTemplate(pluginBase, sourceId)` everywhere (the spec's `proxyTileUrl` is the older name).
+- Resource limits mirror `ROUTER_RESOURCES` with smaller numbers (`memory: '512m'`, `memorySwap` equal to memory, a positive `oomScoreAdj`).
+- Readiness route is `/tiles/ready` (the spec's `/tiles/health` is renamed; align the webapp probe).
+- The `X-Tilecache: stale` badge in the webapp is OUT of v1 scope (YAGNI). The container still emits the header and the plugin relays it; consuming it is a later sub-milestone. Remove the stale badge from boat-only test 3.
+
+Confirmed sound by the review (do not change): `signalkAccessiblePorts` keeps the port off the LAN; `registerWithRouter(router)` mounts under `/plugins/signalk-binnacle-companion/` and is the right plugin API; rusqlite bundled, reqwest, and ring build on aarch64 distroless; the x86_64 `-fma` flag does not affect them or engine parity; WMS 1.3.0 with `CRS=EPSG:3857` and `BBOX` order `minX,minY,maxX,maxY` has no axis error.
+
 ## Repos and file structure
 
 - New repo `~/src/signalk-binnacle-chart-sources` (the shared package). Both other repos depend on it (local `file:` path during dev; the owner publishes to npm later).
