@@ -1,24 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { registerPrewarmRoutes, type PrewarmRouter, type PrewarmRequest, type PrewarmResponse } from '../src/http/prewarm-routes.js'
 import type { ServerAPI } from '@signalk/server-api'
+import { fakeApp } from './helpers.js'
 
 interface FullRequest extends PrewarmRequest {
   query?: Record<string, string>
 }
 
-/** A minimal app that satisfies both ensureApiAdminGate and the getDataDirPath call in registerPrewarmRoutes. */
-const securedApp = (): ServerAPI => {
-  const dir = mkdtempSync(join(tmpdir(), 'geocode-test-'))
-  return {
-    error: () => {},
-    getDataDirPath: () => dir,
-    securityStrategy: { addAdminMiddleware: () => {} }
-  } as unknown as ServerAPI
-}
+const securedApp = (): ServerAPI => fakeApp() as unknown as ServerAPI
 
 function makeRouter (): { calls: Array<{ method: string; path: string; handler: (req: FullRequest, res: PrewarmResponse) => void | Promise<void> }>; router: PrewarmRouter } {
   const calls: Array<{ method: string; path: string; handler: (req: FullRequest, res: PrewarmResponse) => void | Promise<void> }> = []

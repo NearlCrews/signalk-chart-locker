@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registerPrewarmRoutes, type PrewarmRouter, type PrewarmRequest, type PrewarmResponse } from '../src/http/prewarm-routes.js'
 import type { ServerAPI } from '@signalk/server-api'
+import { fakeApp } from './helpers.js'
 
 type Handler = (req: PrewarmRequest, res: PrewarmResponse) => void
 
@@ -28,7 +29,7 @@ function fakeRes () {
   return { res, out }
 }
 
-const securedApp = () => ({ error: () => {}, securityStrategy: { addAdminMiddleware: () => {} } } as unknown as ServerAPI)
+const securedApp = (): ServerAPI => fakeApp() as unknown as ServerAPI
 
 test('routes are not mounted without a security strategy (fail closed)', () => {
   const { router, routes } = collector()

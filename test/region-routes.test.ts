@@ -104,6 +104,39 @@ test('POST /api/regions returns 400 when the estimate exceeds the regions-free b
   assert.equal((listed[0]?.body as unknown[]).length, 0, 'an over-budget region must not be persisted')
 })
 
+test('a warm-relay failure leaves no persisted region', async () => {
+  // The budget fits, so the POST gets past the gate and persists the region, but the container rejects
+  // the warm start: the route must drop the just-added region and return 502, never leave it stuck at
+  // downloading with no job.
+  const fetchImpl = async (url: string) => {
+    if (url.includes('/cache/stats')) {
+      return new Response(JSON.stringify({
+        rows: 0,
+        bytes: 0,
+        cap: 4_000_000_000,
+        pinnedBytes: 0,
+        scrollBytes: 0,
+        regionsBudgetBytes: 2_000_000_000,
+        regionsFreeBytes: 2_000_000_000,
+        perSourceAvgBytes: {}
+      }), { status: 200 })
+    }
+    if (url.endsWith('/warm')) return new Response(JSON.stringify({ error: 'busy' }), { status: 503 })
+    throw new Error(`unexpected url: ${url}`)
+  }
+  const { router, routes } = makeRouter()
+  const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
+  registerPrewarmRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  const post = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
+  const { responded, res } = fakeRes()
+  await post.handler({ params: {}, body: { bbox: [-10.0, 50.0, 10.0, 60.0], sourceIds: ['depth-gebco'], minzoom: 6, maxzoom: 12, name: 'Test' } }, res)
+  assert.equal(responded[0]?.status, 502, 'a failed warm start must return 502')
+  const list = routes.find(r => r.method === 'GET' && r.path === '/api/regions')!
+  const { responded: listed, res: listRes } = fakeRes()
+  await list.handler({ params: {}, body: null }, listRes)
+  assert.equal((listed[0]?.body as unknown[]).length, 0, 'a failed warm start must not leave a persisted region')
+})
+
 test('a terminal job snapshot reconciles the region status away from downloading', async () => {
   const fetchImpl = async (url: string) => {
     if (url.includes('/cache/stats')) {

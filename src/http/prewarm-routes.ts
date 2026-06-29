@@ -125,7 +125,7 @@ export function registerPrewarmRoutes (router: PrewarmRouter, app: ServerAPI, ge
   const statusFromState = (state: WarmSnapshot['state']): RegionStatus => {
     if (state === 'done') return 'ready'
     if (state === 'capped') return 'capped'
-    return 'error' // 'error' or 'cancelled'
+    return 'error'
   }
 
   // Map a terminal warm snapshot to the persisted region status. A running snapshot leaves the region
@@ -218,7 +218,7 @@ export function registerPrewarmRoutes (router: PrewarmRouter, app: ServerAPI, ge
       res.status(502).json({ error: 'tilecache unreachable' }); return
     }
     const estimate = estimateBytes(sourceIds, bbox, [minzoom, maxzoom], stats.perSourceAvgBytes ?? {})
-    if (estimate > (stats.regionsFreeBytes ?? 0)) {
+    if (estimate > Math.max(0, stats.regionsFreeBytes ?? 0)) {
       res.status(400).json({ error: 'exceeds regions budget' }); return
     }
     const region: SavedRegion = {
@@ -236,10 +236,14 @@ export function registerPrewarmRoutes (router: PrewarmRouter, app: ServerAPI, ge
     addRegion(dataDir, region)
     try {
       const warmResp = await fetchImpl(`http://${address}/warm`, warmInit({ sources: sourceIds, bbox, minzoom, maxzoom, regionId: region.id }))
+      if (!warmResp.ok) throw new Error('warm start rejected')
       const { jobId } = (await warmResp.json()) as { jobId: string }
       regionJobs.set(region.id, jobId)
       res.status(200).json({ region, jobId })
     } catch {
+      // The warm start failed after the region was persisted: drop it so a failed start does not
+      // linger as a downloading region with no job until the sweep.
+      removeRegion(dataDir, region.id)
       res.status(502).json({ error: 'tilecache unreachable' })
     }
   })
