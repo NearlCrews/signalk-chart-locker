@@ -1,6 +1,6 @@
-/** The admin-gated prewarm and config routes: the single write surface for the prewarm box. They persist
- * the box and the settings (the source of truth) and forward warm operations to the tilecache container.
- * Mounted only when the admin gate holds, so an ungatable server leaves them unmounted (fail closed). */
+/** The admin-gated tile, prewarm, region, and geocode routes. They persist the position-warm settings
+ * and the saved regions through the regions store, and forward warm and cache operations to the tilecache
+ * container. Mounted only when the admin gate holds, so an ungatable server leaves them unmounted (fail closed). */
 
 import { randomUUID } from 'node:crypto'
 import type { ServerAPI } from '@signalk/server-api'
@@ -245,7 +245,7 @@ export function registerPrewarmRoutes (router: PrewarmRouter, app: ServerAPI, ge
     } catch {
       ok = false
     }
-    if (!ok) { res.status(503).json({ error: 'tilecache unreachable' }); return }
+    if (!ok) { res.status(503).end(); return }
     removeRegion(dataDir, id)
     regionJobs.delete(id)
     res.status(204).end()
