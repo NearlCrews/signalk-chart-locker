@@ -251,7 +251,12 @@ export function createPlugin (app: ServerAPI): Plugin {
           router as unknown as ManagementRouter,
           registry,
           overrides,
-          () => { (async () => { const { rescanCharts } = await import('../charts/discovery.js'); await rescanCharts({ chartsDir: activeChartsDir ?? chartsDirFor({}), registry, namer: overrides.namer() }) })().catch(() => {}) }
+          () => {
+            (async () => {
+              const { rescanCharts } = await import('../charts/discovery.js')
+              await rescanCharts({ chartsDir: activeChartsDir ?? chartsDirFor({}), registry, namer: overrides.namer() })
+            })().catch((err) => app.debug(`chart rescan after override failed: ${String(err)}`))
+          }
         )
       }
     }

@@ -56,15 +56,17 @@ function collect (): { get: Record<string, (req: ManagementRequest, res: FakeRes
   return { get, post, registry, overrides, applied: state.applied }
 }
 
-test('GET /api/charts lists valid charts, decode errors, and the conflict flag', () => {
+test('GET /api/charts lists valid charts and decode errors with overrides', () => {
   const ctx = collect()
   ctx.registry.set(record())
   ctx.registry.setError('broken.pmtiles', 'unknown tile type 0')
   const res = new FakeRes()
   ctx.get['/api/charts']({ params: {}, body: undefined }, res)
-  const body = res.body as { charts: unknown[], invalid: unknown[] }
+  const body = res.body as { charts: Record<string, unknown>[], invalid: unknown[] }
   assert.equal(body.charts.length, 1)
   assert.equal(body.invalid.length, 1)
+  assert.ok('override' in body.charts[0], 'each chart record must include the override field')
+  assert.equal(typeof body.charts[0].override, 'object')
 })
 
 test('POST /api/charts/:id/override persists the override and triggers a re-apply', async () => {

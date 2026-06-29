@@ -87,3 +87,42 @@ test('registerWithRouter mounts the open serve route', async () => {
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('registerWithRouter does not mount management routes when no security strategy is present', async () => {
+  const root = await configRoot()
+  setContainerManager(fakeManager())
+  const { app } = chartApp(root)
+  const plugin = createPlugin(app as never)
+  const routerRoutes: Record<string, unknown> = {}
+  try {
+    plugin.registerWithRouter?.({
+      get: (p: string, h: unknown) => { routerRoutes[p] = h },
+      post: (p: string, h: unknown) => { routerRoutes[p] = h }
+    } as never)
+    assert.equal(routerRoutes['/api/charts'], undefined, '/api/charts must not be registered without a security strategy')
+    assert.equal(routerRoutes['/api/charts/:id/override'], undefined, '/api/charts/:id/override must not be registered without a security strategy')
+  } finally {
+    clearGlobals()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('registerWithRouter mounts management routes when a security strategy is present', async () => {
+  const root = await configRoot()
+  setContainerManager(fakeManager())
+  const { app } = chartApp(root)
+  ;(app as unknown as Record<string, unknown>).securityStrategy = { addAdminMiddleware: () => {} }
+  const plugin = createPlugin(app as never)
+  const routerRoutes: Record<string, unknown> = {}
+  try {
+    plugin.registerWithRouter?.({
+      get: (p: string, h: unknown) => { routerRoutes[p] = h },
+      post: (p: string, h: unknown) => { routerRoutes[p] = h }
+    } as never)
+    assert.equal(typeof routerRoutes['/api/charts'], 'function', '/api/charts must be registered with a security strategy')
+    assert.equal(typeof routerRoutes['/api/charts/:id/override'], 'function', '/api/charts/:id/override must be registered with a security strategy')
+  } finally {
+    clearGlobals()
+    await rm(root, { recursive: true, force: true })
+  }
+})
