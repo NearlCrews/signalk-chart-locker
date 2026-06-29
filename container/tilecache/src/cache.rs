@@ -285,10 +285,14 @@ impl TileCache {
             params![source, z, x, y], |r| Ok((r.get(0)?, r.get(1)?)),
         ).optional()?;
         let Some((tile_bytes, pinned)) = prev else { return Ok(()) };
-        inner.conn.execute(
-            "UPDATE tiles SET pinned = 1 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
-            params![source, z, x, y],
-        )?;
+        {
+            let tx = inner.conn.unchecked_transaction()?;
+            tx.execute(
+                "UPDATE tiles SET pinned = 1 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
+                params![source, z, x, y],
+            )?;
+            tx.commit()?;
+        }
         if pinned != 1 {
             inner.pinned_bytes += tile_bytes;
         }
@@ -335,21 +339,27 @@ impl TileCache {
             "SELECT bytes, pinned FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
             params![source, z, x, y], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? == 1)),
         ).optional()?.unwrap_or((0, false));
-        if !was_pinned && inner.pinned_bytes + tile_bytes > budget {
+        // Only a tile that newly enters the pinned set AND carries positive bytes can cross the budget;
+        // a free (zero-byte) negative-cache row is never refused on budget.
+        if !was_pinned && tile_bytes > 0 && inner.pinned_bytes + tile_bytes > budget {
             return Ok(false);
         }
-        inner.conn.execute(
-            "UPDATE tiles SET pinned = 1 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
-            params![source, z, x, y],
-        )?;
+        {
+            let tx = inner.conn.unchecked_transaction()?;
+            tx.execute(
+                "UPDATE tiles SET pinned = 1 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
+                params![source, z, x, y],
+            )?;
+            if let Some(rid) = region_id {
+                tx.execute(
+                    "INSERT OR IGNORE INTO region_tiles (region_id, source, z, x, y) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![rid, source, z, x, y],
+                )?;
+            }
+            tx.commit()?;
+        }
         if !was_pinned {
             inner.pinned_bytes += tile_bytes;
-        }
-        if let Some(rid) = region_id {
-            inner.conn.execute(
-                "INSERT OR IGNORE INTO region_tiles (region_id, source, z, x, y) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![rid, source, z, x, y],
-            )?;
         }
         Ok(true)
     }
@@ -375,21 +385,27 @@ impl TileCache {
         ).optional()?;
         let Some((tile_bytes, pinned)) = prev else { return Ok(false) };
         let was_pinned = pinned == 1;
-        if !was_pinned && inner.pinned_bytes + tile_bytes > budget {
+        // Only a tile that newly enters the pinned set AND carries positive bytes can cross the budget;
+        // a free (zero-byte) row is never refused on budget.
+        if !was_pinned && tile_bytes > 0 && inner.pinned_bytes + tile_bytes > budget {
             return Ok(false);
         }
-        inner.conn.execute(
-            "UPDATE tiles SET pinned = 1 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
-            params![source, z, x, y],
-        )?;
+        {
+            let tx = inner.conn.unchecked_transaction()?;
+            tx.execute(
+                "UPDATE tiles SET pinned = 1 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
+                params![source, z, x, y],
+            )?;
+            if let Some(rid) = region_id {
+                tx.execute(
+                    "INSERT OR IGNORE INTO region_tiles (region_id, source, z, x, y) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![rid, source, z, x, y],
+                )?;
+            }
+            tx.commit()?;
+        }
         if !was_pinned {
             inner.pinned_bytes += tile_bytes;
-        }
-        if let Some(rid) = region_id {
-            inner.conn.execute(
-                "INSERT OR IGNORE INTO region_tiles (region_id, source, z, x, y) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![rid, source, z, x, y],
-            )?;
         }
         Ok(true)
     }
@@ -446,6 +462,23 @@ impl TileCache {
             "SELECT COALESCE(SUM(t.bytes), 0) FROM region_tiles rt JOIN tiles t
              ON rt.source = t.source AND rt.z = t.z AND rt.x = t.x AND rt.y = t.y WHERE rt.region_id = ?1",
             params![region_id], |r| r.get(0),
+        )
+    }
+
+    /// The total stored bytes pinned by at least one NON-position-warm region, counting a shared tile
+    /// once. A tile pinned ONLY by the position-warm pseudo-region is excluded, and a tile shared
+    /// between a real region and position-warm still counts once toward the real-region usage. This is
+    /// the exact real-region pinned total, so the server-side regions budget gate stays exact rather
+    /// than over-subtracting a shared tile.
+    pub fn real_region_pinned_bytes(&self, position_warm_region_id: &str) -> rusqlite::Result<i64> {
+        let inner = self.lock();
+        inner.conn.query_row(
+            "SELECT COALESCE(SUM(t.bytes), 0) FROM tiles t \
+             WHERE t.pinned = 1 AND EXISTS ( \
+               SELECT 1 FROM region_tiles rt \
+               WHERE rt.source = t.source AND rt.z = t.z AND rt.x = t.x AND rt.y = t.y \
+                 AND rt.region_id != ?1)",
+            params![position_warm_region_id], |r| r.get(0),
         )
     }
 
@@ -740,5 +773,43 @@ mod tests {
         assert_eq!(rows, 0, "wipe clears all tiles");
         assert_eq!(total, 0);
         assert_eq!(pinned, 0);
+    }
+
+    #[test]
+    fn real_region_pinned_bytes_excludes_position_warm_only_and_counts_shared_once() {
+        let (_f, c) = open();
+        let now = 1000i64;
+        let pw = crate::state::POSITION_WARM_REGION_ID;
+        // Tile A is pinned ONLY by the position-warm pseudo-region: it must not count.
+        let a = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(100, 200, Some(vec![0; 100])) }];
+        c.put_many_pinned(&a, 2_000_000_000, Some(pw), now).unwrap();
+        // Tile B is shared between a real region r1 and the position-warm pseudo-region: it counts once.
+        let b = vec![WarmRow { source: "s".into(), z: 0, x: 1, y: 0, tile: tile(40, 200, Some(vec![0; 40])) }];
+        c.put_many_pinned(&b, 2_000_000_000, Some("r1"), now).unwrap();
+        c.put_many_pinned(&b, 2_000_000_000, Some(pw), now).unwrap();
+        assert_eq!(
+            c.real_region_pinned_bytes(pw).unwrap(),
+            40,
+            "only the shared tile counts toward real-region usage, and exactly once",
+        );
+    }
+
+    #[test]
+    fn pin_if_fresh_pins_a_zero_byte_row_even_when_pinned_bytes_exceeds_budget() {
+        let (_f, c) = open();
+        let now = 1000i64;
+        // Pin a real 100-byte tile so pinned_bytes = 100.
+        let real = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(100, 200, Some(vec![0; 100])) }];
+        c.put_many_pinned(&real, 2_000_000_000, Some("r1"), now).unwrap();
+        assert_eq!(c.stats().unwrap().2, 100, "pinned_bytes starts at 100");
+        // A fresh negative-cache (zero-byte) row.
+        let neg = CachedTile { fetched_at: now, ..tile(0, 404, None) };
+        c.put("s", 0, 1, 0, &neg, false, now).unwrap();
+        // Even with a budget BELOW the current pinned_bytes, a free row is never refused on budget.
+        assert!(
+            c.pin_if_fresh("s", 0, 1, 0, now, 86_400, 600, 50, Some("r1")).unwrap(),
+            "a free zero-byte row is pinned even when pinned_bytes already exceeds the budget",
+        );
+        assert_eq!(c.stats().unwrap().2, 100, "a zero-byte row adds nothing to pinned_bytes");
     }
 }

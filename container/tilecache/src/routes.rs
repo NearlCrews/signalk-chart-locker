@@ -40,9 +40,12 @@ async fn stats(State(st): State<AppState>) -> Json<serde_json::Value> {
     let cap = st.live_cap_bytes.load(Ordering::Relaxed);
     let r = st.live_regions_budget.load(Ordering::Relaxed);
     let p = st.live_position_warm_budget.load(Ordering::Relaxed);
-    // The position-warm pseudo-region's pinned bytes, so the real-region free room excludes them.
+    // The position-warm pseudo-region's pinned bytes, reported as positionWarmBytes.
     let pw = st.cache.region_bytes(crate::state::POSITION_WARM_REGION_ID).unwrap_or(0);
-    let real_pinned = (pinned_bytes - pw).max(0);
+    // The exact real-region pinned bytes: a tile shared between a real region and the position-warm
+    // pseudo-region counts once here, so the regions budget gate is not under-counted by subtracting a
+    // shared tile fully.
+    let real_pinned = st.cache.real_region_pinned_bytes(crate::state::POSITION_WARM_REGION_ID).unwrap_or(0);
     let avg: serde_json::Map<String, serde_json::Value> = st
         .cache
         .per_source_avg()

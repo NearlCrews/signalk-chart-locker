@@ -120,9 +120,12 @@ export function createPlugin (app: ServerAPI): Plugin {
         // default). P, the position-warm slice of R, is derived. Pushed so the container's hard-reserved
         // two-budget accounting is non-zero; without it every region warm immediately caps.
         const capBytes = config.tilecacheCacheCapBytes ?? DEFAULT_CACHE_CAP_BYTES
-        const regionsBudgetBytes = (config.tilecacheRegionsBudgetBytes ?? 0) > 0
+        const rawR = (config.tilecacheRegionsBudgetBytes ?? 0) > 0
           ? config.tilecacheRegionsBudgetBytes!
           : Math.floor(capBytes * 0.5)
+        // Clamp R to the cap: a value above the cap makes cap - R negative, so evict_to would drop the
+        // whole scroll cache and the pinned bytes could exceed the cap.
+        const regionsBudgetBytes = Math.min(rawR, capBytes)
         const pBudget = positionWarmBudgetBytes(regionsBudgetBytes)
         const pushed = await pushTilecacheConfig(tcAddress, buildSourcePayload(capBytes, regionsBudgetBytes, pBudget))
         if (!pushed) {
@@ -199,7 +202,7 @@ export function createPlugin (app: ServerAPI): Plugin {
         tilecacheRegionsBudgetBytes: {
           type: 'number',
           title: 'Saved-regions reserved budget, in bytes',
-          description: 'Disk hard-reserved for downloaded saved regions, kept separate from the scrolling tile cache so a region download is never evicted by panning. Leave 0 to reserve half the cache cap.',
+          description: 'Disk hard-reserved for downloaded saved regions, kept separate from the scrolling tile cache so a region download is never evicted by panning. Leave 0 to reserve half the cache cap. A value above the cache cap is clamped to the cap.',
           default: 0
         },
         tilecacheCacheVolumeSource: {
