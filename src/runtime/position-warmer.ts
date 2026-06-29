@@ -4,7 +4,7 @@
  * interval. The container being healthy only means the container is up, not that the internet is up. */
 
 import type { Position } from '../shared/types.js'
-import type { PrewarmConfig } from './prewarm-store.js'
+import type { PrewarmStore } from './prewarm-store.js'
 import type { WarmResult } from './tilecache-client.js'
 import { shouldWarm, bboxAround, type WarmTrigger } from './position-warm.js'
 
@@ -13,8 +13,8 @@ export interface PositionWarmer {
 }
 
 interface Deps {
-  getConfig: () => PrewarmConfig
-  warm: (bbox: [number, number, number, number], sources: string[], minzoom: number, maxzoom: number) => Promise<WarmResult | null>
+  getStore: () => PrewarmStore
+  warm: (bbox: [number, number, number, number], sources: string[], minzoom: number, maxzoom: number, regionId?: string) => Promise<WarmResult | null>
   now?: () => number
   backoffSecs?: number
 }
@@ -32,10 +32,10 @@ export function createPositionWarmer (deps: Deps): PositionWarmer {
   return {
     onPosition (pos: Position): void {
       if (inFlight) return
-      const config = deps.getConfig()
-      const settings = config.positionWarm
+      const store = deps.getStore()
+      const settings = store.positionWarm
       const nowMs = now()
-      if (!shouldWarm(pos, config.bbox, settings, trigger, nowMs)) return
+      if (!shouldWarm(pos, store.regions, settings, trigger, nowMs)) return
       const bbox = bboxAround(pos, settings.radiusMeters)
       const minzoom = Math.max(0, settings.baseZoom - ZOOM_SPREAD)
       const maxzoom = settings.baseZoom + ZOOM_SPREAD

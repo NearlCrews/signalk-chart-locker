@@ -3,7 +3,7 @@
  * this module decides, the caller performs the warm. */
 
 import type { Position } from '../shared/types.js'
-import type { PositionWarmSettings } from './prewarm-store.js'
+import type { PositionWarmSettings, SavedRegion } from './prewarm-store.js'
 
 export interface WarmTrigger {
   lastPos: Position | null
@@ -16,6 +16,11 @@ export function insideBox (pos: Position, bbox: [number, number, number, number]
   if (!Number.isFinite(pos.latitude) || !Number.isFinite(pos.longitude)) return false
   if (bbox === null) return false
   return pos.longitude >= bbox[0] && pos.longitude <= bbox[2] && pos.latitude >= bbox[1] && pos.latitude <= bbox[3]
+}
+
+/** Whether the position is inside any of the saved regions. An empty list is never inside. */
+export function insideAnyRegion (pos: Position, regions: SavedRegion[]): boolean {
+  return regions.some((r) => insideBox(pos, r.bbox))
 }
 
 const EARTH_RADIUS_M = 6_371_000
@@ -42,11 +47,11 @@ export function bboxAround (pos: Position, radiusMeters: number): [number, numbe
  * directly-posted config carries a smaller value. The config route floors it too. */
 export const MIN_WARM_INTERVAL_SECS = 60
 
-/** Decide whether to warm now: enabled, outside the box, off backoff, past the interval, and moved past the threshold,
- * unless this is the first fix (lastPos is null). */
-export function shouldWarm (pos: Position, box: [number, number, number, number] | null, settings: PositionWarmSettings, trigger: WarmTrigger, nowMs: number): boolean {
+/** Decide whether to warm now: enabled, outside all regions, off backoff, past the interval, and moved
+ * past the threshold, unless this is the first fix (lastPos is null). */
+export function shouldWarm (pos: Position, regions: SavedRegion[], settings: PositionWarmSettings, trigger: WarmTrigger, nowMs: number): boolean {
   if (!settings.enabled) return false
-  if (insideBox(pos, box)) return false
+  if (insideAnyRegion(pos, regions)) return false
   if (nowMs < trigger.backoffUntilMs) return false
   if (trigger.lastPos !== null) {
     const intervalMs = Math.max(MIN_WARM_INTERVAL_SECS, settings.intervalSecs) * 1000

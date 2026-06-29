@@ -17,7 +17,7 @@ import { OverrideStore } from '../charts/overrides.js'
 import { ensureApiAdminGate } from '../shared/admin-gate.js'
 import { join, resolve } from 'node:path'
 import { createPositionWarmer, type PositionWarmer } from '../runtime/position-warmer.js'
-import { loadPrewarmConfig } from '../runtime/prewarm-store.js'
+import { loadPrewarmStore, POSITION_WARM_REGION_ID } from '../runtime/prewarm-store.js'
 import { warmRegion } from '../runtime/tilecache-client.js'
 
 interface CompanionConfig {
@@ -121,12 +121,13 @@ export function createPlugin (app: ServerAPI): Plugin {
       app.debug('Tilecache container did not start; tile caching is disabled:', err)
     }
 
+    loadPrewarmStore(app.getDataDirPath())
     warmer = createPositionWarmer({
-      getConfig: () => loadPrewarmConfig(app.getDataDirPath()),
+      getStore: () => loadPrewarmStore(app.getDataDirPath()),
       warm: async (bbox, sources, minzoom, maxzoom) => {
         const address = tilecacheAddress
         if (address === null) return null
-        return warmRegion(address, { bbox, sources, minzoom, maxzoom })
+        return warmRegion(address, { bbox, sources, minzoom, maxzoom, regionId: POSITION_WARM_REGION_ID })
       }
     })
     positionUnsub = app.streambundle.getSelfBus('navigation.position' as unknown as Parameters<typeof app.streambundle.getSelfBus>[0])
