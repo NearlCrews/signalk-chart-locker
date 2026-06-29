@@ -1,13 +1,11 @@
-/** The plugin factory: lifecycle that launches the router container and publishes the in-process bridge. */
+/** The plugin factory: lifecycle that launches the tilecache container and registers chart providers. */
 
 import type { Plugin, ServerAPI } from '@signalk/server-api'
 import type { Position } from '../shared/types.js'
 import { PLUGIN_ID, PLUGIN_NAME, PLUGIN_DESCRIPTION } from '../shared/plugin-id.js'
 import { requireContainerManager, getContainerManager, ensureRuntimeReady } from '../runtime/container-manager.js'
-import { ROUTER_CONTAINER_NAME, ROUTER_INTERNAL_PORT, DEFAULT_ROUTER_TAG, buildRouterConfig, probeRouterHealth } from '../runtime/router-container.js'
 import { TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT, DEFAULT_TILECACHE_TAG, buildTilecacheConfig, probeTilecacheHealth } from '../runtime/tilecache-container.js'
 import { buildSourcePayload, pushTilecacheConfig } from '../runtime/tilecache-config-push.js'
-import { installRouteOnWaterBridge, removeRouteOnWaterBridge, createRouterBridge } from '../bridge/route-on-water-bridge.js'
 import { registerTileRoutes, type TileRouter } from '../http/tile-routes.js'
 import { registerPrewarmRoutes, type PrewarmRouter } from '../http/prewarm-routes.js'
 import { ChartRegistry, registerChartProvider, type ChartRouteApp } from '../charts/chart-registry.js'
@@ -23,7 +21,6 @@ import { loadPrewarmConfig } from '../runtime/prewarm-store.js'
 import { warmRegion } from '../runtime/tilecache-client.js'
 
 interface CompanionConfig {
-  imageTag?: string
   tilecacheImageTag?: string
   tilecacheCacheCapBytes?: number
   tilecacheCacheVolumeSource?: string
@@ -35,14 +32,12 @@ export function createPlugin (app: ServerAPI): Plugin {
   // doStart are caught in start(), and doStop never throws. This eliminates the concurrent-call
   // race where stop() setting a flag could be undone by a subsequent start() resetting it.
   let lifecycle: Promise<void> = Promise.resolve()
-  // launched: set to true the moment ensureRunning resolves, so doStop knows a container was
-  // started even if address resolution or bridge installation never completed.
-  let launched = false
-  // The tilecache is secondary: routing is the critical path, tiles are a convenience, so a tilecache
-  // failure never blocks the router or the bridge. Its address is held for the proxy routes.
+  // The tilecache container is non-fatal: the PMTiles chart provider and the plugin serve routes
+  // work even if the tilecache container fails to start; only the tile cache and proxy are disabled.
+  // Its address is held for the proxy routes.
   let tilecacheLaunched = false
   let tilecacheAddress: string | null = null
-  // Position-warm lifecycle state (factory scope, like launched and tilecacheAddress).
+  // Position-warm lifecycle state (factory scope, like tilecacheAddress).
   let positionUnsub: (() => void) | null = null
   let warmer: PositionWarmer | null = null
 
@@ -60,7 +55,7 @@ export function createPlugin (app: ServerAPI): Plugin {
   }
   let discovery: DiscoveryHandle | undefined
   // The charts directory resolved from the active config, captured so the override re-apply closure
-  // (Task 11) rescans the configured directory, not the default. Set in setupCharts.
+  // rescans the configured directory, not the default. Set in setupCharts.
   let activeChartsDir: string | undefined
   // Single-flight guard: at most one rescan runs at a time. The override-triggered rescan and the
   // discovery watcher can both call rescanCharts on the same ChartRegistry; concurrent runs are
@@ -101,21 +96,8 @@ export function createPlugin (app: ServerAPI): Plugin {
     if (!manager) return
     if (!(await ensureRuntimeReady(app, manager))) return
 
-    // A blank or whitespace-only imageTag falls back to the default rather than producing an empty
-    // tag, which would yield an invalid image reference with a trailing colon.
-    const tag = config?.imageTag?.trim() || undefined
-    await manager.ensureRunning(ROUTER_CONTAINER_NAME, buildRouterConfig({ tag }), { pluginId: PLUGIN_ID })
-    launched = true
-
-    const address = await manager.resolveContainerAddress(ROUTER_CONTAINER_NAME, ROUTER_INTERNAL_PORT)
-    if (!address) {
-      throw new Error('The router container address could not be resolved after ensureRunning.')
-    }
-
-    installRouteOnWaterBridge(createRouterBridge(address, probeRouterHealth))
-
-    // The tilecache container is the one internet-egress container. It is non-fatal: a failure here
-    // disables tile caching but leaves routing and the bridge fully working.
+    // The tilecache is non-fatal: a failure here disables tile caching but leaves the PMTiles chart
+    // provider and the plugin serve routes fully working.
     try {
       const tilecacheConfig = buildTilecacheConfig({
         tag: config?.tilecacheImageTag?.trim() || undefined,
@@ -152,10 +134,13 @@ export function createPlugin (app: ServerAPI): Plugin {
 
     await setupCharts(config)
 
+    const tcStatus = tilecacheAddress !== null
+      ? `Tilecache at ${tilecacheAddress}.`
+      : 'Tilecache container unavailable; tile caching is disabled.'
     if (isThirdPartyPmtilesEnabled(configPath)) {
-      app.setPluginStatus(`Router at ${address}${tilecacheAddress !== null ? `, tilecache at ${tilecacheAddress}` : ''}. PMTiles charts disabled: signalk-pmtiles-plugin is enabled, disable it to use the companion chart provider.`)
-    } else if (registry.records().length > 0 || discovery !== undefined) {
-      app.setPluginStatus(`Router at ${address}${tilecacheAddress !== null ? `, tilecache at ${tilecacheAddress}` : ''}.`)
+      app.setPluginStatus(`${tcStatus} PMTiles charts disabled: signalk-pmtiles-plugin is enabled, disable it to use the companion chart provider.`)
+    } else {
+      app.setPluginStatus(tcStatus)
     }
   }
 
@@ -163,8 +148,6 @@ export function createPlugin (app: ServerAPI): Plugin {
     if (positionUnsub) { positionUnsub(); positionUnsub = null }
     warmer = null
     teardownCharts()
-
-    removeRouteOnWaterBridge()
 
     // Clear the tilecache address first so the proxy routes report unavailable, then stop its container.
     tilecacheAddress = null
@@ -179,20 +162,6 @@ export function createPlugin (app: ServerAPI): Plugin {
       }
       tilecacheLaunched = false
     }
-
-    // Only stop the container if it was actually launched. If the launch partially failed (address
-    // resolution returned null) or no start has run yet, launched is false and we skip the stop.
-    if (launched) {
-      const manager = getContainerManager()
-      if (manager) {
-        try {
-          await manager.stop(ROUTER_CONTAINER_NAME)
-        } catch (err) {
-          app.debug('Failed to stop router container:', err)
-        }
-      }
-      launched = false
-    }
   }
 
   return {
@@ -202,12 +171,6 @@ export function createPlugin (app: ServerAPI): Plugin {
     schema: () => ({
       type: 'object',
       properties: {
-        imageTag: {
-          type: 'string',
-          title: 'Router container image tag',
-          description: 'The image tag to run for the router container.',
-          default: DEFAULT_ROUTER_TAG
-        },
         tilecacheImageTag: {
           type: 'string',
           title: 'Tile cache container image tag',

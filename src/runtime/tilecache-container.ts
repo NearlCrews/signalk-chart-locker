@@ -20,7 +20,7 @@ export const DEFAULT_CACHE_CAP_BYTES = 2_147_483_648
 
 const TILECACHE_HEALTHCHECK = makeContainerHealthcheck('/tilecache')
 
-/** Smaller than the router: the proxy is mostly IO-bound. Equal memory and memorySwap disables swap; a high oomScoreAdj makes it die before Signal K. */
+/** The proxy is mostly IO-bound. Equal memory and memorySwap disables swap; a high oomScoreAdj makes it die before Signal K. */
 const TILECACHE_RESOURCES = {
   memory: '512m',
   memorySwap: '512m',

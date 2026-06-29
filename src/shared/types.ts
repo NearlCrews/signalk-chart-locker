@@ -1,4 +1,4 @@
-/** Cross-module types: the container manager surface this plugin consumes, and the route-on-water bridge contract. */
+/** Cross-module types: the container manager surface this plugin consumes. */
 
 export interface Position {
   latitude: number
@@ -67,14 +67,4 @@ export interface ContainerManager {
   ensureRunning(name: string, config: ContainerConfig, options?: EnsureRunningOptions): Promise<void>
   resolveContainerAddress(name: string, port: number): Promise<string | null>
   stop(name: string): Promise<void>
-}
-
-export type RouteOnWaterResult =
-  | { ok: true; waypoints: Position[]; usedTileWater: boolean; borderFallback: boolean }
-  | { ok: false; reason: string }
-
-/** Installed on globalThis for in-process callers (crows-nest) to reach the router. */
-export interface RouteOnWaterBridge {
-  whenReady(): Promise<void>
-  routeOnWater(request: unknown): Promise<RouteOnWaterResult>
 }
