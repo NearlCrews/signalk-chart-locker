@@ -5,8 +5,7 @@ on:
   pull_request:
 
 jobs:
-  rust-lint:
-    # Format and lint are platform independent, so they run on the default amd64 runners.
+  tilecache:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,24 +14,16 @@ jobs:
           components: rustfmt, clippy
       - name: rustfmt
         run: cargo fmt --check
-        working-directory: container/engine
+        working-directory: container
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
-        working-directory: container/engine
-
-  engine-test:
-    # The ULP tolerance on waypoint and oracle float comparisons (design spec section 8)
-    # makes the engine tests cross-platform, so the arm64-only pin is no longer needed.
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        working-directory: container
       - name: cargo test
-        run: cargo test
-        working-directory: container/engine
+        run: cargo test --workspace
+        working-directory: container
+      - name: cargo build
+        run: cargo build --release --bin tilecache
+        working-directory: container
 
   plugin:
     runs-on: ubuntu-latest

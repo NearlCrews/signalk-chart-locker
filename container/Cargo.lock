@@ -126,42 +126,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
-name = "binnacle-engine"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "binnacle-gpkg"
-version = "0.1.0"
-
-[[package]]
-name = "binnacle-localprovider"
-version = "0.1.0"
-dependencies = [
- "binnacle-engine",
- "binnacle-gpkg",
- "rusqlite",
- "tempfile",
-]
-
-[[package]]
-name = "binnacle-router"
-version = "0.1.0"
-dependencies = [
- "axum",
- "binnacle-engine",
- "binnacle-localprovider",
- "http-body-util",
- "serde",
- "serde_json",
- "tokio",
- "tower",
-]
-
-[[package]]
 name = "binnacle-tilecache"
 version = "0.1.0"
 dependencies = [
@@ -1198,15 +1162,6 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
-
-[[package]]
-name = "storage-spike"
-version = "0.1.0"
-dependencies = [
- "binnacle-gpkg",
- "rusqlite",
- "serde_json",
-]
 
 [[package]]
 name = "subtle"
