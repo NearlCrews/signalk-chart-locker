@@ -32,7 +32,7 @@ const TILECACHE_RESOURCES = {
 export interface TilecacheContainerOptions {
   image?: string
   tag?: string
-  /** Cache byte cap; defaults to 2 GiB. */
+  /** Cache byte cap; defaults to 8 GiB. */
   capBytes?: number
   /** Host path of a user-managed external volume (USB SSD or NVMe) to hold the cache; absent leaves it on the data mount. */
   externalCacheVolumeSource?: string
