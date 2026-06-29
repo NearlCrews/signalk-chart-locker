@@ -55,18 +55,9 @@ async fn geocode(State(st): State<AppState>, Query(q): Query<GeocodeQuery>) -> R
     if !host_is_nominatim(&url) {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    // IP literal guard: reuses the same logic as guarded_get.
-    if !st.knobs.allow_private_egress {
-        if let Ok(parsed) = reqwest::Url::parse(&url) {
-            if let Some(host) = parsed.host_str() {
-                let bare = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(host);
-                if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
-                    if crate::ssrf::is_forbidden_ip(ip) {
-                        return StatusCode::BAD_GATEWAY.into_response();
-                    }
-                }
-            }
-        }
+    // IP literal guard: the DNS resolver never sees a literal, so check it here.
+    if !st.knobs.allow_private_egress && crate::ssrf::is_forbidden_ip_literal_url(&url) {
+        return StatusCode::BAD_GATEWAY.into_response();
     }
     // Egress semaphore (same slot as tile fetches so geocode is bounded by EGRESS_CONCURRENCY).
     let _permit = match st.egress.acquire().await {

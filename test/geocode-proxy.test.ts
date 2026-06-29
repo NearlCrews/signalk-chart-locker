@@ -57,6 +57,7 @@ test('GET /api/geocode proxies lat and lon to the container and returns the resp
   assert.ok(fetched[0].includes('lat=37.77'), 'lat forwarded')
   assert.ok(fetched[0].includes('lon=-122.41'), 'lon forwarded')
   assert.equal(responded[0]?.status, 200)
+  assert.deepEqual(responded[0]?.body, { display_name: 'Test City' }, 'proxied body relayed to caller')
 })
 
 test('GET /api/geocode returns 400 when lat or lon is missing', async () => {
@@ -71,5 +72,9 @@ test('GET /api/geocode returns 400 when lat or lon is missing', async () => {
     end () {}
   }
   await route.handler({ params: {}, body: null, query: {} }, res)
-  assert.equal(responded[0]?.status, 400)
+  assert.equal(responded[0]?.status, 400, 'both absent must be 400')
+  await route.handler({ params: {}, body: null, query: { lon: '-122.41' } }, res)
+  assert.equal(responded[1]?.status, 400, 'missing lat must be 400')
+  await route.handler({ params: {}, body: null, query: { lat: '37.77' } }, res)
+  assert.equal(responded[2]?.status, 400, 'missing lon must be 400')
 })

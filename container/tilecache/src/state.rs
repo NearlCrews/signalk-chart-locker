@@ -7,7 +7,7 @@ use crate::ssrf::is_forbidden_ip;
 use bytes::Bytes;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -138,18 +138,8 @@ impl AppState {
     /// DNS resolver never sees a literal), then takes an egress permit and sends the request. Returns
     /// Err on a rejected host, a permit failure, or a transport error.
     pub async fn guarded_get(&self, url: &str, if_none_match: Option<&str>) -> Result<reqwest::Response, ()> {
-        if !self.knobs.allow_private_egress {
-            if let Ok(parsed) = reqwest::Url::parse(url) {
-                if let Some(host) = parsed.host_str() {
-                    // host_str brackets an IPv6 literal; strip them before parsing.
-                    let bare = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(host);
-                    if let Ok(ip) = bare.parse::<IpAddr>() {
-                        if is_forbidden_ip(ip) {
-                            return Err(());
-                        }
-                    }
-                }
-            }
+        if !self.knobs.allow_private_egress && crate::ssrf::is_forbidden_ip_literal_url(url) {
+            return Err(());
         }
         let _permit = self.egress.acquire().await.map_err(|_| ())?;
         let mut req = self.client.get(url);
