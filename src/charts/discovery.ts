@@ -28,9 +28,8 @@ export interface DiscoveryDeps {
 
 const PMTILES_RE = /\.pmtiles$/i
 
-async function containedRealPath (chartsDir: string, fileName: string): Promise<string | undefined> {
+async function containedRealPath (dirReal: string, fileName: string, chartsDir: string): Promise<string | undefined> {
   try {
-    const dirReal = await realpath(chartsDir)
     const fileReal = await realpath(join(chartsDir, fileName))
     return fileReal.startsWith(dirReal + sep) ? fileReal : undefined
   } catch {
@@ -41,9 +40,17 @@ async function containedRealPath (chartsDir: string, fileName: string): Promise<
 export async function rescanCharts (deps: DiscoveryDeps): Promise<void> {
   const decode = deps.decode ?? decodePmtilesArchive
   const namer = deps.namer ?? defaultNamer
+  let dirReal: string | undefined
+  try {
+    dirReal = await realpath(deps.chartsDir)
+  } catch {
+    dirReal = undefined
+  }
+
   let entries: string[]
   try {
     entries = (await readdir(deps.chartsDir, { withFileTypes: true }))
+      .filter((entry) => entry.isFile() || entry.isSymbolicLink())
       .filter((entry) => PMTILES_RE.test(entry.name))
       .map((entry) => entry.name)
   } catch {
@@ -53,7 +60,8 @@ export async function rescanCharts (deps: DiscoveryDeps): Promise<void> {
 
   const seen = new Set<string>()
   for (const fileName of entries) {
-    const filePath = await containedRealPath(deps.chartsDir, fileName)
+    if (!dirReal) continue
+    const filePath = await containedRealPath(dirReal, fileName, deps.chartsDir)
     if (!filePath) continue
     const result = await decode(filePath)
     if (!result.ok) {
