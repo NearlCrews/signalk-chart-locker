@@ -101,8 +101,10 @@ Add to the tests module in `cache.rs`:
     #[test]
     fn sweep_aged_unpinned_deletes_old_scroll_rows_keeps_fresh_and_pinned() {
         let (_f, c) = open();
-        // Pinned region tile at an old access time: must survive regardless of age.
-        c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), true, 0).unwrap();
+        // Pinned region tile at an old access time: must survive regardless of age. Pin through pin()
+        // so pinned_bytes is tracked (raw put with pinned = true sets the column but not the counter).
+        c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, 0).unwrap();
+        c.pin("s", 0, 0, 0).unwrap();
         // Old unpinned scroll tile (last_access = 100): swept.
         c.put("s", 0, 0, 1, &tile(20, 200, Some(vec![0; 20])), false, 100).unwrap();
         // Fresh unpinned scroll tile (last_access = 10_000): kept.
@@ -130,7 +132,9 @@ Add to the tests module in `cache.rs`:
     #[test]
     fn clear_unpinned_deletes_all_scroll_rows_and_keeps_pinned() {
         let (_f, c) = open();
-        c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), true, 0).unwrap(); // pinned
+        // Pin through pin() so pinned_bytes is tracked (raw put with pinned = true sets the column only).
+        c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, 0).unwrap();
+        c.pin("s", 0, 0, 0).unwrap(); // pinned
         c.put("s", 0, 0, 1, &tile(20, 200, Some(vec![0; 20])), false, 5).unwrap(); // scroll
         c.put("s", 0, 0, 2, &tile(30, 200, Some(vec![0; 30])), false, 9_999).unwrap(); // fresh scroll
         let (freed_bytes, freed_rows) = c.clear_unpinned().unwrap();
