@@ -10,6 +10,11 @@ import { buildSourcePayload, pushTilecacheConfig } from '../runtime/tilecache-co
 import { installRouteOnWaterBridge, removeRouteOnWaterBridge, createRouterBridge } from '../bridge/route-on-water-bridge.js'
 import { registerTileRoutes, type TileRouter } from '../http/tile-routes.js'
 import { registerPrewarmRoutes, type PrewarmRouter } from '../http/prewarm-routes.js'
+import { ChartRegistry, registerChartProvider, type ChartRouteApp } from '../charts/chart-registry.js'
+import { type DiscoveryHandle, startDiscovery } from '../charts/discovery.js'
+import { isThirdPartyPmtilesEnabled } from '../charts/mutual-exclusion.js'
+import { registerPmtilesServeRoute, type ServeRouter } from '../http/pmtiles-routes.js'
+import { join, resolve } from 'node:path'
 import { createPositionWarmer, type PositionWarmer } from '../runtime/position-warmer.js'
 import { loadPrewarmConfig } from '../runtime/prewarm-store.js'
 import { warmRegion } from '../runtime/tilecache-client.js'
@@ -19,6 +24,7 @@ interface CompanionConfig {
   tilecacheImageTag?: string
   tilecacheCacheCapBytes?: number
   tilecacheCacheVolumeSource?: string
+  chartsPath?: string
 }
 
 export function createPlugin (app: ServerAPI): Plugin {
@@ -36,6 +42,39 @@ export function createPlugin (app: ServerAPI): Plugin {
   // Position-warm lifecycle state (factory scope, like launched and tilecacheAddress).
   let positionUnsub: (() => void) | null = null
   let warmer: PositionWarmer | null = null
+
+  interface ConfigAwareApp { config: { configPath: string } }
+  const configPath = (app as unknown as ConfigAwareApp).config.configPath
+  const registry = new ChartRegistry()
+  let discovery: DiscoveryHandle | undefined
+  // The charts directory resolved from the active config, captured so the override re-apply closure
+  // (Task 11) rescans the configured directory, not the default. Set in setupCharts.
+  let activeChartsDir: string | undefined
+
+  function chartsDirFor (config: CompanionConfig): string {
+    const override = config.chartsPath?.trim()
+    return override ? resolve(configPath, override) : join(configPath, 'charts', 'pmtiles')
+  }
+
+  async function setupCharts (config: CompanionConfig): Promise<void> {
+    if (isThirdPartyPmtilesEnabled(configPath)) {
+      app.setPluginStatus('Charts disabled: signalk-pmtiles-plugin is enabled. Disable it to let the companion provide PMTiles charts.')
+      return
+    }
+    activeChartsDir = chartsDirFor(config)
+    registerChartProvider(app as unknown as ChartRouteApp, registry)
+    discovery = await startDiscovery({
+      chartsDir: activeChartsDir,
+      registry,
+      onError: (message) => app.debug(`Chart discovery: ${message}`)
+    })
+  }
+
+  function teardownCharts (): void {
+    discovery?.stop()
+    discovery = undefined
+    registry.clear()
+  }
 
   async function doStart (config: CompanionConfig): Promise<void> {
     app.setPluginStatus('Starting...')
@@ -92,12 +131,17 @@ export function createPlugin (app: ServerAPI): Plugin {
     positionUnsub = app.streambundle.getSelfBus('navigation.position' as unknown as Parameters<typeof app.streambundle.getSelfBus>[0])
       .onValue((delta: { value: unknown }) => { warmer?.onPosition(delta.value as Position) })
 
-    app.setPluginStatus(`Router at ${address}${tilecacheAddress !== null ? `, tilecache at ${tilecacheAddress}` : ''}.`)
+    await setupCharts(config)
+
+    if (registry.records().length > 0 || discovery !== undefined) {
+      app.setPluginStatus(`Router at ${address}${tilecacheAddress !== null ? `, tilecache at ${tilecacheAddress}` : ''}.`)
+    }
   }
 
   async function doStop (): Promise<void> {
     if (positionUnsub) { positionUnsub(); positionUnsub = null }
     warmer = null
+    teardownCharts()
 
     removeRouteOnWaterBridge()
 
@@ -160,6 +204,12 @@ export function createPlugin (app: ServerAPI): Plugin {
           title: 'External tile cache drive (optional)',
           description: 'Host path of a USB SSD or NVMe drive to hold the tile cache. Leave blank to keep the cache on the Signal K data directory.',
           default: ''
+        },
+        chartsPath: {
+          type: 'string',
+          title: 'PMTiles charts directory',
+          description: 'Directory holding .pmtiles charts, relative to the Signal K config path. Leave blank for the default charts/pmtiles.',
+          default: ''
         }
       }
     }),
@@ -188,6 +238,7 @@ export function createPlugin (app: ServerAPI): Plugin {
     registerWithRouter (router) {
       registerTileRoutes(router as unknown as TileRouter, () => tilecacheAddress)
       registerPrewarmRoutes(router as unknown as PrewarmRouter, app, () => tilecacheAddress)
+      registerPmtilesServeRoute(router as unknown as ServeRouter, registry)
     }
   }
 }
