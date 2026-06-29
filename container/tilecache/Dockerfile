@@ -12,11 +12,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf
 # .cargo/config.toml (the FMA determinism flag) applies automatically.
 COPY Cargo.toml Cargo.lock ./
 COPY .cargo ./.cargo
-COPY engine ./engine
-COPY gpkg ./gpkg
-COPY localprovider ./localprovider
-COPY router ./router
-COPY storage-spike ./storage-spike
 COPY tilecache ./tilecache
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \

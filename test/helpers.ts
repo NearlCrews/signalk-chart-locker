@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ContainerConfig, ContainerManager, ContainerRuntimeInfo } from '../src/shared/types.js'
 import { CONTAINER_MANAGER_GLOBAL_KEY } from '../src/runtime/container-manager.js'
-import { removeRouteOnWaterBridge } from '../src/bridge/route-on-water-bridge.js'
 
 /** A ServerAPI stand-in that records the status, error, and debug calls the plugin makes. */
 export interface Recorder {
@@ -84,8 +83,7 @@ export function setContainerManager (manager: ContainerManager): void {
   ;(globalThis as Record<string, unknown>)[CONTAINER_MANAGER_GLOBAL_KEY] = manager
 }
 
-/** Clears the container-manager and route-on-water bridge globals between tests. */
+/** Clears the container-manager global between tests. */
 export function clearGlobals (): void {
   delete (globalThis as Record<string, unknown>)[CONTAINER_MANAGER_GLOBAL_KEY]
-  removeRouteOnWaterBridge()
 }

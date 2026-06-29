@@ -5,6 +5,19 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The project is pre-release, so
 everything below is the initial public release.
 
+<a id="v020"></a>
+
+## [0.2.0] - 2026-06-29
+
+### Removed
+
+- The routing engine, offline geodata prep pipeline, and the in-process route-on-water bridge
+  are removed. The companion is now a tile cache and PMTiles chart provider only.
+  The `tilecache` container crate is the single remaining Rust binary. The router container,
+  the `engine`, `gpkg`, `localprovider`, `router`, and `storage-spike` crates, and the
+  `container/prep/` GDAL prep tool are gone. The plugin no longer requires or cross-links
+  `signalk-crows-nest`.
+
 <a id="v010"></a>
 
 ## [0.1.0] - 2026-06-28
