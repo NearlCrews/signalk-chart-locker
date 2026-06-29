@@ -61,6 +61,7 @@
     "typescript": "^6.0.3"
   },
   "dependencies": {
+    "pmtiles": "^4.4.1",
     "signalk-binnacle-chart-sources": "file:../signalk-binnacle-chart-sources"
   }
 }
