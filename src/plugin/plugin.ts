@@ -49,7 +49,15 @@ export function createPlugin (app: ServerAPI): Plugin {
   interface ConfigAwareApp { config: { configPath: string } }
   const configPath = (app as unknown as ConfigAwareApp).config.configPath
   const registry = new ChartRegistry()
-  const overrides = new OverrideStore(join((app as unknown as { getDataDirPath: () => string }).getDataDirPath(), 'pmtiles-overrides.json'))
+  // getDataDirPath is bound by the Signal K server onto the per-plugin app copy AFTER the plugin
+  // factory runs (interfaces/plugins.js constructs the plugin, then assigns getDataDirPath), so it must
+  // not be called here at construction time. Build the override store lazily on first use, which happens
+  // in doStart or registerWithRouter, both of which run after the server has bound it.
+  let overridesInstance: OverrideStore | undefined
+  const getOverrides = (): OverrideStore => {
+    overridesInstance ??= new OverrideStore(join((app as unknown as { getDataDirPath: () => string }).getDataDirPath(), 'pmtiles-overrides.json'))
+    return overridesInstance
+  }
   let discovery: DiscoveryHandle | undefined
   // The charts directory resolved from the active config, captured so the override re-apply closure
   // (Task 11) rescans the configured directory, not the default. Set in setupCharts.
@@ -70,6 +78,7 @@ export function createPlugin (app: ServerAPI): Plugin {
       return
     }
     activeChartsDir = chartsDirFor(config)
+    const overrides = getOverrides()
     overrides.load()
     registerChartProvider(app as unknown as ChartRouteApp, registry)
     discovery = await startDiscovery({
@@ -255,13 +264,13 @@ export function createPlugin (app: ServerAPI): Plugin {
         registerChartManagementRoutes(
           router as unknown as ManagementRouter,
           registry,
-          overrides,
+          getOverrides(),
           () => {
             if (rescanInProgress) return
             rescanInProgress = true
             ;(async () => {
               const { rescanCharts } = await import('../charts/discovery.js')
-              await rescanCharts({ chartsDir: activeChartsDir ?? chartsDirFor({}), registry, namer: overrides.namer() })
+              await rescanCharts({ chartsDir: activeChartsDir ?? chartsDirFor({}), registry, namer: getOverrides().namer() })
             })()
               .catch((err: unknown) => app.debug(`chart rescan after override failed: ${String(err)}`))
               .finally(() => { rescanInProgress = false })

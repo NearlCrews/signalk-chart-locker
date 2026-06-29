@@ -19,6 +19,19 @@ test('the plugin exposes id, name, and a schema', () => {
   assert.equal((schema as { type: string }).type, 'object')
 })
 
+test('createPlugin does not call getDataDirPath at construction', () => {
+  // The Signal K server (interfaces/plugins.js) calls the plugin factory, then assigns
+  // appCopy.getDataDirPath afterward, so getDataDirPath is absent while the factory runs. The plugin
+  // must defer every getDataDirPath call to start or registerWithRouter, never the constructor.
+  const appWithoutDataDir = {
+    config: { configPath: '/tmp' },
+    debug () {},
+    setPluginStatus () {},
+    setPluginError () {}
+  }
+  assert.doesNotThrow(() => createPlugin(appWithoutDataDir as never))
+})
+
 test('start sets a plugin error and does nothing when the container manager is missing', async () => {
   const app = fakeApp()
   const plugin = createPlugin(app as never)
