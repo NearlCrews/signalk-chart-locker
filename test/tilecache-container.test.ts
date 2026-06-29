@@ -5,7 +5,7 @@ import {
   probeTilecacheHealth,
   TILECACHE_INTERNAL_PORT,
   DEFAULT_TILECACHE_IMAGE,
-  DEFAULT_CACHE_CAP_BYTES
+  DEFAULT_CACHE_CAP_GIB
 } from '../src/runtime/tilecache-container.js'
 import type { FetchResponse } from '../src/shared/types.js'
 
@@ -16,7 +16,7 @@ test('buildTilecacheConfig exposes the port, the healthcheck, the data mount, an
   assert.deepEqual(c.healthcheck?.test, ['CMD', '/tilecache', 'healthcheck'])
   assert.equal(c.signalkDataMount, '/signalk-data')
   assert.equal(c.env?.TILECACHE_DB, '/signalk-data/binnacle-tilecache/cache.sqlite')
-  assert.equal(c.env?.TILECACHE_CAP_BYTES, String(DEFAULT_CACHE_CAP_BYTES))
+  assert.equal(c.env?.TILECACHE_CAP_BYTES, String(DEFAULT_CACHE_CAP_GIB * 1024 ** 3))
   assert.equal(c.volumes, undefined) // no external volume by default
 })
 

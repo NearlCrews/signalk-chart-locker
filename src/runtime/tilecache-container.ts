@@ -15,8 +15,8 @@ const SIGNALK_DATA_MOUNT = '/signalk-data'
 /** The cache subdirectory under the data mount, and the DB file in it. A user-managed external volume can mount here. */
 const CACHE_DIR = `${SIGNALK_DATA_MOUNT}/binnacle-tilecache`
 const TILECACHE_DB_PATH = `${CACHE_DIR}/cache.sqlite`
-/** Conservative default cap (2 GiB), suitable for a microSD deployment. */
-export const DEFAULT_CACHE_CAP_BYTES = 2_147_483_648
+/** Conservative default cap (GiB). Used as the fallback when free-space detection is unavailable. */
+export const DEFAULT_CACHE_CAP_GIB = 8
 
 const TILECACHE_HEALTHCHECK = makeContainerHealthcheck('/tilecache')
 
@@ -39,7 +39,7 @@ export interface TilecacheContainerOptions {
 }
 
 export function buildTilecacheConfig (opts: TilecacheContainerOptions = {}): ContainerConfig {
-  const cap = opts.capBytes ?? DEFAULT_CACHE_CAP_BYTES
+  const cap = opts.capBytes ?? DEFAULT_CACHE_CAP_GIB * 1024 ** 3
   const config: ContainerConfig = {
     image: opts.image ?? DEFAULT_TILECACHE_IMAGE,
     tag: opts.tag ?? DEFAULT_TILECACHE_TAG,
