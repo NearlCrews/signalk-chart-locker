@@ -1,6 +1,8 @@
 //! The warm-job engine: enumerate a bbox lazily with the shared inverse, fetch each tile through the
-//! existing guarded egress path, and store it pinned in batched transactions. A warm NEVER evicts: it
-//! does an explicit pre-store cap check and stops at `capped`. Fan-out is bounded by a warm semaphore
+//! existing guarded egress path, and store it pinned in batched transactions. A warm never evicts a
+//! pinned tile: it evicts unpinned scroll tiles to fit within the cap, with an explicit pre-store
+//! budget check that stops at `capped` when the pinned set would exceed the regions budget. Fan-out is
+//! bounded by a warm semaphore
 //! below the shared `EGRESS_CONCURRENCY`, so a large warm cannot starve interactive tile reads. The job
 //! registry is in memory, cleared on completion plus a TTL.
 
@@ -44,6 +46,8 @@ pub struct WarmJob {
     pub state: WarmState,
     pub cancel: Arc<AtomicBool>,
     pub finished_at: Option<i64>,
+    /// The region this warm pins under, or None for an unpinned-budget warm. Kept for snapshots.
+    pub region_id: Option<String>,
 }
 
 pub struct WarmRequest {
@@ -51,6 +55,8 @@ pub struct WarmRequest {
     pub bbox: [f64; 4],
     pub minzoom: u32,
     pub maxzoom: u32,
+    /// The region to pin under (real region, or the position-warm pseudo-region), or None.
+    pub region_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -95,6 +101,7 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
     let cancel = Arc::new(AtomicBool::new(false));
     let job = Arc::new(tokio::sync::Mutex::new(WarmJob {
         total, done: 0, skipped: 0, bytes: 0, errors: 0, state: WarmState::Running, cancel: cancel.clone(), finished_at: None,
+        region_id: req.region_id.clone(),
     }));
     {
         let mut jobs = state.warm_jobs.write().await;
@@ -118,7 +125,7 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
         req.sources.iter().filter_map(|s| map.get(&s.id).cloned()).collect()
     };
     let st = state.clone();
-    tokio::spawn(run(st, job, resolved, b, req.minzoom, req.maxzoom));
+    tokio::spawn(run(st, job, resolved, b, req.minzoom, req.maxzoom, req.region_id));
     Ok(id)
 }
 
@@ -159,15 +166,27 @@ enum Fetched {
     Error,
 }
 
+// The effective pinned budget for a warm: R for the position-warm pseudo-region, R - P for a real
+// region (and for a region-less warm). Clamped to the live cap so R <= cap holds inside the container
+// regardless of what POST /config delivered, and floored at 0. Read live so a POST /config retune
+// takes effect mid-run.
+fn effective_budget(st: &AppState, region_id: Option<&str>) -> i64 {
+    let cap = st.live_cap_bytes.load(Ordering::Relaxed);
+    let r = st.live_regions_budget.load(Ordering::Relaxed);
+    let p = st.live_position_warm_budget.load(Ordering::Relaxed);
+    let raw = if region_id == Some(crate::state::POSITION_WARM_REGION_ID) { r } else { r - p };
+    raw.min(cap).max(0)
+}
+
 // Fetch and classify one tile, reusing the guarded egress path. The caller holds the warm permit, so
 // this does not take it; guarded_get still takes an egress permit inside.
-async fn warm_one(st: &AppState, source: &ChartSource, z: u32, x: u32, y: u32) -> Fetched {
+async fn warm_one(st: &AppState, source: &ChartSource, z: u32, x: u32, y: u32, region_id: Option<&str>) -> Fetched {
     let now = now_secs();
-    // pin_if_fresh does the freshness check and the pin under one lock, closing the race where a
-    // concurrent evict_to could delete the row between a separate get() and pin() call.
-    match st.cache.pin_if_fresh(&source.id, z, x, y, now, st.knobs.fresh_secs, st.knobs.negative_ttl_secs) {
+    // pin_if_fresh does the freshness check, the budget gate, and the pin under one lock, closing the
+    // race where a concurrent evict_to could delete the row between a separate get() and pin() call.
+    match st.cache.pin_if_fresh(&source.id, z, x, y, now, st.knobs.fresh_secs, st.knobs.negative_ttl_secs, effective_budget(st, region_id), region_id) {
         Ok(true) => return Fetched::Skipped,
-        Ok(false) => {} // absent or stale: fall through to fetch
+        Ok(false) => {} // absent, stale, or over budget: fall through to fetch (the flush gate decides)
         Err(e) => eprintln!("tilecache: warm pin_if_fresh failed: {e}"),
     }
     let url = match expand_upstream(source, z, x, y) {
@@ -199,8 +218,13 @@ async fn warm_one(st: &AppState, source: &ChartSource, z: u32, x: u32, y: u32) -
 }
 
 // The warm driver: enumerate lazily, bound in-flight fetches to WARM_CONCURRENCY via owned permits and a
-// JoinSet, drain results into a batch, and flush each batch pinned with the pre-store cap check.
-async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, sources: Vec<ChartSource>, bbox: [f64; 4], zmin: u32, zmax: u32) {
+// JoinSet, drain results into a batch, and flush each batch pinned with the pre-store budget check.
+async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, sources: Vec<ChartSource>, bbox: [f64; 4], zmin: u32, zmax: u32, region_id: Option<String>) {
+    // Clear this region's prior pins so a re-download or a position-warm re-pin replaces the prior tile
+    // set with no orphan join rows (a narrower box leaves nothing pinned outside the new set).
+    if let Some(rid) = region_id.as_deref() {
+        crate::fetcher::log_cache_err(st.cache.delete_region(rid));
+    }
     let cancel = { job.lock().await.cancel.clone() };
     let mut set: tokio::task::JoinSet<Fetched> = tokio::task::JoinSet::new();
     let mut batch: Vec<WarmRow> = Vec::with_capacity(WARM_BATCH);
@@ -223,14 +247,15 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, sources: Vec<C
             };
             let st2 = st.clone();
             let source2 = source.clone();
+            let rid = region_id.clone();
             set.spawn(async move {
                 let _permit = permit;
-                warm_one(&st2, &source2, z, x, y).await
+                warm_one(&st2, &source2, z, x, y, rid.as_deref()).await
             });
             // Drain any finished tasks without blocking, keeping memory flat.
             while let Some(done) = set.try_join_next() {
                 if let Ok(f) = done {
-                    if !accumulate(&st, &job, &mut batch, f, &mut final_state).await {
+                    if !accumulate(&st, &job, &mut batch, f, region_id.as_deref(), &mut final_state).await {
                         // capped: stop spawning and draining.
                         cancel.store(true, Ordering::Relaxed);
                         break 'outer;
@@ -242,14 +267,14 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, sources: Vec<C
     // Join remaining in-flight tasks.
     while let Some(done) = set.join_next().await {
         if let Ok(f) = done {
-            if final_state == WarmState::Done && !accumulate(&st, &job, &mut batch, f, &mut final_state).await {
+            if final_state == WarmState::Done && !accumulate(&st, &job, &mut batch, f, region_id.as_deref(), &mut final_state).await {
                 break;
             }
         }
     }
     // Flush the tail.
     if !batch.is_empty() {
-        flush(&st, &job, &mut batch, &mut final_state).await;
+        flush(&st, &job, &mut batch, region_id.as_deref(), &mut final_state).await;
     }
     let mut j = job.lock().await;
     j.state = final_state;
@@ -257,12 +282,12 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, sources: Vec<C
 }
 
 // Apply one fetch result to the batch and the counters. Returns false when a flush reports capped.
-async fn accumulate(st: &AppState, job: &Arc<tokio::sync::Mutex<WarmJob>>, batch: &mut Vec<WarmRow>, f: Fetched, final_state: &mut WarmState) -> bool {
+async fn accumulate(st: &AppState, job: &Arc<tokio::sync::Mutex<WarmJob>>, batch: &mut Vec<WarmRow>, f: Fetched, region_id: Option<&str>, final_state: &mut WarmState) -> bool {
     match f {
         Fetched::Tile(row) | Fetched::Negative(row) => {
             batch.push(row);
             if batch.len() >= WARM_BATCH {
-                return flush(st, job, batch, final_state).await;
+                return flush(st, job, batch, region_id, final_state).await;
             }
             true
         }
@@ -277,10 +302,10 @@ async fn accumulate(st: &AppState, job: &Arc<tokio::sync::Mutex<WarmJob>>, batch
     }
 }
 
-// Store the current batch pinned, with the pre-store cap check. Returns false when capped.
-async fn flush(st: &AppState, job: &Arc<tokio::sync::Mutex<WarmJob>>, batch: &mut Vec<WarmRow>, final_state: &mut WarmState) -> bool {
+// Store the current batch pinned, with the pre-store budget check. Returns false when capped.
+async fn flush(st: &AppState, job: &Arc<tokio::sync::Mutex<WarmJob>>, batch: &mut Vec<WarmRow>, region_id: Option<&str>, final_state: &mut WarmState) -> bool {
     let now = now_secs();
-    match st.cache.put_many_pinned(batch, st.knobs.cap_bytes, now) {
+    match st.cache.put_many_pinned(batch, effective_budget(st, region_id), st.live_cap_bytes.load(Ordering::Relaxed), region_id, now) {
         Ok(outcome) => {
             let mut j = job.lock().await;
             j.done += outcome.stored as u64;
@@ -340,7 +365,12 @@ mod tests {
 
     async fn state(db: &NamedTempFile, knobs: Knobs, source: ChartSource) -> AppState {
         let cache = Arc::new(TileCache::open(db.path()).unwrap());
+        let cap = knobs.cap_bytes;
         let st = AppState::new(cache, knobs);
+        // A warm now gates on the regions budget R (POST /config sets it in production). Mirror the old
+        // cap-based gating in tests by reserving the whole cap as R, so the budget equals what these
+        // tests expect (P = 0, so a region-less warm gates against R = cap).
+        st.live_regions_budget.store(cap, Ordering::Relaxed);
         st.sources.write().await.insert(source.id.clone(), source);
         st
     }
@@ -361,6 +391,29 @@ mod tests {
     }
 
     #[test]
+    fn effective_budget_clamps_a_configured_r_above_the_cap() {
+        let db = NamedTempFile::new().unwrap();
+        let cache = Arc::new(TileCache::open(db.path()).unwrap());
+        let st = AppState::new(cache, dev());
+        // A POST /config delivered R = 5000 with a 1000-byte cap and P = 0: R exceeds the cap.
+        st.live_cap_bytes.store(1000, Ordering::Relaxed);
+        st.live_regions_budget.store(5000, Ordering::Relaxed);
+        st.live_position_warm_budget.store(0, Ordering::Relaxed);
+        // A real region's effective budget clamps to the cap, not to R - P.
+        assert_eq!(effective_budget(&st, Some("r1")), 1000, "R - P clamps to the cap");
+        // The position-warm pseudo-region clamps to the cap too.
+        assert_eq!(
+            effective_budget(&st, Some(crate::state::POSITION_WARM_REGION_ID)),
+            1000,
+            "R clamps to the cap",
+        );
+        // A negative R - P floors at 0.
+        st.live_regions_budget.store(100, Ordering::Relaxed);
+        st.live_position_warm_budget.store(500, Ordering::Relaxed);
+        assert_eq!(effective_budget(&st, Some("r1")), 0, "R - P floors at 0");
+    }
+
+    #[test]
     fn warm_concurrency_is_below_egress() {
         const {
             assert!(
@@ -375,7 +428,7 @@ mod tests {
         let addr = stub().await;
         let db = NamedTempFile::new().unwrap();
         let st = state(&db, dev(), xyz(addr, "img")).await;
-        let job = start_warm(&st, WarmRequest { sources: vec![st.sources.read().await["s"].clone()], bbox: [-10.0, -10.0, 10.0, 10.0], minzoom: 0, maxzoom: 1 }).await.unwrap();
+        let job = start_warm(&st, WarmRequest { sources: vec![st.sources.read().await["s"].clone()], bbox: [-10.0, -10.0, 10.0, 10.0], minzoom: 0, maxzoom: 1, region_id: None }).await.unwrap();
         let snap = wait_done(&st, &job).await;
         assert_eq!(snap["state"], "done");
         assert!(snap["done"].as_u64().unwrap() >= 1);
@@ -397,7 +450,7 @@ mod tests {
             status: 200, fetched_at: now, last_access: now, bytes: 4, blob: Some(vec![1, 2, 3, 4].into()),
         };
         st.cache.put("s", 0, 0, 0, &seeded, false, now).unwrap();
-        let job = start_warm(&st, WarmRequest { sources: vec![st.sources.read().await["s"].clone()], bbox: [-10.0, -10.0, 10.0, 10.0], minzoom: 0, maxzoom: 0 }).await.unwrap();
+        let job = start_warm(&st, WarmRequest { sources: vec![st.sources.read().await["s"].clone()], bbox: [-10.0, -10.0, 10.0, 10.0], minzoom: 0, maxzoom: 0, region_id: None }).await.unwrap();
         let snap = wait_done(&st, &job).await;
         assert!(snap["skipped"].as_u64().unwrap() >= 1, "the fresh tile is skipped, not refetched");
         st.cache.evict_to(0).unwrap();
@@ -410,7 +463,7 @@ mod tests {
         let db = NamedTempFile::new().unwrap();
         // cap below one tile (4 bytes) so the first sized put trips the cap.
         let st = state(&db, Knobs { cap_bytes: 2, allow_private_egress: true, ..Default::default() }, xyz(addr, "img")).await;
-        let job = start_warm(&st, WarmRequest { sources: vec![st.sources.read().await["s"].clone()], bbox: [-10.0, -10.0, 10.0, 10.0], minzoom: 0, maxzoom: 0 }).await.unwrap();
+        let job = start_warm(&st, WarmRequest { sources: vec![st.sources.read().await["s"].clone()], bbox: [-10.0, -10.0, 10.0, 10.0], minzoom: 0, maxzoom: 0, region_id: None }).await.unwrap();
         let snap = wait_done(&st, &job).await;
         assert_eq!(snap["state"], "capped");
         assert_eq!(st.cache.stats().unwrap().1, 0, "nothing stored, nothing evicted");
@@ -424,8 +477,8 @@ mod tests {
         let known = st.sources.read().await["s"].clone();
         let mut unknown = known.clone();
         unknown.id = "nope".into();
-        assert!(matches!(start_warm(&st, WarmRequest { sources: vec![unknown], bbox: [-1.0, -1.0, 1.0, 1.0], minzoom: 0, maxzoom: 0 }).await, Err(StartError::UnknownSource(_))));
-        assert!(matches!(start_warm(&st, WarmRequest { sources: vec![known.clone()], bbox: [10.0, 10.0, 5.0, 5.0], minzoom: 0, maxzoom: 0 }).await, Err(StartError::BadBbox(_))));
+        assert!(matches!(start_warm(&st, WarmRequest { sources: vec![unknown], bbox: [-1.0, -1.0, 1.0, 1.0], minzoom: 0, maxzoom: 0, region_id: None }).await, Err(StartError::UnknownSource(_))));
+        assert!(matches!(start_warm(&st, WarmRequest { sources: vec![known.clone()], bbox: [10.0, 10.0, 5.0, 5.0], minzoom: 0, maxzoom: 0, region_id: None }).await, Err(StartError::BadBbox(_))));
         // A source with a deep max zoom over the whole world projects past WARM_TILE_HARD_CAP (2_000_000):
         // zoom 11 alone is 4^11 = 4_194_304 tiles, so start_warm rejects it upfront with TooMany. Replace
         // the stored "s" with a deep-zoom copy so start_warm resolves the real (deep) source for the count.
@@ -433,7 +486,7 @@ mod tests {
         deep.maxzoom = 12;
         st.sources.write().await.insert(deep.id.clone(), deep.clone());
         assert!(matches!(
-            start_warm(&st, WarmRequest { sources: vec![deep], bbox: [-180.0, -85.0, 180.0, 85.0], minzoom: 0, maxzoom: 12 }).await,
+            start_warm(&st, WarmRequest { sources: vec![deep], bbox: [-180.0, -85.0, 180.0, 85.0], minzoom: 0, maxzoom: 12, region_id: None }).await,
             Err(StartError::TooMany(_))
         ));
     }
@@ -450,7 +503,7 @@ mod tests {
         // Poles: both latitudes exceed the Web Mercator limit in both directions.
         let result = start_warm(
             &st,
-            WarmRequest { sources: vec![src.clone()], bbox: [-180.0, -90.0, 180.0, 90.0], minzoom: 0, maxzoom: 0 },
+            WarmRequest { sources: vec![src.clone()], bbox: [-180.0, -90.0, 180.0, 90.0], minzoom: 0, maxzoom: 0, region_id: None },
         )
         .await;
         assert!(result.is_ok(), "beyond-limit latitude must not produce BadBbox: {result:?}");
@@ -497,6 +550,7 @@ mod tests {
                 bbox: [-180.0, -85.0, 180.0, 85.0],
                 minzoom: 0,
                 maxzoom: 4,
+                region_id: None,
             }).await.unwrap();
             ids.push(job);
         }
@@ -507,6 +561,7 @@ mod tests {
             bbox: [-1.0, -1.0, 1.0, 1.0],
             minzoom: 0,
             maxzoom: 0,
+            region_id: None,
         }).await;
         assert!(
             matches!(result, Err(StartError::TooManyJobs)),
@@ -524,7 +579,7 @@ mod tests {
         let addr = stub().await;
         let db = NamedTempFile::new().unwrap();
         let st = state(&db, dev(), xyz(addr, "img")).await;
-        let job = start_warm(&st, WarmRequest { sources: vec![st.sources.read().await["s"].clone()], bbox: [-180.0, -85.0, 180.0, 85.0], minzoom: 0, maxzoom: 4 }).await.unwrap();
+        let job = start_warm(&st, WarmRequest { sources: vec![st.sources.read().await["s"].clone()], bbox: [-180.0, -85.0, 180.0, 85.0], minzoom: 0, maxzoom: 4, region_id: None }).await.unwrap();
         assert!(cancel_warm(&st, &job).await);
         let snap = wait_done(&st, &job).await;
         assert!(snap["state"] == "cancelled" || snap["state"] == "done");

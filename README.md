@@ -80,9 +80,11 @@ After installation, enable the plugin in the Signal K plugin configuration panel
 starts the tilecache container automatically when Signal K restarts. No further configuration is
 required for the tile cache or the PMTiles provider.
 
-**Tile cache capacity.** Set the maximum cache size (in megabytes) in the plugin settings. The
-default is sized conservatively for a microSD card. The prewarmed box is pinned within this
-budget; position-warm tiles fill the remainder under LRU eviction.
+**Tile cache capacity.** The plugin settings expose a GiB slider for the cache size cap. The
+default is set to about 80 percent of the free space on the Signal K data directory at the time
+the settings form loads, leaving roughly 20 percent headroom. Saved regions are pinned up to the
+reserved ceiling and are never evicted; everything else is on-demand scroll cache that uses the
+rest of the cap and is evicted least-recently-used when the cap is reached.
 
 **PMTiles charts.** Place `.pmtiles` files in the server's charts folder (the same folder
 `signalk-pmtiles-plugin` uses). The companion detects and registers them automatically. If

@@ -4,7 +4,7 @@ import type { Plugin, ServerAPI } from '@signalk/server-api'
 import type { Position } from '../shared/types.js'
 import { PLUGIN_ID, PLUGIN_NAME, PLUGIN_DESCRIPTION } from '../shared/plugin-id.js'
 import { requireContainerManager, getContainerManager, ensureRuntimeReady } from '../runtime/container-manager.js'
-import { TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT, DEFAULT_TILECACHE_TAG, buildTilecacheConfig, probeTilecacheHealth } from '../runtime/tilecache-container.js'
+import { TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT, DEFAULT_TILECACHE_TAG, DEFAULT_CACHE_CAP_GIB, buildTilecacheConfig, probeTilecacheHealth } from '../runtime/tilecache-container.js'
 import { buildSourcePayload, pushTilecacheConfig } from '../runtime/tilecache-config-push.js'
 import { registerTileRoutes, type TileRouter } from '../http/tile-routes.js'
 import { registerPrewarmRoutes, type PrewarmRouter } from '../http/prewarm-routes.js'
@@ -16,13 +16,15 @@ import { registerChartManagementRoutes, type ManagementRouter } from '../http/ch
 import { OverrideStore } from '../charts/overrides.js'
 import { ensureApiAdminGate } from '../shared/admin-gate.js'
 import { join, resolve } from 'node:path'
+import { statfsSync } from 'node:fs'
 import { createPositionWarmer, type PositionWarmer } from '../runtime/position-warmer.js'
-import { loadPrewarmConfig } from '../runtime/prewarm-store.js'
+import { loadPrewarmStore, listRegions, updateRegion, POSITION_WARM_REGION_ID, positionWarmBudgetBytes } from '../runtime/prewarm-store.js'
 import { warmRegion } from '../runtime/tilecache-client.js'
 
 interface CompanionConfig {
   tilecacheImageTag?: string
-  tilecacheCacheCapBytes?: number
+  tilecacheCacheCapGiB?: number
+  tilecacheRegionsBudgetGiB?: number
   tilecacheCacheVolumeSource?: string
   chartsPath?: string
 }
@@ -99,9 +101,10 @@ export function createPlugin (app: ServerAPI): Plugin {
     // The tilecache is non-fatal: a failure here disables tile caching but leaves the PMTiles chart
     // provider and the plugin serve routes fully working.
     try {
+      const capBytes = (config.tilecacheCacheCapGiB ?? DEFAULT_CACHE_CAP_GIB) * 1024 ** 3
       const tilecacheConfig = buildTilecacheConfig({
         tag: config?.tilecacheImageTag?.trim() || undefined,
-        ...(typeof config?.tilecacheCacheCapBytes === 'number' ? { capBytes: config.tilecacheCacheCapBytes } : {}),
+        capBytes,
         ...(config?.tilecacheCacheVolumeSource?.trim() ? { externalCacheVolumeSource: config.tilecacheCacheVolumeSource.trim() } : {})
       })
       await manager.ensureRunning(TILECACHE_CONTAINER_NAME, tilecacheConfig, { pluginId: PLUGIN_ID })
@@ -112,7 +115,18 @@ export function createPlugin (app: ServerAPI): Plugin {
         if (!(await probeTilecacheHealth(tcAddress))) {
           app.debug('Tilecache container did not pass its health probe at startup; tiles will work once it is ready.')
         }
-        const pushed = await pushTilecacheConfig(tcAddress, buildSourcePayload())
+        // R, the saved-regions reserve: the configured value (converted from GiB), or half the cap
+        // when left at 0 (the default). P, the position-warm slice of R, is derived. Pushed so the
+        // container's hard-reserved two-budget accounting is non-zero; without it every region warm
+        // immediately caps.
+        const rawR = (config.tilecacheRegionsBudgetGiB ?? 0) > 0
+          ? config.tilecacheRegionsBudgetGiB! * 1024 ** 3
+          : Math.floor(capBytes * 0.5)
+        // Clamp R to the cap: a value above the cap makes cap - R negative, so evict_to would drop the
+        // whole scroll cache and the pinned bytes could exceed the cap.
+        const regionsBudgetBytes = Math.min(rawR, capBytes)
+        const pBudget = positionWarmBudgetBytes(regionsBudgetBytes)
+        const pushed = await pushTilecacheConfig(tcAddress, buildSourcePayload(capBytes, regionsBudgetBytes, pBudget))
         if (!pushed) {
           app.debug('Tilecache config push failed; the proxy has an empty allowlist until the next push.')
         }
@@ -121,12 +135,22 @@ export function createPlugin (app: ServerAPI): Plugin {
       app.debug('Tilecache container did not start; tile caching is disabled:', err)
     }
 
+    // Eagerly load (and migrate) the prewarm store, then sweep any region left mid-download across a
+    // restart to error: the container's in-memory warm-job registry does not survive a restart, so a
+    // region caught downloading is a lost job and must never stay downloading.
+    const dataDir = app.getDataDirPath()
+    loadPrewarmStore(dataDir)
+    for (const region of listRegions(dataDir)) {
+      if (region.status === 'downloading') {
+        updateRegion(dataDir, region.id, { status: 'error' })
+      }
+    }
     warmer = createPositionWarmer({
-      getConfig: () => loadPrewarmConfig(app.getDataDirPath()),
+      getStore: () => loadPrewarmStore(app.getDataDirPath()),
       warm: async (bbox, sources, minzoom, maxzoom) => {
         const address = tilecacheAddress
         if (address === null) return null
-        return warmRegion(address, { bbox, sources, minzoom, maxzoom })
+        return warmRegion(address, { bbox, sources, minzoom, maxzoom, regionId: POSITION_WARM_REGION_ID })
       }
     })
     positionUnsub = app.streambundle.getSelfBus('navigation.position' as unknown as Parameters<typeof app.streambundle.getSelfBus>[0])
@@ -168,35 +192,65 @@ export function createPlugin (app: ServerAPI): Plugin {
     id: PLUGIN_ID,
     name: PLUGIN_NAME,
     description: PLUGIN_DESCRIPTION,
-    schema: () => ({
-      type: 'object',
-      properties: {
-        tilecacheImageTag: {
-          type: 'string',
-          title: 'Tile cache container image tag',
-          description: 'The image tag to run for the tile cache and proxy container.',
-          default: DEFAULT_TILECACHE_TAG
-        },
-        tilecacheCacheCapBytes: {
-          type: 'number',
-          title: 'Tile cache size cap, in bytes',
-          description: 'The maximum disk the tile cache uses before evicting the least recently used tiles. Default 2 GiB; keep it conservative on a microSD card.',
-          default: 2147483648
-        },
-        tilecacheCacheVolumeSource: {
-          type: 'string',
-          title: 'External tile cache drive (optional)',
-          description: 'Host path of a USB SSD or NVMe drive to hold the tile cache. Leave blank to keep the cache on the Signal K data directory.',
-          default: ''
-        },
-        chartsPath: {
-          type: 'string',
-          title: 'PMTiles charts directory',
-          description: 'Directory holding .pmtiles charts, relative to the Signal K config path. Leave blank for the default charts/pmtiles.',
-          default: ''
+    schema: () => {
+      // Detect free space on the Signal K data directory to seed a sensible default cap.
+      // schema() is re-invoked each time the admin UI fetches config, and by then the server has
+      // bound getDataDirPath onto the app copy. Guard the early-call case (an unbound
+      // getDataDirPath throws) and any statfs failure, falling back to the static default.
+      let capDefaultGiB = DEFAULT_CACHE_CAP_GIB
+      try {
+        const dataDir = (app as unknown as { getDataDirPath: () => string }).getDataDirPath()
+        const { bsize, bavail } = statfsSync(dataDir)
+        const freeGiB = Math.floor((bsize * bavail) / (1024 ** 3))
+        capDefaultGiB = Math.max(1, Math.floor(freeGiB * 0.8))
+      } catch {
+        // Detection failed (early call or a platform without statfs): keep the conservative default.
+      }
+      return {
+        type: 'object',
+        properties: {
+          tilecacheImageTag: {
+            type: 'string',
+            title: 'Tile cache container image tag',
+            description: 'The image tag to run for the tile cache and proxy container.',
+            default: DEFAULT_TILECACHE_TAG
+          },
+          tilecacheCacheCapGiB: {
+            type: 'integer',
+            multipleOf: 1,
+            minimum: 1,
+            maximum: 1024,
+            title: 'Tile cache size cap (GiB)',
+            description: 'The most disk space the on-disk tile cache may use. When the cache reaches this size it evicts the least recently used unpinned tiles to stay under the cap. The default is about 80 percent of the free space detected on the Signal K data directory when this form loaded, which leaves roughly 20 percent headroom. Do not set this to all of your free space: the cache grows to fill the cap, and a full disk can stop the server from writing. If you point the cache at an external drive in the field below, this value reflects the data directory filesystem, not the drive, so set the cap manually to suit the drive.',
+            default: capDefaultGiB
+          },
+          tilecacheRegionsBudgetGiB: {
+            type: 'integer',
+            multipleOf: 1,
+            minimum: 0,
+            title: 'Saved-regions reserved budget (GiB)',
+            description: 'A ceiling on how much disk space saved regions may pin. Leave 0 to reserve half the cache cap. This is not space taken from the scroll cache until a region is actually saved. A value above the cache cap is clamped to the cap.',
+            default: 0
+          },
+          tilecacheCacheVolumeSource: {
+            type: 'string',
+            title: 'External tile cache drive (optional)',
+            description: 'Host path of a USB SSD or NVMe drive to hold the tile cache. Leave blank to keep the cache on the Signal K data directory.',
+            default: ''
+          },
+          chartsPath: {
+            type: 'string',
+            title: 'PMTiles charts directory',
+            description: 'Directory holding .pmtiles charts, relative to the Signal K config path. Leave blank for the default charts/pmtiles.',
+            default: ''
+          }
         }
       }
-    }),
+    },
+    uiSchema: {
+      tilecacheCacheCapGiB: { 'ui:widget': 'range' },
+      tilecacheRegionsBudgetGiB: { 'ui:widget': 'updown' }
+    },
     // Signal K calls start synchronously and does not await it, so the async work runs detached with
     // an explicit catch: a doStart rejection surfaces as a plugin error instead of an unhandled
     // rejection. Chaining onto the shared lifecycle promise serializes this start after any in-flight

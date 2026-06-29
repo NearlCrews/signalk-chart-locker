@@ -35,6 +35,22 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// True when the URL's host is an IP literal that is forbidden for egress (loopback, private,
+/// link-local, and the other ranges is_forbidden_ip rejects). A hostname (non-literal) yields
+/// false here; hostnames are guarded separately at DNS-resolution time.
+pub fn is_forbidden_ip_literal_url(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| {
+            u.host_str().map(|h| {
+                let bare =
+                    h.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(h);
+                bare.parse::<std::net::IpAddr>().map(is_forbidden_ip).unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// fc00::/7 unique-local addresses (the IPv6 analog of RFC1918).
 fn is_unique_local(ip: Ipv6Addr) -> bool {
     (ip.segments()[0] & 0xfe00) == 0xfc00

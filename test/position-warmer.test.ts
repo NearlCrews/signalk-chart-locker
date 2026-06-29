@@ -1,17 +1,25 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createPositionWarmer } from '../src/runtime/position-warmer.js'
-import { DEFAULT_PREWARM_CONFIG } from '../src/runtime/prewarm-store.js'
+import { DEFAULT_PREWARM_STORE } from '../src/runtime/prewarm-store.js'
+import type { PrewarmStore, SavedRegion } from '../src/runtime/prewarm-store.js'
 
-function config (over = {}) {
-  return { ...DEFAULT_PREWARM_CONFIG, bbox: [-123, 37, -122, 38] as [number, number, number, number], positionWarm: { ...DEFAULT_PREWARM_CONFIG.positionWarm, enabled: true, sources: ['seamark'], ...over } }
+function region (bbox: [number, number, number, number]): SavedRegion {
+  return { id: 'r1', name: 'Test', bbox, sourceIds: [], minzoom: 6, maxzoom: 12, createdAt: 0, lastDownloadedAt: null, bytes: 0, status: 'ready' }
+}
+
+function store (over: Partial<typeof DEFAULT_PREWARM_STORE.positionWarm> = {}): PrewarmStore {
+  return {
+    regions: [region([-123, 37, -122, 38])],
+    positionWarm: { ...DEFAULT_PREWARM_STORE.positionWarm, enabled: true, sources: ['seamark'], ...over }
+  }
 }
 
 test('warms once outside the box, then respects the interval', async () => {
   let clock = 1_000_000
   const warmed: Array<[number, number, number, number]> = []
   const warmer = createPositionWarmer({
-    getConfig: () => config(),
+    getStore: () => store(),
     warm: async (bbox) => { warmed.push(bbox); return { errors: 0, total: 4 } },
     now: () => clock
   })
@@ -26,7 +34,7 @@ test('warms once outside the box, then respects the interval', async () => {
 
 test('does not warm inside the box', async () => {
   const warmed: unknown[] = []
-  const warmer = createPositionWarmer({ getConfig: () => config(), warm: async (b) => { warmed.push(b); return { errors: 0, total: 1 } }, now: () => 1_000_000 })
+  const warmer = createPositionWarmer({ getStore: () => store(), warm: async (b) => { warmed.push(b); return { errors: 0, total: 1 } }, now: () => 1_000_000 })
   warmer.onPosition({ latitude: 37.5, longitude: -122.5 }) // inside
   await Promise.resolve()
   assert.equal(warmed.length, 0)
@@ -36,7 +44,7 @@ test('backs off after an all-errors warm', async () => {
   let clock = 1_000_000
   let calls = 0
   const warmer = createPositionWarmer({
-    getConfig: () => config(),
+    getStore: () => store(),
     warm: async () => { calls++; return { errors: 16, total: 16 } }, // all errors: offline
     now: () => clock,
     backoffSecs: 600

@@ -12,7 +12,7 @@ const POLL_INTERVAL_MS = 500
 
 export async function warmRegion (
   address: string,
-  req: { bbox: [number, number, number, number], sources: string[], minzoom: number, maxzoom: number },
+  req: { bbox: [number, number, number, number], sources: string[], minzoom: number, maxzoom: number, regionId?: string },
   fetchImpl: typeof fetch = fetch
 ): Promise<WarmResult | null> {
   try {

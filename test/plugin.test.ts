@@ -45,6 +45,31 @@ test('stop with no prior start and a manager present is a clean no-op', async ()
   assert.deepEqual(record.stopped, [])
 })
 
+test('schema() cap field is integer with fixed maximum 1024, minimum 1, and default >= 1', () => {
+  const plugin = createPlugin(fakeApp() as never)
+  const schema = typeof plugin.schema === 'function' ? plugin.schema() : plugin.schema
+  const props = (schema as { properties: Record<string, unknown> }).properties
+  const cap = props.tilecacheCacheCapGiB as {
+    type: string
+    maximum: number
+    minimum: number
+    default: number
+    multipleOf: number
+  }
+  assert.equal(cap.type, 'integer')
+  assert.equal(cap.maximum, 1024)
+  assert.equal(cap.minimum, 1)
+  assert.ok(cap.default >= 1, 'default must be at least 1')
+  assert.equal(cap.multipleOf, 1)
+})
+
+test('plugin exposes uiSchema with a range widget on the cap field', () => {
+  const plugin = createPlugin(fakeApp() as never)
+  const ui = (plugin as unknown as { uiSchema: Record<string, { 'ui:widget': string }> }).uiSchema
+  assert.ok(ui != null, 'uiSchema must be present')
+  assert.equal(ui.tilecacheCacheCapGiB['ui:widget'], 'range')
+})
+
 test('stop calls the navigation.position unsubscribe returned by streambundle', async () => {
   setContainerManager(fakeManager())
   const app = fakeApp()
