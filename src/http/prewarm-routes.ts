@@ -9,6 +9,7 @@ import { loadPrewarmConfig, savePrewarmConfig, type PrewarmConfig } from '../run
 export interface PrewarmRequest {
   params: Record<string, string>
   body: unknown
+  query?: Record<string, string>
 }
 
 export interface PrewarmResponse {
@@ -123,6 +124,14 @@ export function registerPrewarmRoutes (router: PrewarmRouter, app: ServerAPI, ge
   router.get('/api/cache/stats', async (_req, res) => {
     const address = withAddress(res); if (address === null) return
     return relay(res, fetchImpl(`http://${address}/cache/stats`))
+  })
+
+  router.get('/api/geocode', async (req, res) => {
+    const address = withAddress(res); if (address === null) return
+    const query = (req.query ?? {})
+    const { lat, lon } = query
+    if (!lat || !lon) { res.status(400).json({ error: 'lat and lon are required' }); return }
+    return relay(res, fetchImpl(`http://${address}/geocode?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`))
   })
 
   return true

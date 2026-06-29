@@ -28,6 +28,7 @@ pub fn app(state: AppState) -> Router {
         .route("/warm/:job_id/cancel", post(warm_cancel))
         .route("/cache/region/:region_id", axum::routing::get(region_bytes_route).delete(delete_region_route))
         .merge(crate::style::style_routes())
+        .merge(crate::geocode::geocode_routes())
         .with_state(state)
 }
 
