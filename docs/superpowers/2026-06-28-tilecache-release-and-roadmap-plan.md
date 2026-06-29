@@ -1,5 +1,9 @@
 # Tile cache release and roadmap plan
 
+> **2026-06-29 note:** The router engine, the offline geodata pipeline, and all routing
+> milestones referenced in this plan have been removed from the companion. The companion is now
+> a tile cache and PMTiles chart provider only. This document is kept as a historical record.
+
 Date 2026-06-28. The single forward plan after tile cache v1 (raster and basemap proxy and cache)
 and its hardening pass landed on `main` in all three repos. It covers the one remaining desk
 verification, the ordered release sequence, the boat-only validation, the v1 deferrals, and the

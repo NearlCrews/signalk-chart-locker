@@ -1,6 +1,6 @@
 {
   "name": "signalk-binnacle-companion",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Signal K companion that runs a polyglot container alongside the server, hosting compute and datasets that a JS/TS plugin cannot.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -29,7 +29,6 @@
       "signalk-container"
     ],
     "recommends": [
-      "signalk-crows-nest",
       "signalk-binnacle"
     ]
   },
