@@ -255,6 +255,42 @@ impl TileCache {
         Ok(())
     }
 
+    /// Check freshness and pin under the same lock, eliminating the get-then-pin race where a
+    /// concurrent evict_to could delete the row between the two separate calls. Returns `true`
+    /// when a fresh or negative-TTL row was found and pinned; `false` when absent or stale.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pin_if_fresh(
+        &self,
+        source: &str,
+        z: u32,
+        x: u32,
+        y: u32,
+        now: i64,
+        fresh_secs: i64,
+        negative_ttl_secs: i64,
+    ) -> rusqlite::Result<bool> {
+        let inner = self.lock();
+        let row: Option<(i64, i64)> = inner
+            .conn
+            .query_row(
+                "SELECT status, fetched_at FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
+                params![source, z, x, y],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((status, fetched_at)) = row else { return Ok(false) };
+        let fresh = status == 200 && now - fetched_at < fresh_secs;
+        let neg = status != 200 && now - fetched_at < negative_ttl_secs;
+        if !fresh && !neg {
+            return Ok(false);
+        }
+        inner.conn.execute(
+            "UPDATE tiles SET pinned = 1 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
+            params![source, z, x, y],
+        )?;
+        Ok(true)
+    }
+
     /// The mean stored byte size per source over real (status 200, blob present) tiles, excluding
     /// negative-cache rows (which would understate the average and let a warm exceed the cap).
     /// Computed on demand; `/cache/stats` is called rarely.
@@ -372,6 +408,36 @@ mod tests {
         assert_eq!(outcome.stored, 1, "only the first tile fits under the 10-byte cap");
         assert!(outcome.capped, "the batch reports capped rather than evicting");
         assert_eq!(c.stats().unwrap().1, 8, "no eviction happened");
+    }
+
+    #[test]
+    fn pin_if_fresh_pins_atomically_and_returns_false_when_stale_or_absent() {
+        let (_f, c) = open();
+        let now = 1000i64;
+        let fresh_secs = 86_400i64;
+        let neg_ttl = 600i64;
+
+        // Absent row: returns false.
+        assert!(!c.pin_if_fresh("s", 0, 0, 0, now, fresh_secs, neg_ttl).unwrap());
+
+        // Fresh 200 row: returns true and pins it.
+        c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, now).unwrap();
+        assert!(c.pin_if_fresh("s", 0, 0, 0, now, fresh_secs, neg_ttl).unwrap());
+        c.evict_to(0).unwrap();
+        assert!(c.get("s", 0, 0, 0).unwrap().is_some(), "pinned row survives eviction");
+
+        // Stale row: fetched_at far enough in the past that now - fetched_at >= fresh_secs.
+        let stale = CachedTile { fetched_at: now - fresh_secs - 1, ..tile(10, 200, Some(vec![0; 10])) };
+        c.put("s", 0, 0, 1, &stale, false, now).unwrap();
+        assert!(!c.pin_if_fresh("s", 0, 0, 1, now, fresh_secs, neg_ttl).unwrap());
+
+        // Fresh negative (404) row within negative_ttl: returns true and pins it.
+        // fetched_at must be `now` so now - fetched_at = 0 < neg_ttl.
+        let neg_row = CachedTile { fetched_at: now, ..tile(0, 404, None) };
+        c.put("s", 0, 0, 2, &neg_row, false, now).unwrap();
+        assert!(c.pin_if_fresh("s", 0, 0, 2, now, fresh_secs, neg_ttl).unwrap());
+        c.evict_to(0).unwrap();
+        assert!(c.get("s", 0, 0, 2).unwrap().is_some(), "pinned negative row survives eviction");
     }
 
     #[test]

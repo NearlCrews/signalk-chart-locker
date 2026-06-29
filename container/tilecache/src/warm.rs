@@ -6,7 +6,7 @@
 
 use crate::cache::{CachedTile, WarmRow};
 use crate::fetcher::{acceptable_content_type, fetch_upstream, strong_etag};
-use crate::geom::{for_tiles_in_bbox, tile_count_in_bbox};
+use crate::geom::{tile_count_in_bbox, tiles_iter};
 use crate::source::{ChartSource, UpstreamTemplate};
 use crate::state::{now_secs, AppState};
 use crate::upstream::expand_upstream;
@@ -17,6 +17,9 @@ use std::sync::Arc;
 pub const WARM_CONCURRENCY: usize = 3;
 /// Reject an absurd projected tile count upfront, defeating an enumeration denial of service.
 pub const WARM_TILE_HARD_CAP: u64 = 2_000_000;
+/// Maximum concurrently RUNNING warm jobs. The admin prewarm route and the position-warm loop can
+/// both drive /warm, so the cap prevents runaway goroutine pressure even with both active.
+pub const MAX_ACTIVE_WARM_JOBS: usize = 4;
 /// How long a finished job stays queryable before the registry reaps it.
 pub const WARM_JOB_TTL_SECS: i64 = 3600;
 /// Rows flushed per batched transaction (microSD-friendly; safe under WAL and synchronous = NORMAL).
@@ -56,6 +59,7 @@ pub enum StartError {
     BadBbox(String),
     BadZoom(String),
     TooMany(u64),
+    TooManyJobs,
 }
 
 /// Validate the request, create the job, spawn the warm driver, and return the job id.
@@ -95,6 +99,17 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
     {
         let mut jobs = state.warm_jobs.write().await;
         reap(&mut jobs);
+        // Count and insert under the write lock so the cap check and the insert are atomic with
+        // respect to other concurrent start_warm calls.
+        let active = jobs.values().filter(|j| {
+            match j.try_lock() {
+                Ok(g) => g.state == WarmState::Running,
+                Err(_) => true, // locked by the driver mid-run: treat as running
+            }
+        }).count();
+        if active >= MAX_ACTIVE_WARM_JOBS {
+            return Err(StartError::TooManyJobs);
+        }
         jobs.insert(id.clone(), job.clone());
     }
     // Resolve the allowlisted source definitions (not the client-sent ones) so the warm uses the trusted config.
@@ -148,17 +163,12 @@ enum Fetched {
 // this does not take it; guarded_get still takes an egress permit inside.
 async fn warm_one(st: &AppState, source: &ChartSource, z: u32, x: u32, y: u32) -> Fetched {
     let now = now_secs();
-    if let Ok(Some(tile)) = st.cache.get(&source.id, z, x, y) {
-        let fresh = tile.status == 200 && now - tile.fetched_at < st.knobs.fresh_secs;
-        let neg = tile.status != 200 && now - tile.fetched_at < st.knobs.negative_ttl_secs;
-        if fresh || neg {
-            // The tile is current, so skip the fetch, but still pin the existing row: it may have been
-            // cached UNPINNED by the live proxy, and the warmed box must be fully eviction-exempt.
-            if let Err(e) = st.cache.pin(&source.id, z, x, y) {
-                eprintln!("tilecache: warm pin failed: {e}");
-            }
-            return Fetched::Skipped;
-        }
+    // pin_if_fresh does the freshness check and the pin under one lock, closing the race where a
+    // concurrent evict_to could delete the row between a separate get() and pin() call.
+    match st.cache.pin_if_fresh(&source.id, z, x, y, now, st.knobs.fresh_secs, st.knobs.negative_ttl_secs) {
+        Ok(true) => return Fetched::Skipped,
+        Ok(false) => {} // absent or stale: fall through to fetch
+        Err(e) => eprintln!("tilecache: warm pin_if_fresh failed: {e}"),
     }
     let url = match expand_upstream(source, z, x, y) {
         Ok(u) => u,
@@ -196,14 +206,10 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, sources: Vec<C
     let mut batch: Vec<WarmRow> = Vec::with_capacity(WARM_BATCH);
     let mut final_state = WarmState::Done;
 
-    // A flat list of (source index, z, x, y) is avoided; enumerate inline and spawn bounded tasks.
+    // Enumerate tiles lazily via tiles_iter (zero extra allocation beyond the iterator struct) and
+    // spawn bounded tasks. The cancel check between tiles keeps the cooperative cancel responsive.
     'outer: for source in &sources {
-        let coords: Vec<(u32, u32, u32)> = {
-            let mut v = Vec::new();
-            for_tiles_in_bbox(source, bbox, zmin, zmax, |z, x, y| v.push((z, x, y)));
-            v
-        };
-        for (z, x, y) in coords {
+        for (z, x, y) in tiles_iter(source, bbox, zmin, zmax) {
             if cancel.load(Ordering::Relaxed) {
                 final_state = WarmState::Cancelled;
                 break 'outer;
@@ -454,6 +460,63 @@ mod tests {
         // total must match what tile_count_in_bbox reports for the same raw bbox (clip clamps both).
         let expected = crate::geom::tile_count_in_bbox(&src, [-180.0, -90.0, 180.0, 90.0], 0, 0);
         assert_eq!(snap["total"].as_u64().unwrap(), expected, "total tiles mismatch: snap={} expected={expected}", snap["total"]);
+    }
+
+    #[tokio::test]
+    async fn concurrent_job_cap_rejects_excess_starts() {
+        // Use a slow stub so all MAX_ACTIVE_WARM_JOBS jobs stay Running while we attempt the extra one.
+        let app = axum::Router::new().route(
+            "/slow/:z/:x/:y",
+            get(|| async {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                ([(header::CONTENT_TYPE, "image/png")], vec![1u8, 2, 3, 4])
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let db = NamedTempFile::new().unwrap();
+        // Source maxzoom = 4 so each job has enough tiles to not finish immediately.
+        let st = state(&db, dev(), xyz(addr, "slow")).await;
+        // Swap the source for a version pointing at /slow so warm_one stalls.
+        {
+            let mut map = st.sources.write().await;
+            let mut s = map["s"].clone();
+            s.upstream = crate::source::UpstreamTemplate::Xyz {
+                url_template: format!("http://{addr}/slow/{{z}}/{{x}}/{{y}}"),
+            };
+            map.insert(s.id.clone(), s);
+        }
+
+        let mut ids = Vec::new();
+        for _ in 0..MAX_ACTIVE_WARM_JOBS {
+            let job = start_warm(&st, WarmRequest {
+                sources: vec![st.sources.read().await["s"].clone()],
+                bbox: [-180.0, -85.0, 180.0, 85.0],
+                minzoom: 0,
+                maxzoom: 4,
+            }).await.unwrap();
+            ids.push(job);
+        }
+
+        // The (MAX_ACTIVE_WARM_JOBS + 1)th start must be rejected.
+        let result = start_warm(&st, WarmRequest {
+            sources: vec![st.sources.read().await["s"].clone()],
+            bbox: [-1.0, -1.0, 1.0, 1.0],
+            minzoom: 0,
+            maxzoom: 0,
+        }).await;
+        assert!(
+            matches!(result, Err(StartError::TooManyJobs)),
+            "expected TooManyJobs, got {result:?}"
+        );
+
+        // Clean up: cancel all stalled jobs.
+        for id in &ids {
+            cancel_warm(&st, id).await;
+        }
     }
 
     #[tokio::test]

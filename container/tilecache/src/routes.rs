@@ -126,6 +126,7 @@ async fn warm_start(State(st): State<AppState>, Json(body): Json<WarmBody>) -> R
         Err(crate::warm::StartError::UnknownSource(_)) => StatusCode::NOT_FOUND.into_response(),
         Err(crate::warm::StartError::TooMany(n)) => (StatusCode::BAD_REQUEST, format!("too many tiles: {n}")).into_response(),
         Err(crate::warm::StartError::BadBbox(m)) | Err(crate::warm::StartError::BadZoom(m)) => (StatusCode::BAD_REQUEST, m).into_response(),
+        Err(crate::warm::StartError::TooManyJobs) => StatusCode::TOO_MANY_REQUESTS.into_response(),
     }
 }
 
@@ -319,6 +320,49 @@ mod tests {
 
         let unknown = router.clone().oneshot(Request::get("/warm/nope").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn warm_route_returns_429_when_job_cap_is_reached() {
+        use axum::routing::get as aget;
+        // Slow stub keeps jobs in Running state long enough to fill the cap.
+        let slow = Router::new().route(
+            "/slow/:z/:x/:y",
+            aget(|| async {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                ([(header::CONTENT_TYPE, "image/png")], vec![1u8])
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, slow).await.unwrap(); });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let db = NamedTempFile::new().unwrap();
+        let slow_cfg = format!(
+            r#"{{"sources":[{{"id":"s","title":"S","tileSize":256,"minzoom":0,"maxzoom":4,"attribution":"",
+                "upstream":{{"mode":"xyz","urlTemplate":"http://{addr}/slow/{{z}}/{{x}}/{{y}}"}}}}],"publicBase":"/p"}}"#
+        );
+        let router = app(dev_state(&db));
+        router.clone().oneshot(
+            Request::post("/config").header("content-type","application/json").body(Body::from(slow_cfg)).unwrap()
+        ).await.unwrap();
+
+        // Fill all MAX_ACTIVE_WARM_JOBS slots with large-bbox jobs that won't finish quickly.
+        for _ in 0..crate::warm::MAX_ACTIVE_WARM_JOBS {
+            let r = router.clone().oneshot(
+                Request::post("/warm").header("content-type","application/json")
+                    .body(Body::from(r#"{"sources":["s"],"bbox":[-180.0,-85.0,180.0,85.0],"minzoom":0,"maxzoom":4}"#)).unwrap()
+            ).await.unwrap();
+            assert_eq!(r.status(), StatusCode::OK);
+        }
+
+        // The next start must return 429.
+        let extra = router.clone().oneshot(
+            Request::post("/warm").header("content-type","application/json")
+                .body(Body::from(r#"{"sources":["s"],"bbox":[-1.0,-1.0,1.0,1.0],"minzoom":0,"maxzoom":0}"#)).unwrap()
+        ).await.unwrap();
+        assert_eq!(extra.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]

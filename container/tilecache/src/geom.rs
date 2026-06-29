@@ -48,8 +48,12 @@ fn clip(source: &ChartSource, bbox: [f64; 4]) -> Option<[f64; 4]> {
     Some([min_lng, min_lat, max_lng, max_lat])
 }
 
+/// The effective zoom ceiling for any warm or enumeration: the source maxzoom capped at 24 so
+/// tile coordinates always fit in u32 (2^24 = 16_777_216, well within u32::MAX).
+const MAX_EFFECTIVE_ZOOM: u32 = 24;
+
 fn zoom_bounds(source: &ChartSource, zmin: u32, zmax: u32) -> (u32, u32) {
-    (zmin.max(source.minzoom), zmax.min(source.maxzoom))
+    (zmin.max(source.minzoom), zmax.min(source.maxzoom).min(MAX_EFFECTIVE_ZOOM))
 }
 
 // The inclusive tile rectangle (x0, x1, y0, y1) for the clipped bbox at zoom z. y increases downward, so
@@ -67,9 +71,28 @@ pub fn tile_count_in_bbox(source: &ChartSource, bbox: [f64; 4], zmin: u32, zmax:
     let mut count = 0u64;
     for z in zmin..=zmax {
         let (x0, x1, y0, y1) = tile_rect(c, z);
-        count += u64::from(x1 - x0 + 1) * u64::from(y1 - y0 + 1);
+        // Widen to u64 BEFORE subtracting so a high-zoom source cannot wrap in u32.
+        count += (u64::from(x1) - u64::from(x0) + 1) * (u64::from(y1) - u64::from(y0) + 1);
     }
     count
+}
+
+/// An iterator over (z, x, y) for every tile a warm over this bbox and zoom range would touch.
+/// Allocates one Box (the trait object); the tile tuples are produced lazily.
+pub fn tiles_iter(
+    source: &ChartSource,
+    bbox: [f64; 4],
+    zmin: u32,
+    zmax: u32,
+) -> Box<dyn Iterator<Item = (u32, u32, u32)> + Send + '_> {
+    let Some(c) = clip(source, bbox) else {
+        return Box::new(std::iter::empty());
+    };
+    let (zmin, zmax) = zoom_bounds(source, zmin, zmax);
+    Box::new((zmin..=zmax).flat_map(move |z| {
+        let (x0, x1, y0, y1) = tile_rect(c, z);
+        (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (z, x, y)))
+    }))
 }
 
 /// Call `f(z, x, y)` for every tile a warm over this bbox and zoom range would touch, allocating nothing.
@@ -123,6 +146,31 @@ mod tests {
             n += 1;
         });
         assert_eq!(n, tile_count_in_bbox(&s, [-10.0, 40.0, 10.0, 55.0], 0, 20));
+    }
+
+    #[test]
+    fn high_zoom_source_clamped_to_24_and_count_does_not_wrap() {
+        // A source with maxzoom = 33 must have its effective zoom clamped to MAX_EFFECTIVE_ZOOM (24).
+        // Before the fix, x1 - x0 + 1 in u32 wrapped to a tiny value at zoom >= 32, causing
+        // tile_count_in_bbox to undercount and the warm hard-cap check to be bypassed.
+        let s = src(0, 33, None);
+        // Tiny bbox: about 0.001 degree square. At zoom 24 this yields a small, predictable count.
+        let count = tile_count_in_bbox(&s, [0.0, 50.0, 0.001, 50.001], 24, 33);
+        assert!(count >= 1, "at least one tile expected after clamping to zoom 24");
+        assert!(count < 1_000_000, "count must not be a u32-wrapped undercount at zoom >= 32");
+        // Enumeration and count must agree; all emitted zooms must be <= MAX_EFFECTIVE_ZOOM.
+        let mut n = 0u64;
+        let mut max_z = 0u32;
+        for_tiles_in_bbox(&s, [0.0, 50.0, 0.001, 50.001], 24, 33, |z, _, _| {
+            assert!(z <= MAX_EFFECTIVE_ZOOM, "zoom {z} exceeded MAX_EFFECTIVE_ZOOM");
+            max_z = max_z.max(z);
+            n += 1;
+        });
+        assert_eq!(n, count, "enumeration count must match tile_count_in_bbox");
+        assert!(max_z <= MAX_EFFECTIVE_ZOOM);
+        // tiles_iter must produce the same count.
+        let iter_count = tiles_iter(&s, [0.0, 50.0, 0.001, 50.001], 24, 33).count() as u64;
+        assert_eq!(iter_count, count, "tiles_iter count must match tile_count_in_bbox");
     }
 
     #[test]
