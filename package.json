@@ -1,6 +1,6 @@
 {
   "name": "signalk-binnacle-companion",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Signal K companion that runs a polyglot container alongside the server, hosting compute and datasets that a JS/TS plugin cannot.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -61,6 +61,7 @@
     "typescript": "^6.0.3"
   },
   "dependencies": {
+    "pmtiles": "^4.4.1",
     "signalk-binnacle-chart-sources": "file:../signalk-binnacle-chart-sources"
   }
 }

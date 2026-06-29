@@ -11,10 +11,10 @@ use bytes::Bytes;
 use sha2::{Digest, Sha256};
 
 /// A fetched upstream body and its metadata, bundled so the store path takes few arguments.
-struct Fetched {
-    content_type: String,
-    validator: Option<String>,
-    body: Bytes,
+pub(crate) struct Fetched {
+    pub(crate) content_type: String,
+    pub(crate) validator: Option<String>,
+    pub(crate) body: Bytes,
 }
 
 /// A tile ready to serve.
@@ -39,7 +39,7 @@ pub enum FetchOutcome {
     Unavailable,
 }
 
-fn acceptable_content_type(ct: &str) -> bool {
+pub(crate) fn acceptable_content_type(ct: &str) -> bool {
     let ct = ct.to_ascii_lowercase();
     ct.starts_with("image/")
         || ct.starts_with("application/x-protobuf")
@@ -80,7 +80,7 @@ fn to_response(tile: &CachedTile, stale: bool) -> TileResponse {
 /// offline). SSRF is enforced by guarded_get (the literal-IP guard plus the client's guarded DNS
 /// resolver), and the body is read under a streaming size cap, so a decompression or chunked bomb
 /// cannot be read unbounded into memory.
-async fn fetch_upstream(
+pub(crate) async fn fetch_upstream(
     state: &AppState,
     url: &str,
     if_none_match: Option<&str>,
@@ -121,7 +121,7 @@ fn store_200(state: &AppState, source_id: &str, z: u32, x: u32, y: u32, fetched:
         bytes: fetched.body.len() as i64,
         blob: Some(fetched.body.clone()),
     };
-    log_cache_err(state.cache.put(source_id, z, x, y, &tile, now));
+    log_cache_err(state.cache.put(source_id, z, x, y, &tile, false, now));
     log_cache_err(state.cache.evict_to(state.knobs.cap_bytes));
     if if_none_match == Some(etag.as_str()) {
         return FetchOutcome::NotModified { etag };
@@ -141,7 +141,7 @@ fn negative_cache(state: &AppState, source_id: &str, z: u32, x: u32, y: u32, sta
         bytes: 0,
         blob: None,
     };
-    log_cache_err(state.cache.put(source_id, z, x, y, &tile, now));
+    log_cache_err(state.cache.put(source_id, z, x, y, &tile, false, now));
     FetchOutcome::Empty { status }
 }
 
@@ -192,7 +192,7 @@ pub async fn get_tile(
                     let mut refreshed = tile.clone();
                     refreshed.fetched_at = now;
                     refreshed.last_access = now;
-                    log_cache_err(state.cache.put(source_id, z, x, y, &refreshed, now));
+                    log_cache_err(state.cache.put(source_id, z, x, y, &refreshed, false, now));
                     if if_none_match.as_deref() == Some(&tile.strong_etag) {
                         return FetchOutcome::NotModified { etag: tile.strong_etag };
                     }

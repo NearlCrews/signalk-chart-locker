@@ -111,3 +111,12 @@ network read, credential, budget and admin gate, and safety word in the plugin.
 2. The tile cache and proxy. Highest standalone value, and it reuses the Milestone 3 NVMe
    store and the container plumbing.
 3. The shared time-series store, once the embedded-store pattern is proven by Milestone 3.
+
+## Status note (2026-06-28)
+
+Items 1 and 2 are complete. Milestone 3A and 3B are done; Milestone 4 is done in code on
+`feat/m4-companion-cutover` in `signalk-crows-nest` (pending merge and release). Tile cache
+v1 (raster and basemap proxy and cache) is on `main`; v2 (manual prewarm bounding-box warm
+and throttled position-warm, bounded microSD writes) and v3 (PMTiles chart provider, Node
+plugin side) are complete on `feat/tilecache-v2-v3`, pending the owner-run release. Item 3
+(shared time-series store) remains the next roadmap target.

@@ -22,6 +22,9 @@ pub fn app(state: AppState) -> Router {
         .route("/cache/stats", get(stats))
         .route("/config", post(config))
         .route("/tile/:source/:z/:x/:y", get(tile))
+        .route("/warm", post(warm_start))
+        .route("/warm/:job_id", get(warm_status))
+        .route("/warm/:job_id/cancel", post(warm_cancel))
         .merge(crate::style::style_routes())
         .with_state(state)
 }
@@ -32,7 +35,19 @@ async fn health() -> Json<serde_json::Value> {
 
 async fn stats(State(st): State<AppState>) -> Json<serde_json::Value> {
     let (rows, bytes) = st.cache.stats().unwrap_or((0, 0));
-    Json(serde_json::json!({ "rows": rows, "bytes": bytes }))
+    let avg: serde_json::Map<String, serde_json::Value> = st
+        .cache
+        .per_source_avg()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(source, mean)| (source, serde_json::json!(mean)))
+        .collect();
+    Json(serde_json::json!({
+        "rows": rows,
+        "bytes": bytes,
+        "cap": st.knobs.cap_bytes,
+        "perSourceAvgBytes": avg,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -70,6 +85,63 @@ async fn tile(State(st): State<AppState>, Path((source, z, x, y)): Path<(String,
         FetchOutcome::NotAllowed => StatusCode::NOT_FOUND.into_response(),
         FetchOutcome::BadRequest(_) => StatusCode::BAD_REQUEST.into_response(),
         FetchOutcome::Unavailable => StatusCode::BAD_GATEWAY.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WarmBody {
+    sources: Vec<String>,
+    bbox: [f64; 4],
+    minzoom: u32,
+    maxzoom: u32,
+}
+
+// Build placeholder ChartSource values keyed only by id; start_warm resolves each against the
+// allowlist (the trusted config) and rejects any unknown or style-type source. The placeholder
+// fields beyond `id` are unused after resolution.
+async fn warm_start(State(st): State<AppState>, Json(body): Json<WarmBody>) -> Response {
+    let placeholders: Vec<crate::source::ChartSource> = body
+        .sources
+        .iter()
+        .map(|id| crate::source::ChartSource {
+            id: id.clone(),
+            title: String::new(),
+            upstream: crate::source::UpstreamTemplate::Xyz { url_template: String::new() },
+            tile_size: 256,
+            minzoom: body.minzoom,
+            maxzoom: body.maxzoom,
+            bounds: None,
+            attribution: String::new(),
+        })
+        .collect();
+    let req = crate::warm::WarmRequest {
+        sources: placeholders,
+        bbox: body.bbox,
+        minzoom: body.minzoom,
+        maxzoom: body.maxzoom,
+    };
+    match crate::warm::start_warm(&st, req).await {
+        Ok(job_id) => (StatusCode::OK, Json(serde_json::json!({ "jobId": job_id }))).into_response(),
+        Err(crate::warm::StartError::UnknownSource(_)) => StatusCode::NOT_FOUND.into_response(),
+        Err(crate::warm::StartError::TooMany(n)) => (StatusCode::BAD_REQUEST, format!("too many tiles: {n}")).into_response(),
+        Err(crate::warm::StartError::BadBbox(m)) | Err(crate::warm::StartError::BadZoom(m)) => (StatusCode::BAD_REQUEST, m).into_response(),
+        Err(crate::warm::StartError::TooManyJobs) => StatusCode::TOO_MANY_REQUESTS.into_response(),
+    }
+}
+
+async fn warm_status(State(st): State<AppState>, Path(job_id): Path<String>) -> Response {
+    match crate::warm::warm_snapshot(&st, &job_id).await {
+        Some(snap) => Json(snap).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn warm_cancel(State(st): State<AppState>, Path(job_id): Path<String>) -> Response {
+    if crate::warm::cancel_warm(&st, &job_id).await {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
     }
 }
 
@@ -176,11 +248,151 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn warm_route_rejects_too_many_tiles_with_400() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_stub(hits).await;
+        let db = NamedTempFile::new().unwrap();
+        let router = app(dev_state(&db));
+        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr))).unwrap()).await.unwrap();
+        // Global bbox at maxzoom 12 projects far past the 2_000_000 tile hard cap, triggering TooMany.
+        let warm = router.oneshot(
+            Request::post("/warm").header("content-type", "application/json")
+                .body(Body::from(r#"{"sources":["s"],"bbox":[-180.0,-85.0,180.0,85.0],"minzoom":0,"maxzoom":12}"#)).unwrap()
+        ).await.unwrap();
+        assert_eq!(warm.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn warm_route_rejects_bad_bbox_and_bad_zoom_with_400() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_stub(hits).await;
+        let db = NamedTempFile::new().unwrap();
+        let router = app(dev_state(&db));
+        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr))).unwrap()).await.unwrap();
+        // Longitude-inverted bbox (west >= east) triggers BadBbox.
+        let bad_bbox = router.clone().oneshot(
+            Request::post("/warm").header("content-type", "application/json")
+                .body(Body::from(r#"{"sources":["s"],"bbox":[10.0,-1.0,-10.0,1.0],"minzoom":0,"maxzoom":0}"#)).unwrap()
+        ).await.unwrap();
+        assert_eq!(bad_bbox.status(), StatusCode::BAD_REQUEST);
+        // minzoom > maxzoom triggers BadZoom.
+        let bad_zoom = router.oneshot(
+            Request::post("/warm").header("content-type", "application/json")
+                .body(Body::from(r#"{"sources":["s"],"bbox":[-1.0,-1.0,1.0,1.0],"minzoom":5,"maxzoom":2}"#)).unwrap()
+        ).await.unwrap();
+        assert_eq!(bad_zoom.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn cache_stats_reports_counters() {
         let db = NamedTempFile::new().unwrap();
         let resp = app(dev_state(&db)).oneshot(Request::get("/cache/stats").body(Body::empty()).unwrap()).await.unwrap();
         let (status, body) = body_string(resp).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("\"rows\":0"));
+    }
+
+    #[tokio::test]
+    async fn warm_route_starts_a_job_and_reports_status() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_stub(hits).await;
+        let db = NamedTempFile::new().unwrap();
+        let router = app(dev_state(&db));
+        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr))).unwrap()).await.unwrap();
+
+        let warm = router.clone().oneshot(
+            Request::post("/warm").header("content-type", "application/json")
+                .body(Body::from(r#"{"sources":["s"],"bbox":[-1.0,-1.0,1.0,1.0],"minzoom":0,"maxzoom":1}"#)).unwrap()
+        ).await.unwrap();
+        let (status, body) = body_string(warm).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"jobId\""));
+        let job_id = body.split("\"jobId\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
+
+        let status_resp = router.clone().oneshot(Request::get(format!("/warm/{job_id}")).body(Body::empty()).unwrap()).await.unwrap();
+        let (status_code, status_body) = body_string(status_resp).await;
+        assert_eq!(status_code, StatusCode::OK);
+        assert!(status_body.contains("\"total\""), "status snapshot contains total field");
+        assert!(status_body.contains("\"state\""), "status snapshot contains state field");
+
+        let cancel = router.clone().oneshot(Request::post(format!("/warm/{job_id}/cancel")).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(cancel.status(), StatusCode::NO_CONTENT);
+
+        let unknown = router.clone().oneshot(Request::get("/warm/nope").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn warm_route_returns_429_when_job_cap_is_reached() {
+        use axum::routing::get as aget;
+        // Slow stub keeps jobs in Running state long enough to fill the cap.
+        let slow = Router::new().route(
+            "/slow/:z/:x/:y",
+            aget(|| async {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                ([(header::CONTENT_TYPE, "image/png")], vec![1u8])
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, slow).await.unwrap(); });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let db = NamedTempFile::new().unwrap();
+        let slow_cfg = format!(
+            r#"{{"sources":[{{"id":"s","title":"S","tileSize":256,"minzoom":0,"maxzoom":4,"attribution":"",
+                "upstream":{{"mode":"xyz","urlTemplate":"http://{addr}/slow/{{z}}/{{x}}/{{y}}"}}}}],"publicBase":"/p"}}"#
+        );
+        let router = app(dev_state(&db));
+        router.clone().oneshot(
+            Request::post("/config").header("content-type","application/json").body(Body::from(slow_cfg)).unwrap()
+        ).await.unwrap();
+
+        // Fill all MAX_ACTIVE_WARM_JOBS slots with large-bbox jobs that won't finish quickly.
+        for _ in 0..crate::warm::MAX_ACTIVE_WARM_JOBS {
+            let r = router.clone().oneshot(
+                Request::post("/warm").header("content-type","application/json")
+                    .body(Body::from(r#"{"sources":["s"],"bbox":[-180.0,-85.0,180.0,85.0],"minzoom":0,"maxzoom":4}"#)).unwrap()
+            ).await.unwrap();
+            assert_eq!(r.status(), StatusCode::OK);
+        }
+
+        // The next start must return 429.
+        let extra = router.clone().oneshot(
+            Request::post("/warm").header("content-type","application/json")
+                .body(Body::from(r#"{"sources":["s"],"bbox":[-1.0,-1.0,1.0,1.0],"minzoom":0,"maxzoom":0}"#)).unwrap()
+        ).await.unwrap();
+        assert_eq!(extra.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn warm_route_rejects_an_unknown_source_with_404() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_stub(hits).await;
+        let db = NamedTempFile::new().unwrap();
+        let router = app(dev_state(&db));
+        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr))).unwrap()).await.unwrap();
+        let warm = router.oneshot(
+            Request::post("/warm").header("content-type", "application/json")
+                .body(Body::from(r#"{"sources":["nope"],"bbox":[-1.0,-1.0,1.0,1.0],"minzoom":0,"maxzoom":0}"#)).unwrap()
+        ).await.unwrap();
+        assert_eq!(warm.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn cache_stats_reports_cap_and_per_source_average() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_stub(hits).await;
+        let db = NamedTempFile::new().unwrap();
+        let router = app(dev_state(&db));
+        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr))).unwrap()).await.unwrap();
+        // Warm one tile through the live path so a real 200 row exists.
+        router.clone().oneshot(Request::get("/tile/s/1/0/0").body(Body::empty()).unwrap()).await.unwrap();
+        let resp = router.oneshot(Request::get("/cache/stats").body(Body::empty()).unwrap()).await.unwrap();
+        let (status, body) = body_string(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"cap\":"), "stats reports the byte cap");
+        assert!(body.contains("\"perSourceAvgBytes\""), "stats reports the per-source average");
+        assert!(body.contains("\"s\":"), "the warmed source has an average");
     }
 }

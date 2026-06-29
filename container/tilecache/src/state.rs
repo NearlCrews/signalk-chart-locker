@@ -8,12 +8,14 @@ use bytes::Bytes;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
 /// Global concurrent egress fetches. Bounds the load the proxy puts on the upstream chart providers.
-const EGRESS_CONCURRENCY: usize = 8;
+/// `pub(crate)` so the warm engine's fan-out limit can be checked against it (it must stay strictly below).
+pub(crate) const EGRESS_CONCURRENCY: usize = 8;
 
 /// A DNS resolver that drops forbidden (private, loopback, link-local, multicast, unspecified) target
 /// IPs when reqwest resolves a hostname. It closes the DNS-rebinding gap a pre-connect check leaves,
@@ -83,6 +85,12 @@ pub struct AppState {
     pub knobs: Knobs,
     pub egress: Arc<Semaphore>,
     pub inflight: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// In-memory warm-job registry, keyed by job id and reaped after a TTL once finished.
+    pub warm_jobs: Arc<RwLock<HashMap<String, Arc<Mutex<crate::warm::WarmJob>>>>>,
+    /// Bounds warm fan-out strictly below `EGRESS_CONCURRENCY` so a warm cannot starve live reads.
+    pub warm_semaphore: Arc<Semaphore>,
+    /// Monotonic source of warm job ids.
+    pub warm_seq: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -103,6 +111,9 @@ impl AppState {
             knobs,
             egress: Arc::new(Semaphore::new(EGRESS_CONCURRENCY)),
             inflight: Arc::new(Mutex::new(HashMap::new())),
+            warm_jobs: Arc::new(RwLock::new(HashMap::new())),
+            warm_semaphore: Arc::new(Semaphore::new(crate::warm::WARM_CONCURRENCY)),
+            warm_seq: Arc::new(AtomicU64::new(0)),
         }
     }
 

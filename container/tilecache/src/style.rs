@@ -182,7 +182,7 @@ async fn vector_tile(State(state): State<AppState>, Path((source, name, z, x, y)
                 bytes: body.len() as i64,
                 blob: Some(body),
             };
-            crate::fetcher::log_cache_err(state.cache.put(&cache_source, z, x, y, &tile, now));
+            crate::fetcher::log_cache_err(state.cache.put(&cache_source, z, x, y, &tile, false, now));
             crate::fetcher::log_cache_err(state.cache.evict_to(state.knobs.cap_bytes));
             tile_response(&tile, if_none_match.as_deref())
         }

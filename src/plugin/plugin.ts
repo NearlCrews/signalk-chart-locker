@@ -1,6 +1,7 @@
 /** The plugin factory: lifecycle that launches the router container and publishes the in-process bridge. */
 
 import type { Plugin, ServerAPI } from '@signalk/server-api'
+import type { Position } from '../shared/types.js'
 import { PLUGIN_ID, PLUGIN_NAME, PLUGIN_DESCRIPTION } from '../shared/plugin-id.js'
 import { requireContainerManager, getContainerManager, ensureRuntimeReady } from '../runtime/container-manager.js'
 import { ROUTER_CONTAINER_NAME, ROUTER_INTERNAL_PORT, DEFAULT_ROUTER_TAG, buildRouterConfig, probeRouterHealth } from '../runtime/router-container.js'
@@ -8,12 +9,25 @@ import { TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT, DEFAULT_TILECACHE_TA
 import { buildSourcePayload, pushTilecacheConfig } from '../runtime/tilecache-config-push.js'
 import { installRouteOnWaterBridge, removeRouteOnWaterBridge, createRouterBridge } from '../bridge/route-on-water-bridge.js'
 import { registerTileRoutes, type TileRouter } from '../http/tile-routes.js'
+import { registerPrewarmRoutes, type PrewarmRouter } from '../http/prewarm-routes.js'
+import { ChartRegistry, registerChartProvider, type ChartRouteApp } from '../charts/chart-registry.js'
+import { type DiscoveryHandle, startDiscovery } from '../charts/discovery.js'
+import { isThirdPartyPmtilesEnabled } from '../charts/mutual-exclusion.js'
+import { registerPmtilesServeRoute, type ServeRouter } from '../http/pmtiles-routes.js'
+import { registerChartManagementRoutes, type ManagementRouter } from '../http/chart-management-routes.js'
+import { OverrideStore } from '../charts/overrides.js'
+import { ensureApiAdminGate } from '../shared/admin-gate.js'
+import { join, resolve } from 'node:path'
+import { createPositionWarmer, type PositionWarmer } from '../runtime/position-warmer.js'
+import { loadPrewarmConfig } from '../runtime/prewarm-store.js'
+import { warmRegion } from '../runtime/tilecache-client.js'
 
 interface CompanionConfig {
   imageTag?: string
   tilecacheImageTag?: string
   tilecacheCacheCapBytes?: number
   tilecacheCacheVolumeSource?: string
+  chartsPath?: string
 }
 
 export function createPlugin (app: ServerAPI): Plugin {
@@ -28,6 +42,49 @@ export function createPlugin (app: ServerAPI): Plugin {
   // failure never blocks the router or the bridge. Its address is held for the proxy routes.
   let tilecacheLaunched = false
   let tilecacheAddress: string | null = null
+  // Position-warm lifecycle state (factory scope, like launched and tilecacheAddress).
+  let positionUnsub: (() => void) | null = null
+  let warmer: PositionWarmer | null = null
+
+  interface ConfigAwareApp { config: { configPath: string } }
+  const configPath = (app as unknown as ConfigAwareApp).config.configPath
+  const registry = new ChartRegistry()
+  const overrides = new OverrideStore(join((app as unknown as { getDataDirPath: () => string }).getDataDirPath(), 'pmtiles-overrides.json'))
+  let discovery: DiscoveryHandle | undefined
+  // The charts directory resolved from the active config, captured so the override re-apply closure
+  // (Task 11) rescans the configured directory, not the default. Set in setupCharts.
+  let activeChartsDir: string | undefined
+  // Single-flight guard: at most one rescan runs at a time. The override-triggered rescan and the
+  // discovery watcher can both call rescanCharts on the same ChartRegistry; concurrent runs are
+  // redundant and can race. A new trigger while a rescan is in progress is a no-op (the running
+  // rescan will see the latest overrides because it reads them at execution time).
+  let rescanInProgress = false
+
+  function chartsDirFor (config: CompanionConfig): string {
+    const override = config.chartsPath?.trim()
+    return override ? resolve(configPath, override) : join(configPath, 'charts', 'pmtiles')
+  }
+
+  async function setupCharts (config: CompanionConfig): Promise<void> {
+    if (isThirdPartyPmtilesEnabled(configPath)) {
+      return
+    }
+    activeChartsDir = chartsDirFor(config)
+    overrides.load()
+    registerChartProvider(app as unknown as ChartRouteApp, registry)
+    discovery = await startDiscovery({
+      chartsDir: activeChartsDir,
+      registry,
+      namer: overrides.namer(),
+      onError: (message) => app.debug(`Chart discovery: ${message}`)
+    })
+  }
+
+  function teardownCharts (): void {
+    discovery?.stop()
+    discovery = undefined
+    registry.clear()
+  }
 
   async function doStart (config: CompanionConfig): Promise<void> {
     app.setPluginStatus('Starting...')
@@ -73,10 +130,31 @@ export function createPlugin (app: ServerAPI): Plugin {
       app.debug('Tilecache container did not start; tile caching is disabled:', err)
     }
 
-    app.setPluginStatus(`Router at ${address}${tilecacheAddress !== null ? `, tilecache at ${tilecacheAddress}` : ''}.`)
+    warmer = createPositionWarmer({
+      getConfig: () => loadPrewarmConfig(app.getDataDirPath()),
+      warm: async (bbox, sources, minzoom, maxzoom) => {
+        const address = tilecacheAddress
+        if (address === null) return null
+        return warmRegion(address, { bbox, sources, minzoom, maxzoom })
+      }
+    })
+    positionUnsub = app.streambundle.getSelfBus('navigation.position' as unknown as Parameters<typeof app.streambundle.getSelfBus>[0])
+      .onValue((delta: { value: unknown }) => { warmer?.onPosition(delta.value as Position) })
+
+    await setupCharts(config)
+
+    if (isThirdPartyPmtilesEnabled(configPath)) {
+      app.setPluginStatus(`Router at ${address}${tilecacheAddress !== null ? `, tilecache at ${tilecacheAddress}` : ''}. PMTiles charts disabled: signalk-pmtiles-plugin is enabled, disable it to use the companion chart provider.`)
+    } else if (registry.records().length > 0 || discovery !== undefined) {
+      app.setPluginStatus(`Router at ${address}${tilecacheAddress !== null ? `, tilecache at ${tilecacheAddress}` : ''}.`)
+    }
   }
 
   async function doStop (): Promise<void> {
+    if (positionUnsub) { positionUnsub(); positionUnsub = null }
+    warmer = null
+    teardownCharts()
+
     removeRouteOnWaterBridge()
 
     // Clear the tilecache address first so the proxy routes report unavailable, then stop its container.
@@ -138,6 +216,12 @@ export function createPlugin (app: ServerAPI): Plugin {
           title: 'External tile cache drive (optional)',
           description: 'Host path of a USB SSD or NVMe drive to hold the tile cache. Leave blank to keep the cache on the Signal K data directory.',
           default: ''
+        },
+        chartsPath: {
+          type: 'string',
+          title: 'PMTiles charts directory',
+          description: 'Directory holding .pmtiles charts, relative to the Signal K config path. Leave blank for the default charts/pmtiles.',
+          default: ''
         }
       }
     }),
@@ -160,8 +244,30 @@ export function createPlugin (app: ServerAPI): Plugin {
     },
     // Mount the tile and style proxy on the Signal K server so every device reaches the cached tiles
     // through the server, keeping the container plugin-only. The routes read the live tilecache address.
+    // The prewarm routes are admin-gated (fail closed if the security strategy is absent); the tile
+    // routes remain open so every device can fetch cached tiles without authentication. Additional
+    // route groups (PMTiles serve and management, v3) compose by mounting alongside these two.
     registerWithRouter (router) {
       registerTileRoutes(router as unknown as TileRouter, () => tilecacheAddress)
+      registerPrewarmRoutes(router as unknown as PrewarmRouter, app, () => tilecacheAddress)
+      registerPmtilesServeRoute(router as unknown as ServeRouter, registry)
+      if (ensureApiAdminGate(app)) {
+        registerChartManagementRoutes(
+          router as unknown as ManagementRouter,
+          registry,
+          overrides,
+          () => {
+            if (rescanInProgress) return
+            rescanInProgress = true
+            ;(async () => {
+              const { rescanCharts } = await import('../charts/discovery.js')
+              await rescanCharts({ chartsDir: activeChartsDir ?? chartsDirFor({}), registry, namer: overrides.namer() })
+            })()
+              .catch((err: unknown) => app.debug(`chart rescan after override failed: ${String(err)}`))
+              .finally(() => { rescanInProgress = false })
+          }
+        )
+      }
     }
   }
 }
