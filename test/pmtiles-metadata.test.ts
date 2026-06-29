@@ -59,3 +59,21 @@ test('a degenerate bounds box is dropped, not an error', async () => {
     assert.equal(result.decoded.bounds, undefined)
   })
 })
+
+test('a truncated file is rejected with a clear error message', async () => {
+  const truncated = Buffer.alloc(4)
+  await withFixture(truncated, async (file) => {
+    const result = await decodePmtilesArchive(file)
+    assert.equal(result.ok, false)
+    if (result.ok) return
+    assert.match(result.error, /(bad magic|cannot read archive)/i)
+  })
+})
+
+test('a nonexistent file is rejected with a cannot read archive error', async () => {
+  const nonexistent = '/tmp/does-not-exist-pmtiles-' + Date.now() + '.pmtiles'
+  const result = await decodePmtilesArchive(nonexistent)
+  assert.equal(result.ok, false)
+  if (result.ok) return
+  assert.match(result.error, /cannot read archive/i)
+})
