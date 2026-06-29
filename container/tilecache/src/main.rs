@@ -17,6 +17,7 @@ async fn main() {
     let port = tilecache_port();
     let db = std::env::var("TILECACHE_DB").unwrap_or_else(|_| "/data/tilecache.sqlite".to_string());
     let cap = std::env::var("TILECACHE_CAP_BYTES").ok().and_then(|s| s.parse().ok()).unwrap_or(2_147_483_648i64);
+    let scroll_ttl_secs = std::env::var("TILECACHE_SCROLL_TTL_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(0i64);
     // Production never sets this; it exists for a same-host dev or test against a private upstream.
     let allow_private = std::env::var("TILECACHE_ALLOW_PRIVATE").as_deref() == Ok("1");
 
@@ -26,8 +27,10 @@ async fn main() {
         }
     }
     let cache = Arc::new(TileCache::open(Path::new(&db)).expect("open the tile cache DB"));
-    let knobs = Knobs { cap_bytes: cap, allow_private_egress: allow_private, ..Default::default() };
+    let knobs = Knobs { cap_bytes: cap, scroll_ttl_secs, allow_private_egress: allow_private, ..Default::default() };
     let state = AppState::new(cache, knobs);
+
+    tokio::spawn(binnacle_tilecache::sweep::run_sweeper(state.clone()));
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await.expect("bind the tilecache port");
     axum::serve(listener, app(state))
