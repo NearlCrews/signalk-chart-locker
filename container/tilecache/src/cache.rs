@@ -15,6 +15,12 @@ use std::sync::{Mutex, MutexGuard};
 /// within a schema version, not across a bump. A warm can always be re-run.
 const SCHEMA_VERSION: i64 = 3;
 
+/// Rows deleted per chunk by the age sweep and the clear, so a large reclaim releases the single
+/// connection lock between chunks rather than stalling all tile serving in one long DELETE. A plain
+/// `DELETE ... LIMIT` is unavailable (the bundled SQLite is built without
+/// SQLITE_ENABLE_UPDATE_DELETE_LIMIT), so the delete targets a bounded `rowid IN (SELECT ... LIMIT)`.
+const DELETE_CHUNK: i64 = 4096;
+
 /// A stored tile, or a negative-cache marker when `blob` is `None` (a 404 or 204 from upstream). The
 /// blob is a ref-counted `Bytes`, so serving a cache hit clones a handle, not the bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +127,12 @@ impl TileCache {
             )?;
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
+        // Speeds the age sweep and the LRU window without a schema-version wipe: created on every open
+        // so an existing cache gains it. Partial on pinned = 0 because only scroll rows are swept or
+        // LRU-evicted, which also bounds the index write cost on pinned writes.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_tiles_scroll_lru ON tiles(last_access) WHERE pinned = 0;",
+        )?;
         Ok(())
     }
 
@@ -231,6 +243,75 @@ impl TileCache {
             eprintln!("tilecache: cap exceeded ({} bytes > {} limit); all remaining tiles are pinned", inner.total_bytes, cap_bytes);
         }
         Ok(())
+    }
+
+    /// Delete unpinned scroll rows whose `last_access` is older than `now - ttl_secs`, in bounded
+    /// chunks that release the lock between chunks. A no-op when `ttl_secs <= 0`. Never deletes a
+    /// pinned row. Decrements `total_bytes` by the freed bytes; leaves `pinned_bytes` unchanged.
+    /// Returns the freed bytes and the freed row count. Relies on the invariant that an unpinned row
+    /// (`pinned = 0`) carries no `region_tiles` join row, so deleting it leaves no orphan join row:
+    /// the pin paths set `pinned = 1` and the join row together, and `delete_region` clears both.
+    pub fn sweep_aged_unpinned(&self, ttl_secs: i64, now: i64) -> rusqlite::Result<(i64, i64)> {
+        if ttl_secs <= 0 {
+            return Ok((0, 0));
+        }
+        let cutoff = now - ttl_secs;
+        let mut freed_bytes = 0i64;
+        let mut freed_rows = 0i64;
+        loop {
+            let mut inner = self.lock();
+            // The SUM and the DELETE share the identical subquery under the held lock, so they target
+            // the same rowset; the ORDER BY makes the LIMIT deterministic (oldest first).
+            let chunk_bytes: i64 = inner.conn.query_row(
+                "SELECT COALESCE(SUM(bytes), 0) FROM tiles WHERE rowid IN \
+                 (SELECT rowid FROM tiles WHERE pinned = 0 AND last_access < ?1 ORDER BY last_access ASC LIMIT ?2)",
+                params![cutoff, DELETE_CHUNK],
+                |r| r.get(0),
+            )?;
+            let n = inner.conn.execute(
+                "DELETE FROM tiles WHERE rowid IN \
+                 (SELECT rowid FROM tiles WHERE pinned = 0 AND last_access < ?1 ORDER BY last_access ASC LIMIT ?2)",
+                params![cutoff, DELETE_CHUNK],
+            )? as i64;
+            inner.total_bytes -= chunk_bytes;
+            drop(inner);
+            freed_bytes += chunk_bytes;
+            freed_rows += n;
+            if n < DELETE_CHUNK {
+                break;
+            }
+        }
+        Ok((freed_bytes, freed_rows))
+    }
+
+    /// Delete every unpinned scroll row, in bounded chunks that release the lock between chunks. Never
+    /// deletes a pinned row, so `total_bytes` settles at `pinned_bytes`. Leaves `pinned_bytes`
+    /// unchanged. Returns the freed bytes and the freed row count. Like the age sweep, this relies on
+    /// the invariant that an unpinned row carries no `region_tiles` join row, so it leaves none orphaned.
+    pub fn clear_unpinned(&self) -> rusqlite::Result<(i64, i64)> {
+        let mut freed_bytes = 0i64;
+        let mut freed_rows = 0i64;
+        loop {
+            let mut inner = self.lock();
+            let chunk_bytes: i64 = inner.conn.query_row(
+                "SELECT COALESCE(SUM(bytes), 0) FROM tiles WHERE rowid IN \
+                 (SELECT rowid FROM tiles WHERE pinned = 0 LIMIT ?1)",
+                params![DELETE_CHUNK],
+                |r| r.get(0),
+            )?;
+            let n = inner.conn.execute(
+                "DELETE FROM tiles WHERE rowid IN (SELECT rowid FROM tiles WHERE pinned = 0 LIMIT ?1)",
+                params![DELETE_CHUNK],
+            )? as i64;
+            inner.total_bytes -= chunk_bytes;
+            drop(inner);
+            freed_bytes += chunk_bytes;
+            freed_rows += n;
+            if n < DELETE_CHUNK {
+                break;
+            }
+        }
+        Ok((freed_bytes, freed_rows))
     }
 
     /// Store a batch of warm tiles pinned, in one transaction, with an explicit pre-store budget check.
@@ -529,6 +610,18 @@ impl TileCache {
             "SELECT source, AVG(bytes) FROM tiles WHERE status = 200 AND blob IS NOT NULL GROUP BY source ORDER BY source",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))?;
+        rows.collect()
+    }
+
+    /// The total stored bytes and the row count per source over UNPINNED scroll rows only, so the
+    /// cache-management breakdown reports what the scroll cache holds by source. Computed on demand;
+    /// `/cache/stats` is called rarely.
+    pub fn per_source_totals(&self) -> rusqlite::Result<Vec<(String, i64, i64)>> {
+        let inner = self.lock();
+        let mut stmt = inner.conn.prepare(
+            "SELECT source, COALESCE(SUM(bytes), 0), COUNT(*) FROM tiles WHERE pinned = 0 GROUP BY source ORDER BY source",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))?;
         rows.collect()
     }
 
@@ -936,5 +1029,79 @@ mod tests {
             "a free zero-byte row is pinned even when pinned_bytes already exceeds the budget",
         );
         assert_eq!(c.stats().unwrap().2, 100, "a zero-byte row adds nothing to pinned_bytes");
+    }
+
+    #[test]
+    fn open_creates_the_scroll_lru_partial_index() {
+        let (_f, c) = open();
+        let inner = c.lock();
+        let count: i64 = inner
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_tiles_scroll_lru'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "the partial scroll-LRU index exists after open");
+    }
+
+    #[test]
+    fn sweep_aged_unpinned_deletes_old_scroll_rows_keeps_fresh_and_pinned() {
+        let (_f, c) = open();
+        // Pinned region tile at an old access time: must survive regardless of age. Pin through pin()
+        // so pinned_bytes is tracked (raw put with pinned = true sets the column but not the counter).
+        c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, 0).unwrap();
+        c.pin("s", 0, 0, 0).unwrap();
+        // Old unpinned scroll tile (last_access = 100): swept.
+        c.put("s", 0, 0, 1, &tile(20, 200, Some(vec![0; 20])), false, 100).unwrap();
+        // Fresh unpinned scroll tile (last_access = 10_000): kept.
+        c.put("s", 0, 0, 2, &tile(30, 200, Some(vec![0; 30])), false, 10_000).unwrap();
+        // now = 10_000, ttl = 1000, cutoff = 9000. Only the last_access=100 row is older than cutoff.
+        let (freed_bytes, freed_rows) = c.sweep_aged_unpinned(1000, 10_000).unwrap();
+        assert_eq!((freed_bytes, freed_rows), (20, 1), "exactly the one old scroll tile is freed");
+        assert!(c.get("s", 0, 0, 0).unwrap().is_some(), "the pinned tile survives");
+        assert!(c.get("s", 0, 0, 1).unwrap().is_none(), "the old scroll tile is swept");
+        assert!(c.get("s", 0, 0, 2).unwrap().is_some(), "the fresh scroll tile survives");
+        let (_rows, total, pinned) = c.stats().unwrap();
+        assert_eq!(total, 40, "total decremented by the freed 20: 10 pinned + 30 fresh");
+        assert_eq!(pinned, 10, "pinned_bytes unchanged");
+    }
+
+    #[test]
+    fn sweep_aged_unpinned_is_a_no_op_when_ttl_is_zero() {
+        let (_f, c) = open();
+        c.put("s", 0, 0, 1, &tile(20, 200, Some(vec![0; 20])), false, 1).unwrap();
+        let (freed_bytes, freed_rows) = c.sweep_aged_unpinned(0, 10_000).unwrap();
+        assert_eq!((freed_bytes, freed_rows), (0, 0), "ttl 0 disables the sweep");
+        assert!(c.get("s", 0, 0, 1).unwrap().is_some(), "the row survives a disabled sweep");
+    }
+
+    #[test]
+    fn clear_unpinned_deletes_all_scroll_rows_and_keeps_pinned() {
+        let (_f, c) = open();
+        // Pin through pin() so pinned_bytes is tracked (raw put with pinned = true sets the column only).
+        c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, 0).unwrap();
+        c.pin("s", 0, 0, 0).unwrap(); // pinned
+        c.put("s", 0, 0, 1, &tile(20, 200, Some(vec![0; 20])), false, 5).unwrap(); // scroll
+        c.put("s", 0, 0, 2, &tile(30, 200, Some(vec![0; 30])), false, 9_999).unwrap(); // fresh scroll
+        let (freed_bytes, freed_rows) = c.clear_unpinned().unwrap();
+        assert_eq!((freed_bytes, freed_rows), (50, 2), "both scroll tiles freed regardless of age");
+        assert!(c.get("s", 0, 0, 0).unwrap().is_some(), "the pinned tile survives the clear");
+        let (_rows, total, pinned) = c.stats().unwrap();
+        assert_eq!(total, 10, "total equals pinned after the clear");
+        assert_eq!(pinned, 10, "pinned_bytes unchanged");
+    }
+
+    #[test]
+    fn per_source_totals_sums_scroll_rows_per_source() {
+        let (_f, c) = open();
+        c.put("a", 0, 0, 0, &tile(100, 200, Some(vec![0; 100])), false, 1).unwrap();
+        c.put("a", 0, 0, 1, &tile(40, 200, Some(vec![0; 40])), false, 1).unwrap();
+        c.put("b", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, 1).unwrap();
+        // A pinned row is excluded from the scroll totals.
+        c.put("a", 0, 0, 2, &tile(1000, 200, Some(vec![0; 1000])), true, 1).unwrap();
+        let totals = c.per_source_totals().unwrap();
+        assert_eq!(totals, vec![("a".to_string(), 140, 2), ("b".to_string(), 10, 1)]);
     }
 }
