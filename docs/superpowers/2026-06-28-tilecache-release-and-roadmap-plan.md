@@ -88,18 +88,48 @@ These were left out of v1 deliberately; pick them up when they matter:
 - Stale-tile revalidation is not single-flighted (the egress semaphore bounds the herd to 8). Coalesce
   it if a revalidation herd ever shows up.
 
-## Next roadmap milestones (after v1 ships)
+## Tile cache v2 and v3 status (2026-06-28: DONE, on feat/tilecache-v2-v3)
 
-In priority order, each its own spec and plan:
+Both milestones are implemented and on `feat/tilecache-v2-v3`, pending the owner-run release
+sequence in step 2 above.
 
-1. v2 tile cache: prewarm a manual cruising bounding box, plus a throttled off-plan position-warm when
-   the vessel leaves the box. Bounded writes for microSD. Builds on the v1 cache and proxy.
-2. v3 tile cache: PMTiles ETag range-serving, so a remote PMTiles archive range-serves with strong
-   ETags and the webapp `cache: 'no-store'` workaround retires. Most webapp coupling, least standalone
-   gain, so it is last.
-3. Tier-2: a boat-wide local time-series store with bundled SQLite, replacing the external QuestDB the
-   dashboard depends on. See `docs/superpowers/roadmap/2026-06-27-cross-plugin-migration-candidates.md`.
-4. M3 tail: run the prep pipeline over more NOAA ENC regions. Data-gated and operational, not code.
+**v2 (prewarm box and position-warm):** the manual cruising bounding-box prewarm and a throttled
+off-plan position-warm when the vessel leaves the box. Server-side cap enforcement, box pinning so
+a prewarm never evicts cached tiles, a per-source average-size tracker, a concurrent warm-job cap,
+and a lazy tile enumerator. Bounded writes for microSD.
+
+**v3 (PMTiles chart provider):** a local PMTiles chart provider in the Node plugin (not the
+container), serving PMTiles archives with a strong file-identity ETag and HTTP Range support. The
+webapp `cache: 'no-store'` workaround retires. The provider supersedes the third-party
+`signalk-pmtiles-plugin` via real mutual exclusion enforced at plugin start. The egress tilecache
+container is untouched by v3: serving local charts from it would either add a redundant cache layer
+or expose the Signal K config tree to the internet-facing container.
+
+## Still-pending owner-run release sequence
+
+(Same as step 2 above; reproduced here for clarity.)
+
+1. Publish `signalk-binnacle-chart-sources` at a real version (start at 0.1.0), then switch both
+   consumers off the dev `file:` link to a version range.
+2. Push the tilecache image to GHCR (after the desk verification in step 1 above). Push the router
+   image if not already current.
+3. Tag and release crows-nest 0.11.0 (the M4 cutover branch is on `main`, bumped, not yet tagged).
+4. Tag and release the companion plugin and the chartplotter webapp when their own checklists pass.
+
+## Deferred future items
+
+These were left out of v1, v2, and v3 deliberately; pick them up when they matter:
+
+- NASA GIBS ocean fields: fetch directly today (they carry a `{date}`, so they need v2-style daily
+  re-push to cache correctly).
+- Basemap sprite: fetches directly (small icon-set degradation; geometry and glyphs are proxied).
+- Glyph ranges: proxied but not persistently cached, so offline label text can degrade. Add a small
+  blob cache if offline labels matter.
+- Stale-tile revalidation: not single-flighted (the egress semaphore bounds the herd to 8). Coalesce
+  if a revalidation herd ever shows up in practice.
+- Tier-2: a boat-wide local time-series store with bundled SQLite, replacing the external QuestDB the
+  dashboard depends on. See `docs/superpowers/roadmap/2026-06-27-cross-plugin-migration-candidates.md`.
+- M3 tail: run the prep pipeline over more NOAA ENC regions. Data-gated and operational, not code.
 
 ## Resume pointers
 
