@@ -1,4 +1,4 @@
-/** Pure decision logic for the off-plan position-warm: when the vessel travels outside the regionsed box,
+/** Pure decision logic for the off-plan position-warm: when the vessel travels outside the saved region,
  * keep a small radius around it warm, throttled and offline-aware. The Signal K read stays in the plugin;
  * this module decides, the caller performs the warm. */
 
