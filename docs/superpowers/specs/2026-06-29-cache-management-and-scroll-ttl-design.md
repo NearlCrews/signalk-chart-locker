@@ -67,12 +67,14 @@ Three layers, each extending an existing seam.
    set before the tokio sweep task's first tick. The plugin sets this env from the store value when it
    launches the container, exactly as it sets the cap env. Without this seed the startup sweep would
    race the plugin's first `/config` push and run as a no-op on cold boot.
-3. `/config` field. Add `scroll_ttl_secs: Option<i64>` to the existing `ConfigBody` and set
-   `live_scroll_ttl_secs` in the `config()` handler, alongside the cap and budget fields. This is the
-   single live-update seam; there is no separate set-TTL route. A live TTL edit re-posts `/config`,
-   which also rebuilds the source allowlist and clears the style state; that churn is acceptable
-   because TTL edits are rare, and reusing one seam is worth more than avoiding an occasional basemap
-   style refetch.
+3. Start `/config` field and a dedicated live route. Add `scroll_ttl_secs: Option<i64>` to the
+   existing `ConfigBody` and set `live_scroll_ttl_secs` in the `config()` handler, alongside the cap
+   and budget fields, so the start `/config` push carries the TTL with no extra round-trip. For a live
+   TTL edit, add a dedicated `POST /cache/scroll-ttl { ttlSecs }` route that sets only
+   `live_scroll_ttl_secs`. The live edit cannot re-post `/config`, because `/config`'s `sources` is
+   required and replaces the allowlist while also clearing the learned style state, so a partial
+   `/config` would wipe the allowlist; the dedicated route avoids that churn. Start uses `/config`,
+   the live edit uses the dedicated route.
 4. Age sweep. A new function in `cache.rs` that deletes rows where `pinned = 0` and
    `last_access < (now - ttl)`, a no-op when the TTL is zero. It shares only the `pinned = 0` guard
    with the existing windowed LRU eviction (`evict_unpinned_within`); the predicate and delete shape
@@ -125,8 +127,9 @@ converts days to seconds before posting.
 3. New and changed routes (all admin-gated and fail-closed, like the existing regions routes in
    `src/http/regions-routes.ts`):
    - `POST /api/cache/config { ttlDays }`: validates an integer in range (0 through 365), writes it
-     to the regions-store through `saveRegionsStore` so it survives a restart, and re-posts `/config`
-     to the container with the new `scrollTtlSecs`. This is the live-edit path.
+     to the regions-store through `saveRegionsStore` so it survives a restart, and posts
+     `{ ttlSecs }` to the container's dedicated `POST /cache/scroll-ttl` route. This is the live-edit
+     path.
    - `POST /api/cache/clear-scroll`: calls the new container clear route, returns
      `{ freedBytes, freedRows }`.
    - `GET /api/cache/stats`: today this is a pure `relay()` of the container stats. It changes to
@@ -165,8 +168,8 @@ non-breaking.
 ## Data flow
 
 - TTL set: panel `UnitField` commit to `setCacheConfig(ttlDays)` to `POST /api/cache/config` to the
-  plugin writes the regions-store and re-posts `/config` with `scrollTtlSecs` to the container, which
-  updates `live_scroll_ttl_secs`. The next scheduled sweep uses the new window.
+  plugin writes the regions-store and posts `{ ttlSecs }` to the container's `POST /cache/scroll-ttl`,
+  which updates `live_scroll_ttl_secs`. The next scheduled sweep uses the new window.
 - Sweep: container interval tick to age-sweep function to chunked delete of aged unpinned rows,
   decrementing `total_bytes`. No plugin or webapp involvement. Surfaced only through the next stats
   read.
@@ -240,11 +243,14 @@ Webapp (`vitest`):
 
 ## Consistency notes
 
-- TTL persistence and the live edit follow the position-warm store-and-route pattern, so panel-edited
-  cache settings use one mechanism. The one deliberate divergence (folding the `ttlDays` read into the
-  stats response rather than a separate `GET /api/cache/config`) is documented above.
-- The container live update reuses the single existing `/config` seam used by the cap and the
-  budgets, not a new container route, except the dedicated clear route which has no config analogue.
+- TTL persistence follows the position-warm store pattern (the value lives in the regions-store), so
+  panel-edited cache settings use one persistence mechanism. Two deliberate divergences are documented
+  above: folding the `ttlDays` read into the stats response rather than a separate
+  `GET /api/cache/config`, and using a dedicated `POST /cache/scroll-ttl` for the live edit rather than
+  re-posting `/config`.
+- The start `/config` push carries the TTL through the existing seam used by the cap and the budgets.
+  The two dedicated container routes (`POST /cache/scroll-ttl` and `POST /cache/clear-scroll`) exist
+  because neither fits the allowlist-replacing `/config` body.
 - The age sweep reuses the `pinned = 0` evictability guard already in `cache.rs`; it does not reuse
   the windowed-size delete, which is a different operation.
 - The panel section reuses the existing stat layout, `UnitField`, ghost button, and `InlineConfirm`
