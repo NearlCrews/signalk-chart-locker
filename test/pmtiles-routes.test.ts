@@ -13,8 +13,12 @@ class FakeRes extends PassThrough {
   statusCode = 0
   outHeaders: Record<string, string> = {}
   headersSent = false
-  status (c: number): this { this.statusCode = c; return this }
+  status (c: number): this { this.statusCode = c; this.headersSent = true; return this }
   setHeader (n: string, v: string): void { this.outHeaders[n.toLowerCase()] = v }
+  override end (chunk?: any, ...args: any[]): this {
+    this.headersSent = true
+    return super.end(chunk, ...args)
+  }
 }
 
 function collect (): { routes: Record<string, (req: ServeRequest, res: FakeRes) => void>, registry: ChartRegistry } {
@@ -131,6 +135,20 @@ test('an If-None-Match that matches returns 304 even when a Range header is pres
     routes['/pmtiles/:file'](req('sf.pmtiles', { range: 'bytes=0-6', 'if-none-match': etag }), res)
     await new Promise((resolve) => setImmediate(resolve))
     assert.equal(res.statusCode, 304, 'If-None-Match wins over Range')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('an If-None-Match wildcard returns 304 when the resource exists', async () => {
+  const { routes, registry } = collect()
+  const { record, cleanup } = await fixtureRecord()
+  registry.set(record)
+  try {
+    const res = new FakeRes()
+    routes['/pmtiles/:file'](req('sf.pmtiles', { 'if-none-match': '*' }), res)
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(res.statusCode, 304)
   } finally {
     await cleanup()
   }

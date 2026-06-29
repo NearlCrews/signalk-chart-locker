@@ -73,6 +73,8 @@ function serve (req: ServeRequest, res: ServeResponse, registry: ChartRegistry):
   // a TOCTOU race where an async gap would let an attacker swap the file between check and open.
   let resolvedPath: string
   try {
+    // Intentionally synchronous: the check and stream-open happen in the same event loop turn, minimizing
+    // the TOCTOU window; the per-request stat and realpath cost is sub-millisecond on local filesystem.
     resolvedPath = realpathSync(filePath)
   } catch {
     res.status(404).end('Not found')
@@ -85,6 +87,8 @@ function serve (req: ServeRequest, res: ServeResponse, registry: ChartRegistry):
   let size: number
   let etag: string
   try {
+    // Intentionally synchronous: the check and stream-open happen in the same event loop turn, minimizing
+    // the TOCTOU window; the per-request stat and realpath cost is sub-millisecond on local filesystem.
     const info = statSync(filePath, { bigint: true })
     size = Number(info.size)
     etag = `"${info.size}-${info.mtimeNs}"`
@@ -98,10 +102,10 @@ function serve (req: ServeRequest, res: ServeResponse, registry: ChartRegistry):
   res.setHeader('Content-Type', 'application/octet-stream')
 
   // If-None-Match takes precedence over Range (RFC 9110): a matching validator returns 304 regardless of a
-  // Range header, rather than a 206.
+  // Range header, rather than a 206. The wildcard '*' means any representation exists.
   const rangeHeader = header(req.headers.range)
   const ifNoneMatch = header(req.headers['if-none-match'])
-  if (ifNoneMatch === etag) {
+  if (ifNoneMatch === '*' || ifNoneMatch === etag) {
     res.status(304).end()
     return
   }
