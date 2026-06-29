@@ -62,7 +62,9 @@ delegated to the installed `signalk-container` plugin.
   the warm-job engine: a server-side budget gate (R is a ceiling on the pinned region bytes, not space
   pre-reserved from the scroll cache), box pinning so a region download evicts only unpinned scroll
   tiles and never a pinned tile, a per-source average-size tracker, a concurrent warm-job cap, and a
-  lazy tile enumerator.
+  lazy tile enumerator. It also runs a scroll-tile age sweep (a configurable TTL reclaims unpinned
+  tiles not viewed within the window, at startup and on an hourly timer) and an on-demand clear of all
+  unpinned scroll tiles, both in bounded chunks and both leaving pinned tiles untouched.
 - `docs/superpowers/specs/`, `docs/superpowers/plans/`, `docs/superpowers/reviews/`: design
   specs, plans, and review records. The router-engine milestone docs (M1 through M4) are kept as
   historical records; the routing work was removed 2026-06-29.
