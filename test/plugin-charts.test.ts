@@ -62,7 +62,10 @@ test('doStart does not register charts when the third-party plugin is enabled, a
     await plugin.start({}, () => {})
     await new Promise((resolve) => setTimeout(resolve, 50))
     assert.equal(providers.length, 0)
-    assert.equal(app.status.some((s) => /signalk-pmtiles-plugin/i.test(s)), true)
+    const statusMessage = app.status.find((s) => /signalk-pmtiles-plugin/i.test(s))
+    assert(statusMessage !== undefined, 'Status should contain pmtiles-plugin conflict note')
+    assert(/127\.0\.0\.1:8080/.test(statusMessage), 'Status should contain router address')
+    assert(/signalk-pmtiles-plugin/i.test(statusMessage), 'Status should contain conflict note')
   } finally {
     await plugin.stop()
     clearGlobals()

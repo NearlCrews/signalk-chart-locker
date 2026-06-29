@@ -58,7 +58,6 @@ export function createPlugin (app: ServerAPI): Plugin {
 
   async function setupCharts (config: CompanionConfig): Promise<void> {
     if (isThirdPartyPmtilesEnabled(configPath)) {
-      app.setPluginStatus('Charts disabled: signalk-pmtiles-plugin is enabled. Disable it to let the companion provide PMTiles charts.')
       return
     }
     activeChartsDir = chartsDirFor(config)
@@ -133,7 +132,9 @@ export function createPlugin (app: ServerAPI): Plugin {
 
     await setupCharts(config)
 
-    if (registry.records().length > 0 || discovery !== undefined) {
+    if (isThirdPartyPmtilesEnabled(configPath)) {
+      app.setPluginStatus(`Router at ${address}${tilecacheAddress !== null ? `, tilecache at ${tilecacheAddress}` : ''}. PMTiles charts disabled: signalk-pmtiles-plugin is enabled, disable it to use the companion chart provider.`)
+    } else if (registry.records().length > 0 || discovery !== undefined) {
       app.setPluginStatus(`Router at ${address}${tilecacheAddress !== null ? `, tilecache at ${tilecacheAddress}` : ''}.`)
     }
   }
