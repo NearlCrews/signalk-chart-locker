@@ -11,6 +11,7 @@ export interface FixtureOptions {
   minLatE7?: number
   maxLonE7?: number
   maxLatE7?: number
+  centerZoom?: number
   metadata?: unknown
 }
 
@@ -46,7 +47,7 @@ export function buildPmtilesFixture (opts: FixtureOptions = {}): Buffer {
   header.writeInt32LE(opts.minLatE7 ?? 370000000, 106) // 37.0
   header.writeInt32LE(opts.maxLonE7 ?? -1210000000, 110) // -121.0
   header.writeInt32LE(opts.maxLatE7 ?? 380000000, 114) // 38.0
-  header.writeUInt8(0, 118) // center zoom
+  header.writeUInt8(opts.centerZoom ?? 0, 118) // center zoom
   header.writeInt32LE(-1215000000, 119) // center lon
   header.writeInt32LE(375000000, 123) // center lat
   return Buffer.concat([header, meta])

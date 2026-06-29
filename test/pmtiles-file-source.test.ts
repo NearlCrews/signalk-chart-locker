@@ -33,3 +33,18 @@ test('getBytes returns only the available bytes when the range runs past end of 
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('getBytes reads a mid-file range at non-zero offset', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pmt-src-'))
+  const file = join(dir, 'a.pmtiles')
+  const fixture = buildPmtilesFixture()
+  await writeFile(file, fixture)
+  try {
+    const source = new PmtilesFileSource(file)
+    const { data } = await source.getBytes(24, 8)
+    const expected = fixture.subarray(24, 32)
+    assert.deepEqual(Buffer.from(data), expected)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

@@ -15,7 +15,10 @@ export class PmtilesFileSource implements Source {
     return this.#filePath
   }
 
-  async getBytes (offset: number, length: number): Promise<RangeResponse> {
+  async getBytes (offset: number, length: number, signal?: AbortSignal): Promise<RangeResponse> {
+    if (signal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError')
+    }
     const handle = await open(this.#filePath, 'r')
     try {
       const buffer = Buffer.alloc(length)
