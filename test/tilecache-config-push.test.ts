@@ -4,7 +4,7 @@ import { buildSourcePayload, pushTilecacheConfig, PLUGIN_PUBLIC_BASE } from '../
 import type { FetchResponse } from '../src/shared/types.js'
 
 test('buildSourcePayload carries the full registry, the public base, and the cap and budgets', () => {
-  const payload = buildSourcePayload(2_147_483_648, 1_073_741_824, 64 * 1024 * 1024)
+  const payload = buildSourcePayload(2_147_483_648, 1_073_741_824, 64 * 1024 * 1024, 0)
   assert.equal(payload.publicBase, PLUGIN_PUBLIC_BASE)
   assert.ok(payload.sources.length >= 12, 'every registry source is included')
   assert.ok(payload.sources.some((s) => s.id === 'depth-noaa-enc'))
@@ -14,10 +14,15 @@ test('buildSourcePayload carries the full registry, the public base, and the cap
   assert.equal(payload.positionWarmBudgetBytes, 64 * 1024 * 1024)
 })
 
+test('buildSourcePayload carries scrollTtlSecs', () => {
+  const payload = buildSourcePayload(100, 50, 5, 86_400)
+  assert.equal(payload.scrollTtlSecs, 86_400)
+})
+
 test('pushTilecacheConfig posts the payload to /config and reports success', async () => {
   let posted: { url: string, body: string } | undefined
   const ok: FetchResponse = { ok: true, json: async () => ({}) } as unknown as FetchResponse
-  const result = await pushTilecacheConfig('addr:8080', buildSourcePayload(2_147_483_648, 1_073_741_824, 64 * 1024 * 1024), async (url, body) => {
+  const result = await pushTilecacheConfig('addr:8080', buildSourcePayload(2_147_483_648, 1_073_741_824, 64 * 1024 * 1024, 0), async (url, body) => {
     posted = { url, body }
     return ok
   })
@@ -30,5 +35,5 @@ test('pushTilecacheConfig posts the payload to /config and reports success', asy
 })
 
 test('pushTilecacheConfig returns false on a transport failure', async () => {
-  assert.equal(await pushTilecacheConfig('addr:8080', buildSourcePayload(2_147_483_648, 1_073_741_824, 64 * 1024 * 1024), async () => { throw new Error('down') }), false)
+  assert.equal(await pushTilecacheConfig('addr:8080', buildSourcePayload(2_147_483_648, 1_073_741_824, 64 * 1024 * 1024, 0), async () => { throw new Error('down') }), false)
 })

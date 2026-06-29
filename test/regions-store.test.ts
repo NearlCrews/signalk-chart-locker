@@ -40,12 +40,24 @@ test('round-trips a saved region via saveRegionsStore and loadRegionsStore', () 
   }
   const store: RegionsStore = {
     regions: [region],
-    positionWarm: { enabled: true, radiusMeters: 3704, moveThresholdMeters: 1852, intervalSecs: 60, baseZoom: 12, sources: ['seamark'] }
+    positionWarm: { enabled: true, radiusMeters: 3704, moveThresholdMeters: 1852, intervalSecs: 60, baseZoom: 12, sources: ['seamark'] },
+    cacheScrollTtlDays: 30
   }
   saveRegionsStore(dir, store)
   const loaded = loadRegionsStore(dir)
   assert.deepEqual(loaded.regions[0], region)
   assert.equal(loaded.positionWarm.enabled, true)
+})
+
+test('the regions store defaults cacheScrollTtlDays to 30', () => {
+  assert.equal(loadRegionsStore(tmp()).cacheScrollTtlDays, 30)
+})
+
+test('cacheScrollTtlDays round-trips through save and load', () => {
+  const dir = tmp()
+  const base = loadRegionsStore(dir)
+  saveRegionsStore(dir, { ...base, cacheScrollTtlDays: 7 })
+  assert.equal(loadRegionsStore(dir).cacheScrollTtlDays, 7)
 })
 
 test('migrates a v2 bbox to a one-element regions list and drops the top-level box fields', () => {

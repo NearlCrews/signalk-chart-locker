@@ -34,6 +34,8 @@ export interface TilecacheContainerOptions {
   tag?: string
   /** Cache byte cap; defaults to 8 GiB. */
   capBytes?: number
+  /** Scroll-tile TTL in seconds, seeded into the container env so the startup sweep has a value. */
+  scrollTtlSecs?: number
   /** Host path of a user-managed external volume (USB SSD or NVMe) to hold the cache; absent leaves it on the data mount. */
   externalCacheVolumeSource?: string
 }
@@ -50,7 +52,8 @@ export function buildTilecacheConfig (opts: TilecacheContainerOptions = {}): Con
     signalkDataMount: SIGNALK_DATA_MOUNT,
     env: {
       TILECACHE_DB: TILECACHE_DB_PATH,
-      TILECACHE_CAP_BYTES: String(cap)
+      TILECACHE_CAP_BYTES: String(cap),
+      TILECACHE_SCROLL_TTL_SECS: String(opts.scrollTtlSecs ?? 0)
     }
   }
   if (opts.externalCacheVolumeSource !== undefined) {

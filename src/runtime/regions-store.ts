@@ -35,6 +35,7 @@ export interface SavedRegion {
 export interface RegionsStore {
   regions: SavedRegion[]
   positionWarm: PositionWarmSettings
+  cacheScrollTtlDays: number
 }
 
 /** Position-warm defaults: OFF (opt-in), a 2 nm radius, a 1 nm move threshold, a 60 s interval, base zoom 12. */
@@ -47,7 +48,8 @@ export const DEFAULT_REGIONS_STORE: RegionsStore = {
     intervalSecs: 60,
     baseZoom: 12,
     sources: []
-  }
+  },
+  cacheScrollTtlDays: 30
 }
 
 /** The reserved pseudo-region id under which position-warm tiles are pinned. It is carved its own
@@ -98,9 +100,11 @@ function migrateV2 (raw: Record<string, unknown>, dataDir: string): RegionsStore
   const rawPositionWarm = typeof raw['positionWarm'] === 'object' && raw['positionWarm'] !== null
     ? raw['positionWarm'] as Partial<PositionWarmSettings>
     : {}
+  const rawTtl = typeof raw['cacheScrollTtlDays'] === 'number' ? raw['cacheScrollTtlDays'] : DEFAULT_REGIONS_STORE.cacheScrollTtlDays
   const store: RegionsStore = {
     regions,
-    positionWarm: { ...DEFAULT_REGIONS_STORE.positionWarm, ...rawPositionWarm }
+    positionWarm: { ...DEFAULT_REGIONS_STORE.positionWarm, ...rawPositionWarm },
+    cacheScrollTtlDays: rawTtl
   }
   writeJsonState(join(dataDir, STORE_FILE), store)
   return store
@@ -117,9 +121,11 @@ export function loadRegionsStore (dataDir: string): RegionsStore {
   const rawPositionWarm = typeof parsed['positionWarm'] === 'object' && parsed['positionWarm'] !== null
     ? parsed['positionWarm'] as Partial<PositionWarmSettings>
     : {}
+  const rawTtl = typeof parsed['cacheScrollTtlDays'] === 'number' ? parsed['cacheScrollTtlDays'] : DEFAULT_REGIONS_STORE.cacheScrollTtlDays
   return {
     regions: rawRegions,
-    positionWarm: { ...DEFAULT_REGIONS_STORE.positionWarm, ...rawPositionWarm }
+    positionWarm: { ...DEFAULT_REGIONS_STORE.positionWarm, ...rawPositionWarm },
+    cacheScrollTtlDays: rawTtl
   }
 }
 
