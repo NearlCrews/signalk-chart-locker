@@ -54,6 +54,11 @@ export function createPlugin (app: ServerAPI): Plugin {
   // The charts directory resolved from the active config, captured so the override re-apply closure
   // (Task 11) rescans the configured directory, not the default. Set in setupCharts.
   let activeChartsDir: string | undefined
+  // Single-flight guard: at most one rescan runs at a time. The override-triggered rescan and the
+  // discovery watcher can both call rescanCharts on the same ChartRegistry; concurrent runs are
+  // redundant and can race. A new trigger while a rescan is in progress is a no-op (the running
+  // rescan will see the latest overrides because it reads them at execution time).
+  let rescanInProgress = false
 
   function chartsDirFor (config: CompanionConfig): string {
     const override = config.chartsPath?.trim()
@@ -252,10 +257,14 @@ export function createPlugin (app: ServerAPI): Plugin {
           registry,
           overrides,
           () => {
-            (async () => {
+            if (rescanInProgress) return
+            rescanInProgress = true
+            ;(async () => {
               const { rescanCharts } = await import('../charts/discovery.js')
               await rescanCharts({ chartsDir: activeChartsDir ?? chartsDirFor({}), registry, namer: overrides.namer() })
-            })().catch((err) => app.debug(`chart rescan after override failed: ${String(err)}`))
+            })()
+              .catch((err: unknown) => app.debug(`chart rescan after override failed: ${String(err)}`))
+              .finally(() => { rescanInProgress = false })
           }
         )
       }
