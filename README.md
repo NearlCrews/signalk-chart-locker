@@ -39,10 +39,12 @@ tiles. A standalone install of Binnacle is unaffected.
   fetched and cached through the Signal K server. Every device on the boat reads from the same
   cache, the same tile is never fetched more than once, and the overlays keep rendering offline
   at sea.
-- **Saved map regions.** Draw a cruising box in the Binnacle chartplotter and download the shared
-  cache before leaving internet coverage. A live byte estimate is gated against the cache
-  capacity, the saved region is pinned and never evicted, and writes are bounded for microSD
-  longevity.
+- **Saved regions.** Draw a box in the Binnacle chartplotter and download the raster overlays
+  covering it into the shared cache before leaving internet coverage. Each region is named
+  automatically by a reverse geocode, saved durably, and can be re-downloaded or deleted. A live
+  byte estimate is re-validated on the server against the saved-regions budget before the download
+  starts, so an over-budget region is refused. The region tiles are pinned and never evicted, and a
+  region never stays stuck downloading.
 - **Off-plan position-warm.** An optional throttled fill keeps a small tile radius warm around
   the vessel when it travels outside the saved region, always LRU-bounded so it never displaces
   the pinned coverage.
@@ -82,9 +84,12 @@ required for the tile cache or the PMTiles provider.
 
 **Tile cache capacity.** The plugin settings expose a GiB slider for the cache size cap. The
 default is set to about 80 percent of the free space on the Signal K data directory at the time
-the settings form loads, leaving roughly 20 percent headroom. Saved regions are pinned up to the
-reserved ceiling and are never evicted; everything else is on-demand scroll cache that uses the
-rest of the cap and is evicted least-recently-used when the cap is reached.
+the settings form loads, leaving roughly 20 percent headroom. A second GiB control sets the
+saved-regions budget, a ceiling on how much the pinned region tiles may total; leave it at 0 to
+reserve half the cap. That budget is not space taken from the scroll cache until a region is
+actually saved: the on-demand scroll cache uses the whole cap until then. A region download pins
+its tiles and evicts only unpinned scroll tiles to make room, never a pinned tile, and the scroll
+cache is evicted least-recently-used when the cap is reached.
 
 **PMTiles charts.** Place `.pmtiles` files in the server's charts folder (the same folder
 `signalk-pmtiles-plugin` uses). The companion detects and registers them automatically. If

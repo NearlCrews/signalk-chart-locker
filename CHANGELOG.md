@@ -9,9 +9,28 @@ everything below is the initial public release.
 
 ## [Unreleased]
 
+### Added
+
+- **Saved regions and region download.** Draw a box on the chart, then download the raster overlays
+  covering it into the shared boat-wide tile cache before leaving internet coverage. Each region is
+  named automatically by a reverse geocode and saved durably, with re-download and delete. The byte
+  estimate is re-validated authoritatively on the server against the saved-regions budget before the
+  download starts, so an over-budget region is refused upfront. A status reconcile on every status
+  poll, plus a sweep at startup, ensures a region never stays stuck downloading: a lost or unknown
+  job resolves to an error state the owner can retry. Reverse geocoding goes through a new
+  `/api/geocode` proxy route to the OpenStreetMap Nominatim service, behind the existing egress
+  guards.
+- **Tile cache size cap slider.** The plugin settings size the on-disk cache cap to about 80 percent
+  of the free space detected on the Signal K data directory, presented as a GiB slider. The
+  saved-regions budget is set in GiB alongside it.
+
 ### Changed
 
 - Renamed the plugin to Chart Locker (`signalk-chart-locker`).
+- **Soft-reserve tile cache.** The on-demand scroll cache uses the whole cap until a region is saved.
+  A region download pins its tiles and evicts only unpinned scroll tiles to make room, never a pinned
+  tile, so a download never drops cached region coverage. The saved-regions budget is a ceiling on how
+  much the pinned tiles may total, not space carved out of the scroll cache ahead of time.
 
 <a id="v020"></a>
 

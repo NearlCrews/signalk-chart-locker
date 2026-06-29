@@ -59,8 +59,10 @@ delegated to the installed `signalk-container` plugin.
 - `container/`: one Cargo workspace (`container/Cargo.toml`) with one member: `tilecache`.
 - `container/tilecache/`: the egress-isolated reverse proxy and disk cache for allowlisted raster
   overlays and the vector basemap. Reads and writes a microSD-aware SQLite tile cache. Includes
-  the warm-job engine: server-side cap enforcement, box pinning so a region download never evicts cached
-  tiles, a per-source average-size tracker, a concurrent warm-job cap, and a lazy tile enumerator.
+  the warm-job engine: a server-side budget gate (R is a ceiling on the pinned region bytes, not space
+  pre-reserved from the scroll cache), box pinning so a region download evicts only unpinned scroll
+  tiles and never a pinned tile, a per-source average-size tracker, a concurrent warm-job cap, and a
+  lazy tile enumerator.
 - `docs/superpowers/specs/`, `docs/superpowers/plans/`, `docs/superpowers/reviews/`: design
   specs, plans, and review records. The router-engine milestone docs (M1 through M4) are kept as
   historical records; the routing work was removed 2026-06-29.
