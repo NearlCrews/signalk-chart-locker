@@ -22,6 +22,8 @@ pub fn app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/cache/stats", get(stats))
         .route("/config", post(config))
+        .route("/cache/scroll-ttl", post(set_scroll_ttl))
+        .route("/cache/clear-scroll", post(clear_scroll))
         .route("/tile/:source/:z/:x/:y", get(tile))
         .route("/warm", post(warm_start))
         .route("/warm/:job_id", get(warm_status))
@@ -54,6 +56,13 @@ async fn stats(State(st): State<AppState>) -> Json<serde_json::Value> {
         .into_iter()
         .map(|(source, mean)| (source, serde_json::json!(mean)))
         .collect();
+    let by_source: Vec<serde_json::Value> = st
+        .cache
+        .per_source_totals()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(source, bytes, rows)| serde_json::json!({ "source": source, "bytes": bytes, "rows": rows }))
+        .collect();
     Json(serde_json::json!({
         "rows": rows,
         "bytes": bytes,
@@ -71,6 +80,7 @@ async fn stats(State(st): State<AppState>) -> Json<serde_json::Value> {
         // pw <= P.
         "regionsFreeBytes": ((r - p) - real_pinned).max(0),
         "perSourceAvgBytes": avg,
+        "bySource": by_source,
     }))
 }
 
@@ -88,6 +98,8 @@ struct ConfigBody {
     regions_budget_bytes: Option<i64>,
     #[serde(default)]
     position_warm_budget_bytes: Option<i64>,
+    #[serde(default)]
+    scroll_ttl_secs: Option<i64>,
 }
 
 /// Replace the source allowlist (and optionally the public base and the cap and budget knobs) atomically.
@@ -120,7 +132,40 @@ async fn config(State(st): State<AppState>, Json(body): Json<ConfigBody>) -> Sta
     if let Some(p) = body.position_warm_budget_bytes {
         st.live_position_warm_budget.store(p, Ordering::Relaxed);
     }
+    if let Some(t) = body.scroll_ttl_secs {
+        st.live_scroll_ttl_secs.store(t, Ordering::Relaxed);
+    }
     StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScrollTtlBody {
+    ttl_secs: i64,
+}
+
+/// POST /cache/scroll-ttl: set only the live scroll TTL. A dedicated route so a live TTL edit does
+/// not re-push the source allowlist or clear the learned style state, which POST /config does.
+async fn set_scroll_ttl(State(st): State<AppState>, Json(body): Json<ScrollTtlBody>) -> StatusCode {
+    st.live_scroll_ttl_secs.store(body.ttl_secs, Ordering::Relaxed);
+    StatusCode::NO_CONTENT
+}
+
+/// POST /cache/clear-scroll: delete every unpinned scroll tile, keeping pinned region and
+/// position-warm tiles. Runs on a blocking thread because the chunked delete is synchronous.
+async fn clear_scroll(State(st): State<AppState>) -> Response {
+    let cache = st.cache.clone();
+    match tokio::task::spawn_blocking(move || cache.clear_unpinned()).await {
+        Ok(Ok((bytes, rows))) => Json(serde_json::json!({ "freedBytes": bytes, "freedRows": rows })).into_response(),
+        Ok(Err(e)) => {
+            eprintln!("tilecache: clear_unpinned failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Err(e) => {
+            eprintln!("tilecache: clear_unpinned task failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 /// GET /cache/region/:region_id: the total bytes a region currently pins.
@@ -472,5 +517,71 @@ mod tests {
         assert!(body.contains("\"cap\":"), "stats reports the byte cap");
         assert!(body.contains("\"perSourceAvgBytes\""), "stats reports the per-source average");
         assert!(body.contains("\"s\":"), "the warmed source has an average");
+    }
+
+    #[tokio::test]
+    async fn cache_stats_reports_by_source() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_stub(hits).await;
+        let db = NamedTempFile::new().unwrap();
+        let router = app(dev_state(&db));
+        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr))).unwrap()).await.unwrap();
+        router.clone().oneshot(Request::get("/tile/s/1/0/0").body(Body::empty()).unwrap()).await.unwrap();
+        let resp = router.oneshot(Request::get("/cache/stats").body(Body::empty()).unwrap()).await.unwrap();
+        let (status, body) = body_string(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"bySource\""), "stats reports the per-source totals array");
+        assert!(body.contains("\"source\":\"s\""), "the warmed source appears in the per-source totals");
+    }
+
+    #[tokio::test]
+    async fn config_sets_the_live_scroll_ttl() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_stub(hits).await;
+        let db = NamedTempFile::new().unwrap();
+        let state = dev_state(&db);
+        let router = app(state.clone());
+        let cfg = format!(
+            r#"{{"sources":[{{"id":"s","title":"S","tileSize":256,"minzoom":0,"maxzoom":18,"attribution":"",
+                "upstream":{{"mode":"xyz","urlTemplate":"http://{addr}/img/{{z}}/{{x}}/{{y}}"}}}}],"publicBase":"/p","scrollTtlSecs":86400}}"#
+        );
+        let resp = router.oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(cfg)).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(state.live_scroll_ttl_secs.load(Ordering::Relaxed), 86_400, "the pushed TTL reaches the live field");
+    }
+
+    #[tokio::test]
+    async fn scroll_ttl_route_sets_the_live_ttl_and_sweep_uses_it() {
+        let db = NamedTempFile::new().unwrap();
+        let state = dev_state(&db);
+        state.cache.put("s", 0, 0, 0, &crate::cache::CachedTile {
+            content_type: "image/png".into(), strong_etag: "e".into(), upstream_validator: None,
+            status: 200, fetched_at: 0, last_access: 0, bytes: 10, blob: Some(bytes::Bytes::from(vec![0u8; 10])),
+        }, false, 0).unwrap();
+        let router = app(state.clone());
+        let set = router.clone().oneshot(
+            Request::post("/cache/scroll-ttl").header("content-type", "application/json")
+                .body(Body::from(r#"{"ttlSecs":1}"#)).unwrap()
+        ).await.unwrap();
+        assert_eq!(set.status(), StatusCode::NO_CONTENT);
+        assert_eq!(state.live_scroll_ttl_secs.load(Ordering::Relaxed), 1);
+        let (freed, rows) = state.cache.sweep_aged_unpinned(state.live_scroll_ttl_secs.load(Ordering::Relaxed), 1_000_000).unwrap();
+        assert_eq!((freed, rows), (10, 1));
+    }
+
+    #[tokio::test]
+    async fn clear_scroll_route_reports_freed_and_keeps_pinned() {
+        let db = NamedTempFile::new().unwrap();
+        let state = dev_state(&db);
+        state.cache.put("s", 0, 0, 0, &crate::cache::CachedTile {
+            content_type: "image/png".into(), strong_etag: "e".into(), upstream_validator: None,
+            status: 200, fetched_at: 0, last_access: 0, bytes: 25, blob: Some(bytes::Bytes::from(vec![0u8; 25])),
+        }, false, 0).unwrap();
+        let router = app(state.clone());
+        let resp = router.oneshot(Request::post("/cache/clear-scroll").body(Body::empty()).unwrap()).await.unwrap();
+        let (status, body) = body_string(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"freedBytes\":25"), "reports the freed bytes");
+        assert!(body.contains("\"freedRows\":1"), "reports the freed rows");
     }
 }

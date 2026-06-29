@@ -12,6 +12,7 @@ export interface TilecacheConfigPayload {
   capBytes: number
   regionsBudgetBytes: number
   positionWarmBudgetBytes: number
+  scrollTtlSecs: number
 }
 
 /**
@@ -28,9 +29,10 @@ export function buildSourcePayload (
   capBytes: number,
   regionsBudgetBytes: number,
   positionWarmBudgetBytes: number,
+  scrollTtlSecs: number,
   publicBase: string = PLUGIN_PUBLIC_BASE
 ): TilecacheConfigPayload {
-  return { sources: CHART_SOURCES, publicBase, capBytes, regionsBudgetBytes, positionWarmBudgetBytes }
+  return { sources: CHART_SOURCES, publicBase, capBytes, regionsBudgetBytes, positionWarmBudgetBytes, scrollTtlSecs }
 }
 
 export type PostJson = (url: string, body: string) => Promise<FetchResponse>

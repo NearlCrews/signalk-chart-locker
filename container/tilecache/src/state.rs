@@ -54,6 +54,9 @@ pub struct Knobs {
     /// Dev and test only: when true, the SSRF guard does not reject private or loopback targets, so a
     /// loopback stub upstream can be exercised. Production leaves this false.
     pub allow_private_egress: bool,
+    /// The scroll-tile TTL in seconds, seeded from the env at construction so the startup sweep has a
+    /// value before the plugin's first /config push. Zero disables the age sweep.
+    pub scroll_ttl_secs: i64,
 }
 
 impl Default for Knobs {
@@ -65,6 +68,7 @@ impl Default for Knobs {
             fresh_secs: 86_400,
             max_stale_secs: 30 * 86_400,
             allow_private_egress: false,
+            scroll_ttl_secs: 0,
         }
     }
 }
@@ -106,6 +110,9 @@ pub struct AppState {
     pub live_regions_budget: Arc<AtomicI64>,
     /// P: the position-warm reserve carved out of R. Initialized to 0, set by POST /config.
     pub live_position_warm_budget: Arc<AtomicI64>,
+    /// The live scroll-tile TTL in seconds, seeded from `knobs.scroll_ttl_secs` and updated by the
+    /// dedicated POST /cache/scroll-ttl route. Zero disables the age sweep.
+    pub live_scroll_ttl_secs: Arc<AtomicI64>,
 }
 
 impl AppState {
@@ -119,6 +126,7 @@ impl AppState {
             .expect("the rustls HTTP client builds with static webpki roots");
         // Captured before the struct literal moves `knobs` into its field.
         let cap_bytes = knobs.cap_bytes;
+        let scroll_ttl_secs = knobs.scroll_ttl_secs;
         Self {
             cache,
             client,
@@ -134,6 +142,7 @@ impl AppState {
             live_cap_bytes: Arc::new(AtomicI64::new(cap_bytes)),
             live_regions_budget: Arc::new(AtomicI64::new(0)),
             live_position_warm_budget: Arc::new(AtomicI64::new(0)),
+            live_scroll_ttl_secs: Arc::new(AtomicI64::new(scroll_ttl_secs)),
         }
     }
 

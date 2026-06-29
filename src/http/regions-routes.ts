@@ -155,9 +155,42 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     res.status(204).end()
   })
 
+  router.post('/api/cache/config', async (req, res) => {
+    const ttlDays = (req.body as { ttlDays?: unknown } | undefined)?.ttlDays
+    if (typeof ttlDays !== 'number' || !Number.isInteger(ttlDays) || ttlDays < 0 || ttlDays > 365) {
+      res.status(400).json({ error: 'ttlDays must be an integer between 0 and 365' }); return
+    }
+    // Persist to the store first, the source of truth, so the new TTL survives even when the container
+    // is down: it is pushed on the next doStart. With no address this returns 503 after persisting,
+    // which is intended.
+    const store = loadRegionsStore(dataDir)
+    saveRegionsStore(dataDir, { ...store, cacheScrollTtlDays: ttlDays })
+    const address = withAddress(res); if (address === null) return
+    try {
+      await fetchImpl(`http://${address}/cache/scroll-ttl`, warmInit({ ttlSecs: ttlDays * 86_400 }))
+      res.status(204).end()
+    } catch {
+      res.status(502).json({ error: 'tilecache unreachable' })
+    }
+  })
+
+  router.post('/api/cache/clear-scroll', async (_req, res) => {
+    const address = withAddress(res); if (address === null) return
+    return relay(res, fetchImpl(`http://${address}/cache/clear-scroll`, { method: 'POST' }))
+  })
+
   router.get('/api/cache/stats', async (_req, res) => {
     const address = withAddress(res); if (address === null) return
-    return relay(res, fetchImpl(`http://${address}/cache/stats`))
+    // Not a pure relay: the container stats are merged with ttlDays from the store (the plugin owns the
+    // TTL persistence), so the panel reads the TTL and the cache breakdown in one round-trip.
+    try {
+      const r = await fetchImpl(`http://${address}/cache/stats`)
+      const body = (await r.json().catch(() => ({}))) as Record<string, unknown>
+      const ttlDays = loadRegionsStore(dataDir).cacheScrollTtlDays
+      res.status(r.status).json({ ...body, ttlDays })
+    } catch {
+      res.status(502).json({ error: 'tilecache unreachable' })
+    }
   })
 
   router.get('/api/geocode', async (req, res) => {

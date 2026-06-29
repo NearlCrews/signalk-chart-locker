@@ -26,6 +26,16 @@ test('buildTilecacheConfig honors a custom cap and image tag', () => {
   assert.equal(c.env?.TILECACHE_CAP_BYTES, '1000')
 })
 
+test('buildTilecacheConfig sets the scroll TTL env in seconds', () => {
+  const c = buildTilecacheConfig({ capBytes: 1024, scrollTtlSecs: 2_592_000 })
+  assert.equal(c.env?.TILECACHE_SCROLL_TTL_SECS, '2592000')
+})
+
+test('buildTilecacheConfig defaults the scroll TTL env to 0 when unset', () => {
+  const c = buildTilecacheConfig()
+  assert.equal(c.env?.TILECACHE_SCROLL_TTL_SECS, '0')
+})
+
 test('an external cache volume source mounts at the cache dir with a skip-if-missing policy', () => {
   const c = buildTilecacheConfig({ externalCacheVolumeSource: '/media/ssd/binnacle' })
   assert.deepEqual(c.volumes, {

@@ -102,9 +102,13 @@ export function createPlugin (app: ServerAPI): Plugin {
     // provider and the plugin serve routes fully working.
     try {
       const capBytes = (config.tilecacheCacheCapGiB ?? DEFAULT_CACHE_CAP_GIB) * 1024 ** 3
+      // loadRegionsStore always returns cacheScrollTtlDays (default 30 from the store loader), so no
+      // fallback is needed here; clamp and convert days to seconds at this edge.
+      const scrollTtlSecs = Math.max(0, Math.round(loadRegionsStore(app.getDataDirPath()).cacheScrollTtlDays * 86_400))
       const tilecacheConfig = buildTilecacheConfig({
         tag: config?.tilecacheImageTag?.trim() || undefined,
         capBytes,
+        scrollTtlSecs,
         ...(config?.tilecacheCacheVolumeSource?.trim() ? { externalCacheVolumeSource: config.tilecacheCacheVolumeSource.trim() } : {})
       })
       await manager.ensureRunning(TILECACHE_CONTAINER_NAME, tilecacheConfig, { pluginId: PLUGIN_ID })
@@ -126,7 +130,7 @@ export function createPlugin (app: ServerAPI): Plugin {
         // whole scroll cache and the pinned bytes could exceed the cap.
         const regionsBudgetBytes = Math.min(rawR, capBytes)
         const pBudget = positionWarmBudgetBytes(regionsBudgetBytes)
-        const pushed = await pushTilecacheConfig(tcAddress, buildSourcePayload(capBytes, regionsBudgetBytes, pBudget))
+        const pushed = await pushTilecacheConfig(tcAddress, buildSourcePayload(capBytes, regionsBudgetBytes, pBudget, scrollTtlSecs))
         if (!pushed) {
           app.debug('Tilecache config push failed; the proxy has an empty allowlist until the next push.')
         }

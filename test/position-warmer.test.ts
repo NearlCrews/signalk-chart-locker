@@ -11,7 +11,8 @@ function region (bbox: [number, number, number, number]): SavedRegion {
 function store (over: Partial<typeof DEFAULT_REGIONS_STORE.positionWarm> = {}): RegionsStore {
   return {
     regions: [region([-123, 37, -122, 38])],
-    positionWarm: { ...DEFAULT_REGIONS_STORE.positionWarm, enabled: true, sources: ['seamark'], ...over }
+    positionWarm: { ...DEFAULT_REGIONS_STORE.positionWarm, enabled: true, sources: ['seamark'], ...over },
+    cacheScrollTtlDays: 30
   }
 }
 
