@@ -1,6 +1,7 @@
 /** Builds a minimal valid PMTiles v3 archive in memory for hermetic decode and serve tests.
- * Layout: a 127-byte header, then the JSON metadata block (uncompressed). Root, leaf, and tile
- * data sections are empty. All integers are little-endian; lon and lat are int32 scaled by 1e7. */
+ * Layout: a 127-byte header, a 1-byte root directory (varint 0 = zero entries), then the JSON
+ * metadata block (uncompressed). Leaf and tile data sections are empty. All integers are
+ * little-endian; lon and lat are int32 scaled by 1e7. */
 export interface FixtureOptions {
   magic?: string
   version?: number
@@ -23,11 +24,15 @@ export function buildPmtilesFixture (opts: FixtureOptions = {}): Buffer {
   const header = Buffer.alloc(127)
   header.write(opts.magic ?? 'PMTiles', 0, 'ascii')
   header.writeUInt8(opts.version ?? 3, 7)
-  const metaOffset = 127n
+  // Root directory: a single varint(0) byte meaning zero tile entries. The pmtiles library
+  // deserializes the root directory as part of getHeader(), so an empty root directory causes
+  // a varint parse error. One zero byte is the smallest valid serialized directory.
+  const rootDir = Buffer.from([0x00])
+  const metaOffset = 127n + BigInt(rootDir.length)
   const metaLen = BigInt(meta.length)
-  const tail = 127n + metaLen
+  const tail = metaOffset + metaLen
   header.writeBigUInt64LE(127n, 8) // root dir offset
-  header.writeBigUInt64LE(0n, 16) // root dir length (empty)
+  header.writeBigUInt64LE(BigInt(rootDir.length), 16) // root dir length
   header.writeBigUInt64LE(metaOffset, 24) // json metadata offset
   header.writeBigUInt64LE(metaLen, 32) // json metadata length
   header.writeBigUInt64LE(tail, 40) // leaf dir offset
@@ -50,5 +55,5 @@ export function buildPmtilesFixture (opts: FixtureOptions = {}): Buffer {
   header.writeUInt8(opts.centerZoom ?? 0, 118) // center zoom
   header.writeInt32LE(-1215000000, 119) // center lon
   header.writeInt32LE(375000000, 123) // center lat
-  return Buffer.concat([header, meta])
+  return Buffer.concat([header, rootDir, meta])
 }
