@@ -40,3 +40,12 @@ test('reports false when no third-party config file exists', async () => {
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('reports false when config file is malformed JSON', async () => {
+  const dir = await configDir('not valid json at all {')
+  try {
+    assert.equal(isThirdPartyPmtilesEnabled(dir), false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
