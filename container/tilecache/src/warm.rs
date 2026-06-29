@@ -19,7 +19,7 @@ use std::sync::Arc;
 pub const WARM_CONCURRENCY: usize = 3;
 /// Reject an absurd projected tile count upfront, defeating an enumeration denial of service.
 pub const WARM_TILE_HARD_CAP: u64 = 2_000_000;
-/// Maximum concurrently RUNNING warm jobs. The admin prewarm route and the position-warm loop can
+/// Maximum concurrently RUNNING warm jobs. The admin regions route and the position-warm loop can
 /// both drive /warm, so the cap prevents runaway goroutine pressure even with both active.
 pub const MAX_ACTIVE_WARM_JOBS: usize = 4;
 /// How long a finished job stays queryable before the registry reaps it.

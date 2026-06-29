@@ -39,12 +39,12 @@ tiles. A standalone install of Binnacle is unaffected.
   fetched and cached through the Signal K server. Every device on the boat reads from the same
   cache, the same tile is never fetched more than once, and the overlays keep rendering offline
   at sea.
-- **Tile cache prewarm.** Draw a cruising box in the Binnacle chartplotter and fill the shared
+- **Saved map regions.** Draw a cruising box in the Binnacle chartplotter and download the shared
   cache before leaving internet coverage. A live byte estimate is gated against the cache
-  capacity, the prewarmed box is pinned and never evicted, and writes are bounded for microSD
+  capacity, the saved region is pinned and never evicted, and writes are bounded for microSD
   longevity.
 - **Off-plan position-warm.** An optional throttled fill keeps a small tile radius warm around
-  the vessel when it travels outside the prewarmed box, always LRU-bounded so it never displaces
+  the vessel when it travels outside the saved region, always LRU-bounded so it never displaces
   the pinned coverage.
 - **Local PMTiles chart provider.** Drop `.pmtiles` archives in the charts folder and the
   companion discovers, validates, and registers them without a plugin restart. Each archive is
@@ -59,7 +59,7 @@ tiles. A standalone install of Binnacle is unaffected.
 - [signalk-container](https://www.npmjs.com/package/signalk-container) >= 1.20.0, installed and
   running. The companion delegates all container lifecycle to it.
 - A container runtime (Podman or Docker) accessible to the Signal K server process.
-- The [Binnacle Chartplotter](https://www.npmjs.com/package/signalk-binnacle) for the prewarm
+- The [Binnacle Chartplotter](https://www.npmjs.com/package/signalk-binnacle) for the regions
   and chart-management panels.
 
 ## Installation

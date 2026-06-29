@@ -55,11 +55,11 @@ delegated to the installed `signalk-container` plugin.
 ## Layout and status
 
 - `src/`, `test/`: the Node plugin. Lifecycle, the `signalk-container` consumer, the tile proxy
-  and streaming, the PMTiles chart provider, and the prewarm and chart-management route handlers.
+  and streaming, the PMTiles chart provider, and the regions and chart-management route handlers.
 - `container/`: one Cargo workspace (`container/Cargo.toml`) with one member: `tilecache`.
 - `container/tilecache/`: the egress-isolated reverse proxy and disk cache for allowlisted raster
   overlays and the vector basemap. Reads and writes a microSD-aware SQLite tile cache. Includes
-  the warm-job engine: server-side cap enforcement, box pinning so a prewarm never evicts cached
+  the warm-job engine: server-side cap enforcement, box pinning so a region download never evicts cached
   tiles, a per-source average-size tracker, a concurrent warm-job cap, and a lazy tile enumerator.
 - `docs/superpowers/specs/`, `docs/superpowers/plans/`, `docs/superpowers/reviews/`: design
   specs, plans, and review records. The router-engine milestone docs (M1 through M4) are kept as

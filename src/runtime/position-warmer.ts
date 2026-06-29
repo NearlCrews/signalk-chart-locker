@@ -4,7 +4,7 @@
  * interval. The container being healthy only means the container is up, not that the internet is up. */
 
 import type { Position } from '../shared/types.js'
-import type { PrewarmStore } from './prewarm-store.js'
+import type { RegionsStore } from './regions-store.js'
 import type { WarmResult } from './tilecache-client.js'
 import { shouldWarm, bboxAround, type WarmTrigger } from './position-warm.js'
 
@@ -13,7 +13,7 @@ export interface PositionWarmer {
 }
 
 interface Deps {
-  getStore: () => PrewarmStore
+  getStore: () => RegionsStore
   warm: (bbox: [number, number, number, number], sources: string[], minzoom: number, maxzoom: number, regionId?: string) => Promise<WarmResult | null>
   now?: () => number
   backoffSecs?: number
