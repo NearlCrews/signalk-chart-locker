@@ -1022,8 +1022,10 @@ function recordingFetch (responses: Record<string, { status: number; body: unkno
   const fetchImpl = async (url: string, init?: { method?: string; body?: string }): Promise<Response> => {
     calls.push({ url, init })
     const key = Object.keys(responses).find((k) => url.endsWith(k))
-    const r = key ? responses[key] : { status: 200, body: {} }
-    return new Response(JSON.stringify(r.body), { status: r.status, headers: { 'content-type': 'application/json' } })
+    const r = key ? responses[key]! : { status: 200, body: {} }
+    // 204 and 304 are null-body statuses: a non-null body makes the Response constructor throw.
+    const nullBody = r.status === 204 || r.status === 304
+    return new Response(nullBody ? null : JSON.stringify(r.body), { status: r.status, headers: { 'content-type': 'application/json' } })
   }
   return { calls, fetchImpl }
 }
