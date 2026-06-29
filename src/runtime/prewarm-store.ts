@@ -63,7 +63,7 @@ export interface PrewarmStore {
 
 export const DEFAULT_PREWARM_STORE: PrewarmStore = {
   regions: [],
-  positionWarm: { ...DEFAULT_PREWARM_CONFIG.positionWarm }
+  positionWarm: { ...DEFAULT_PREWARM_CONFIG.positionWarm, sources: [] }
 }
 
 /** The reserved pseudo-region id under which position-warm tiles are pinned. It is carved its own
