@@ -23,6 +23,12 @@ everything below is the initial public release.
 - **Tile cache size cap slider.** The plugin settings size the on-disk cache cap to about 80 percent
   of the free space detected on the Signal K data directory, presented as a GiB slider. The
   saved-regions budget is set in GiB alongside it.
+- **Scroll cache management and an age limit.** A new section in the regions panel shows the cache
+  total against the cap and a per-source breakdown, sets an age limit in days for the on-demand scroll
+  cache, and clears the scroll cache on demand. The age limit reclaims unpinned scroll tiles not
+  viewed within the window, swept at container startup and on an hourly timer; pinned saved-region and
+  position-warm tiles are never aged out or cleared. The clear and the sweep run in bounded chunks so a
+  large reclaim never stalls tile serving.
 
 ### Changed
 
