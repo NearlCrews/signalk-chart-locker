@@ -97,9 +97,12 @@ pub struct AppState {
     /// Monotonic source of warm job ids.
     pub warm_seq: Arc<AtomicU64>,
     /// The live cache byte cap, initialized from `knobs.cap_bytes` and updated by POST /config so the
-    /// owner can retune it without a container restart. The scroll cache is bounded at `cap - R`.
+    /// owner can retune it without a container restart. The whole cap is the ceiling on the physical
+    /// total; under the soft reserve the scroll cache uses the cap minus the bytes actually pinned.
     pub live_cap_bytes: Arc<AtomicI64>,
-    /// R: the hard-reserved saved-regions pinned budget. Initialized to 0, set by POST /config.
+    /// R: the soft-reserve ceiling on total pinned (saved-region) bytes. A region warm evicts unpinned
+    /// scroll tiles to make room and never pinned tiles, so R bounds the pinned set, not the scroll
+    /// cache. Initialized to 0, set by POST /config.
     pub live_regions_budget: Arc<AtomicI64>,
     /// P: the position-warm reserve carved out of R. Initialized to 0, set by POST /config.
     pub live_position_warm_budget: Arc<AtomicI64>,

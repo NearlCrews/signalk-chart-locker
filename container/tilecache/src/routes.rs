@@ -63,6 +63,12 @@ async fn stats(State(st): State<AppState>) -> Json<serde_json::Value> {
         "regionsBudgetBytes": r,
         "positionWarmBudgetBytes": p,
         "positionWarmBytes": pw,
+        // Free room for new real regions: (R - P) minus the real-region pinned bytes, floored at 0. The
+        // position-warm pseudo-region is gated at R, not P, so its bytes pw can structurally exceed P;
+        // when it does, this figure can over-grant. Soft reserve degrades gracefully: the cap-clamped
+        // R - P gate, plus make-room evicting only unpinned, plus never evicting a pinned tile, still
+        // hold total <= cap, so an over-granted real-region warm simply caps. The value does not lean on
+        // pw <= P.
         "regionsFreeBytes": ((r - p) - real_pinned).max(0),
         "perSourceAvgBytes": avg,
     }))
@@ -87,9 +93,10 @@ struct ConfigBody {
 /// Replace the source allowlist (and optionally the public base and the cap and budget knobs) atomically.
 ///
 /// Lowering R (or P) below the currently pinned bytes is the owner's deliberate action and is accepted
-/// as-is. Existing pins are not retroactively trimmed, so the physical total can sit above the new
-/// cap - R until normal eviction and re-download converge it. This is documented and acceptable, not a
-/// bug.
+/// as-is. Existing pins are not retroactively trimmed; under the soft reserve a region warm only ever
+/// evicts unpinned scroll tiles, so the pinned set can sit above the new R until a re-download or a
+/// per-region delete converges it. The physical total stays at or below the cap throughout. This is
+/// documented and acceptable, not a bug.
 async fn config(State(st): State<AppState>, Json(body): Json<ConfigBody>) -> StatusCode {
     {
         let mut map = st.sources.write().await;
@@ -127,15 +134,14 @@ async fn region_bytes_route(State(st): State<AppState>, Path(region_id): Path<St
     }
 }
 
-/// DELETE /cache/region/:region_id: drop a region's pins, then trim the scroll cache to cap - R.
+/// DELETE /cache/region/:region_id: drop a region's pins, then bound the scroll cache at the cap.
 async fn delete_region_route(State(st): State<AppState>, Path(region_id): Path<String>) -> StatusCode {
     match st.cache.delete_region(&region_id) {
         Ok(()) => {
-            // Demoted refcount-zero tiles became scroll-eligible; trim the scroll cache back to S = cap - R
-            // so a delete cannot transiently leave the scroll cache above its budget.
-            let cap = st.live_cap_bytes.load(Ordering::Relaxed);
-            let r = st.live_regions_budget.load(Ordering::Relaxed);
-            crate::fetcher::log_cache_err(st.cache.evict_to(cap - r));
+            // delete_region demotes refcount-zero tiles from pinned to unpinned without changing
+            // total_bytes, so the total is already at or below the cap and this evict_to is effectively a
+            // no-op. Kept for safety: it cannot exceed the cap and trims nothing it should keep.
+            crate::fetcher::log_cache_err(st.cache.evict_to(st.live_cap_bytes.load(Ordering::Relaxed)));
             StatusCode::NO_CONTENT
         }
         Err(e) => {

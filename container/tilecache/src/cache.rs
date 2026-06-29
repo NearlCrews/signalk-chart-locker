@@ -187,16 +187,18 @@ impl TileCache {
         Ok(())
     }
 
-    /// Evict the least-recently-accessed rows until the total is at or below `cap_bytes`, in one
-    /// windowed DELETE (the oldest rows whose running total crosses the deficit) rather than a
-    /// round-trip per row, so a large eviction does not hold the connection lock for N statements.
-    pub fn evict_to(&self, cap_bytes: i64) -> rusqlite::Result<()> {
-        let mut inner = self.lock();
-        if inner.total_bytes <= cap_bytes {
-            return Ok(());
+    /// Delete least-recently-used UNPINNED rows on the caller's open transaction until the total of
+    /// all rows is at or below `target`, in one windowed DELETE (the oldest rows whose running total
+    /// crosses the deficit) rather than a round-trip per row. Returns the bytes freed. Never deletes a
+    /// pinned row. Does not touch `pinned_bytes` (it only removes `pinned = 0` rows). The caller updates
+    /// `total_bytes` by the returned amount. `current_total` is the SUM(bytes) the caller has already
+    /// established for the open transaction, so the freed bytes are exact without a second pre-scan.
+    fn evict_unpinned_within(tx: &rusqlite::Transaction, current_total: i64, target: i64) -> rusqlite::Result<i64> {
+        if current_total <= target {
+            return Ok(0);
         }
-        let to_free = inner.total_bytes - cap_bytes;
-        inner.conn.execute(
+        let to_free = current_total - target;
+        tx.execute(
             "DELETE FROM tiles WHERE rowid IN (
                 SELECT rowid FROM (
                     SELECT rowid, SUM(bytes) OVER (ORDER BY last_access ASC, rowid ASC) - bytes AS prior
@@ -205,7 +207,26 @@ impl TileCache {
             )",
             params![to_free],
         )?;
-        inner.total_bytes = inner.conn.query_row("SELECT COALESCE(SUM(bytes), 0) FROM tiles", [], |r| r.get(0))?;
+        let new_total: i64 = tx.query_row("SELECT COALESCE(SUM(bytes), 0) FROM tiles", [], |r| r.get(0))?;
+        Ok(current_total - new_total)
+    }
+
+    /// Evict the least-recently-accessed UNPINNED rows until the total is at or below `cap_bytes`. Runs
+    /// the shared `evict_unpinned_within` helper on its own transaction so the eviction logic lives in
+    /// one place (the warm path runs the same helper on its already-open transaction).
+    pub fn evict_to(&self, cap_bytes: i64) -> rusqlite::Result<()> {
+        let mut inner = self.lock();
+        let current = inner.total_bytes;
+        if current <= cap_bytes {
+            return Ok(());
+        }
+        let freed = {
+            let tx = inner.conn.unchecked_transaction()?;
+            let freed = Self::evict_unpinned_within(&tx, current, cap_bytes)?;
+            tx.commit()?;
+            freed
+        };
+        inner.total_bytes = current - freed;
         if inner.total_bytes > cap_bytes {
             eprintln!("tilecache: cap exceeded ({} bytes > {} limit); all remaining tiles are pinned", inner.total_bytes, cap_bytes);
         }
@@ -213,16 +234,25 @@ impl TileCache {
     }
 
     /// Store a batch of warm tiles pinned, in one transaction, with an explicit pre-store budget check.
-    /// A warm NEVER evicts: when the next sized row would push the pinned set past `budget`, it stops
-    /// and reports `capped`. `budget` is the EFFECTIVE pinned budget the caller passes for this warm
-    /// (R for the position-warm pseudo-region, R - P for a real region). Negative-cache rows (zero
-    /// bytes) always store. The gate is on the PINNED byte total, never the cache total: an unpinned
-    /// scroll tile filling the cache does not trip a region warm. A row's pin contribution is the net
-    /// delta (new bytes minus old bytes) when the row was ALREADY pinned, and the full new bytes when
-    /// it was previously unpinned or absent (the tile newly enters the pinned set), so a shared tile
-    /// is counted once. When `region_id` is `Some`, each stored tile is also recorded in
-    /// `region_tiles` for reference counting.
-    pub fn put_many_pinned(&self, rows: &[WarmRow], budget: i64, region_id: Option<&str>, now: i64) -> rusqlite::Result<PutManyOutcome> {
+    /// A warm never evicts a PINNED tile; it evicts unpinned scroll tiles to fit within the cap. When
+    /// the next sized row would push the pinned set past `budget`, it stops and reports `capped`.
+    /// `budget` is the EFFECTIVE pinned budget the caller passes for this warm (R for the position-warm
+    /// pseudo-region, R - P for a real region, each cap-clamped). `cap` is the live cache byte cap.
+    /// Negative-cache rows (zero bytes) always store. The gate is on the PINNED byte total, never the
+    /// cache total: an unpinned scroll tile filling the cache does not trip a region warm; instead the
+    /// make-room pass drops unpinned LRU rows down to the cap after the inserts. A row's pin
+    /// contribution is the net delta (new bytes minus old bytes) when the row was ALREADY pinned, and
+    /// the full new bytes when it was previously unpinned or absent (the tile newly enters the pinned
+    /// set), so a shared tile is counted once. When `region_id` is `Some`, each stored tile is also
+    /// recorded in `region_tiles` for reference counting.
+    ///
+    /// INSERT precedes EVICT, never the reverse: the inserts flip any pre-existing unpinned scroll row
+    /// that is being re-pinned to `pinned = 1` first, so it is eviction-exempt before the make-room
+    /// pass runs. Evicting first could delete the very row about to be re-pinned, turning a replace into
+    /// a fresh insert and under-counting `total_bytes` by the old bytes. Because the gate bounds the
+    /// pinned set at the cap-clamped `budget <= cap`, evicting unpinned down to the cap always leaves
+    /// room for the pinned set, so the gate is the only `capped` path.
+    pub fn put_many_pinned(&self, rows: &[WarmRow], budget: i64, cap: i64, region_id: Option<&str>, now: i64) -> rusqlite::Result<PutManyOutcome> {
         let mut inner = self.lock();
         let base = inner.total_bytes;
         let pinned_base = inner.pinned_bytes;
@@ -230,6 +260,7 @@ impl TileCache {
         let mut pinned_added = 0i64;
         let mut stored = 0usize;
         let mut capped = false;
+        let mut freed = 0i64;
         {
             let tx = inner.conn.unchecked_transaction()?;
             for r in rows {
@@ -267,9 +298,16 @@ impl TileCache {
                 pinned_added += pin_delta;
                 stored += 1;
             }
+            // Make room: the inserts above flipped any re-pinned scroll row to pinned, so it is now
+            // eviction-exempt. Drop unpinned LRU rows down to the cap in one pass. Never deletes pinned
+            // rows, so the just-pinned batch and every other region's tiles survive.
+            let new_total = base + added;
+            if new_total > cap {
+                freed = Self::evict_unpinned_within(&tx, new_total, cap)?;
+            }
             tx.commit()?;
         }
-        inner.total_bytes = base + added;
+        inner.total_bytes = base + added - freed;
         inner.pinned_bytes = pinned_base + pinned_added;
         Ok(PutManyOutcome { stored, bytes_added: added, capped })
     }
@@ -589,16 +627,18 @@ mod tests {
     }
 
     #[test]
-    fn put_many_pinned_stops_at_the_cap_and_never_evicts() {
+    fn put_many_pinned_caps_when_the_r_ceiling_is_reached_even_with_disk_room() {
         let (_f, c) = open();
+        // R = 10, cap is large (disk room to spare). Two 8-byte tiles: the first fits the R ceiling,
+        // the second trips it, so the warm caps on R, not on disk.
         let rows = vec![
             WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(8, 200, Some(vec![0; 8])) },
             WarmRow { source: "s".into(), z: 0, x: 0, y: 1, tile: tile(8, 200, Some(vec![0; 8])) },
         ];
-        let outcome = c.put_many_pinned(&rows, 10, None, 5).unwrap();
-        assert_eq!(outcome.stored, 1, "only the first tile fits under the 10-byte cap");
-        assert!(outcome.capped, "the batch reports capped rather than evicting");
-        assert_eq!(c.stats().unwrap().1, 8, "no eviction happened");
+        let outcome = c.put_many_pinned(&rows, 10, 2_000_000_000, None, 5).unwrap();
+        assert_eq!(outcome.stored, 1, "only the first tile fits under the R = 10 ceiling");
+        assert!(outcome.capped, "the batch caps on the R ceiling, not on disk");
+        assert_eq!(c.stats().unwrap(), (1, 8, 8), "one tile stored, 8 bytes, 8 pinned");
     }
 
     #[test]
@@ -656,8 +696,8 @@ mod tests {
         let now = 1000i64;
         let rows = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(10, 200, Some(vec![0; 10])) }];
         // Two regions share the same tile.
-        c.put_many_pinned(&rows, 2_000_000_000, Some("r1"), now).unwrap();
-        c.put_many_pinned(&rows, 2_000_000_000, Some("r2"), now).unwrap();
+        c.put_many_pinned(&rows, 2_000_000_000, 2_000_000_000, Some("r1"), now).unwrap();
+        c.put_many_pinned(&rows, 2_000_000_000, 2_000_000_000, Some("r2"), now).unwrap();
         // Deleting r1 must not unpin the tile because r2 still references it.
         c.delete_region("r1").unwrap();
         assert!(c.get("s", 0, 0, 0).unwrap().is_some(), "tile survives: r2 still holds a reference");
@@ -675,25 +715,110 @@ mod tests {
         c.put("s", 0, 0, 0, &tile(900, 200, Some(vec![0; 900])), false, now).unwrap();
         // R = 200; even though total_bytes >> R, pinned_bytes = 0 so a 150-byte region warm fits.
         let rows = vec![WarmRow { source: "s".into(), z: 0, x: 1, y: 0, tile: tile(150, 200, Some(vec![0; 150])) }];
-        let out = c.put_many_pinned(&rows, 200, Some("r1"), now).unwrap();
+        let out = c.put_many_pinned(&rows, 200, 2_000_000_000, Some("r1"), now).unwrap();
         assert!(!out.capped, "region warm fits within R even when total_bytes >> R");
         assert_eq!(out.stored, 1);
     }
 
     #[test]
-    fn scroll_eviction_is_bounded_at_cap_minus_r() {
+    fn scroll_uses_the_whole_cap_not_cap_minus_r() {
         let (_f, c) = open();
         let now = 1000i64;
         // Pin 100 bytes as a region.
         let pinned = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(100, 200, Some(vec![0; 100])) }];
-        c.put_many_pinned(&pinned, 2_000_000_000, Some("r1"), now).unwrap();
-        // Add 300 bytes unpinned (scroll).
-        c.put("s", 1, 0, 0, &tile(300, 200, Some(vec![0; 300])), false, now).unwrap();
-        // cap - R = 500 - 100 = 400; evict_to(400) leaves all 300 scroll bytes and the 100 pinned.
-        c.evict_to(400).unwrap();
+        c.put_many_pinned(&pinned, 2_000_000_000, 2_000_000_000, Some("r1"), now).unwrap();
+        // Add 350 unpinned scroll bytes; total = 450, which fits the full 500 cap but NOT the old
+        // cap - R = 400 reserve.
+        c.put("s", 1, 0, 0, &tile(350, 200, Some(vec![0; 350])), false, now).unwrap();
+        // Soft reserve: the scroll cache is bounded at the FULL cap, so evict_to(cap) keeps all 350
+        // scroll bytes. Under the dead hard reserve this call site passed cap - R = 400 and would have
+        // trimmed the scroll cache.
+        c.evict_to(500).unwrap();
         let (_rows, total, pinned_b) = c.stats().unwrap();
         assert_eq!(pinned_b, 100, "pinned bytes unchanged");
-        assert_eq!(total, 400, "100 pinned plus 300 scroll, all within the scroll budget");
+        assert_eq!(total, 450, "scroll uses the whole cap minus pinned, not the old cap - R reserve");
+    }
+
+    #[test]
+    fn put_many_pinned_repins_a_preexisting_unpinned_lru_candidate_without_evicting_it() {
+        let (_f, c) = open();
+        let now = 1000i64;
+        // Tile A: an unpinned scroll tile, the oldest (LRU make-room candidate), 100 bytes.
+        c.put("s", 0, 0, 0, &tile(100, 200, Some(vec![0; 100])), false, now).unwrap();
+        // Tile B: a newer unpinned scroll tile, 100 bytes. total = 200.
+        c.put("s", 0, 0, 1, &tile(100, 200, Some(vec![0; 100])), false, now + 10).unwrap();
+        // A region warm re-pins A (same key, same bytes) under cap = 150. base + added = 200 > cap, so
+        // make-room evicts unpinned LRU down to the cap. Insert precedes evict: A is flipped to pinned
+        // first, so it is eviction-exempt and the only evictable unpinned row left is B.
+        let rows = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(100, 200, Some(vec![0; 100])) }];
+        let out = c.put_many_pinned(&rows, 2_000_000_000, 150, Some("r1"), now + 20).unwrap();
+        assert!(!out.capped);
+        assert!(c.get("s", 0, 0, 0).unwrap().is_some(), "A was re-pinned, not evicted (insert precedes evict)");
+        assert!(c.get("s", 0, 0, 1).unwrap().is_none(), "B, the only remaining unpinned LRU, is evicted to make room");
+        let (_rows, total, pinned_b) = c.stats().unwrap();
+        assert_eq!(pinned_b, 100, "A newly enters the pinned set: pinned_bytes = 100");
+        assert_eq!(total, 100, "total = base(200) + added(0) - freed(100): A survives, B evicted");
+    }
+
+    #[test]
+    fn region_warm_into_a_full_scroll_cache_evicts_unpinned_and_succeeds() {
+        let (_f, c) = open();
+        let now = 1000i64;
+        let cap = 500i64;
+        // Fill the scroll cache to the cap with one unpinned tile.
+        c.put("s", 9, 0, 0, &tile(500, 200, Some(vec![0; 500])), false, now).unwrap();
+        assert_eq!(c.stats().unwrap().1, 500, "scroll cache is full");
+        // A 200-byte region warm. budget is large; cap = 500. It must evict unpinned LRU to fit rather
+        // than cap.
+        let rows = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(200, 200, Some(vec![0; 200])) }];
+        let out = c.put_many_pinned(&rows, 2_000_000_000, cap, Some("r1"), now + 1).unwrap();
+        assert!(!out.capped, "the warm no longer caps: it evicts unpinned to make room");
+        assert_eq!(out.stored, 1);
+        let (_rows, total, pinned_b) = c.stats().unwrap();
+        assert!(total <= cap, "total stays within the cap after make-room: {total} <= {cap}");
+        assert_eq!(pinned_b, 200, "the region tile is pinned");
+        assert!(c.get("s", 0, 0, 0).unwrap().is_some(), "the pinned region tile is present");
+        assert!(c.get("s", 9, 0, 0).unwrap().is_none(), "the unpinned scroll tile is evicted");
+    }
+
+    #[test]
+    fn a_region_warm_never_evicts_another_regions_pinned_tile() {
+        let (_f, c) = open();
+        let now = 1000i64;
+        let cap = 500i64;
+        // r1 pins a 200-byte tile.
+        let r1 = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(200, 200, Some(vec![0; 200])) }];
+        c.put_many_pinned(&r1, 2_000_000_000, cap, Some("r1"), now).unwrap();
+        // Fill the scroll cache near the cap (unpinned). total = 480.
+        c.put("s", 9, 0, 0, &tile(280, 200, Some(vec![0; 280])), false, now + 1).unwrap();
+        // r2 warms a 200-byte tile under cap = 500. Make-room evicts the unpinned scroll tile, never
+        // r1's pinned tile, even though r1's tile is the least recently accessed.
+        let r2 = vec![WarmRow { source: "s".into(), z: 0, x: 1, y: 0, tile: tile(200, 200, Some(vec![0; 200])) }];
+        let out = c.put_many_pinned(&r2, 2_000_000_000, cap, Some("r2"), now + 2).unwrap();
+        assert!(!out.capped);
+        assert!(c.get("s", 0, 0, 0).unwrap().is_some(), "r1's pinned tile survives the r2 warm");
+        assert!(c.get("s", 9, 0, 0).unwrap().is_none(), "the unpinned scroll tile is evicted instead");
+        let (_rows, total, pinned_b) = c.stats().unwrap();
+        assert!(total <= cap, "total within the cap: {total} <= {cap}");
+        assert_eq!(pinned_b, 400, "both region tiles stay pinned (200 + 200)");
+    }
+
+    #[test]
+    fn pin_if_fresh_and_pin_for_region_do_not_evict() {
+        let (_f, c) = open();
+        let now = 1000i64;
+        // Two unpinned scroll tiles; total = 200.
+        c.put("s", 0, 0, 0, &tile(100, 200, Some(vec![0; 100])), false, now).unwrap();
+        c.put("s", 0, 0, 1, &tile(100, 200, Some(vec![0; 100])), false, now).unwrap();
+        // pin_if_fresh pins the first; it adds no bytes and must NOT evict the second.
+        assert!(c.pin_if_fresh("s", 0, 0, 0, now, 86_400, 600, 2_000_000_000, Some("r1")).unwrap());
+        assert_eq!(c.stats().unwrap().1, 200, "pin_if_fresh changes no total bytes");
+        assert!(c.get("s", 0, 0, 1).unwrap().is_some(), "pin_if_fresh did not evict the other scroll tile");
+        // pin_for_region pins the second; same: no bytes added, no eviction.
+        assert!(c.pin_for_region("s", 0, 0, 1, 2_000_000_000, Some("r1")).unwrap());
+        assert_eq!(c.stats().unwrap().1, 200, "pin_for_region changes no total bytes");
+        assert!(c.get("s", 0, 0, 0).unwrap().is_some(), "pin_for_region did not evict the other tile");
+        assert_eq!(c.stats().unwrap().2, 200, "both tiles are now pinned");
     }
 
     #[test]
@@ -719,13 +844,13 @@ mod tests {
         // A region warm pins that same key (equal bytes). pinned_bytes must grow by the FULL 100,
         // not by the net delta (0), because the tile newly ENTERS the pinned set.
         let rows = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(100, 200, Some(vec![0; 100])) }];
-        let out = c.put_many_pinned(&rows, 100, Some("r1"), now).unwrap();
+        let out = c.put_many_pinned(&rows, 100, 2_000_000_000, Some("r1"), now).unwrap();
         assert!(!out.capped, "the re-pin fits exactly within R = 100");
         let (_r1, _t1, pinned1) = c.stats().unwrap();
         assert_eq!(pinned1, 100, "re-pinning an existing unpinned tile adds the full bytes to pinned_bytes");
         // The R gate counts it: a second distinct pinned tile would now exceed R = 100.
         let more = vec![WarmRow { source: "s".into(), z: 0, x: 1, y: 0, tile: tile(50, 200, Some(vec![0; 50])) }];
-        let out2 = c.put_many_pinned(&more, 100, Some("r1"), now).unwrap();
+        let out2 = c.put_many_pinned(&more, 100, 2_000_000_000, Some("r1"), now).unwrap();
         assert!(out2.capped, "with 100 already pinned, another 50 must trip R = 100");
     }
 
@@ -735,7 +860,7 @@ mod tests {
         let now = 1000i64;
         // r1 pins the tile (100 bytes); pinned_bytes = 100.
         let rows = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(100, 200, Some(vec![0; 100])) }];
-        c.put_many_pinned(&rows, 2_000_000_000, Some("r1"), now).unwrap();
+        c.put_many_pinned(&rows, 2_000_000_000, 2_000_000_000, Some("r1"), now).unwrap();
         // r2's warm skips-but-pins the same already-pinned tile via pin_if_fresh; pinned_bytes must NOT grow.
         assert!(c.pin_if_fresh("s", 0, 0, 0, now, 86_400, 600, 2_000_000_000, Some("r2")).unwrap());
         let (_r, _t, pinned) = c.stats().unwrap();
@@ -748,8 +873,8 @@ mod tests {
         let now = 1000i64;
         let r1 = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(100, 200, Some(vec![0; 100])) }];
         let r2 = vec![WarmRow { source: "s".into(), z: 0, x: 1, y: 0, tile: tile(40, 200, Some(vec![0; 40])) }];
-        c.put_many_pinned(&r1, 2_000_000_000, Some("r1"), now).unwrap();
-        c.put_many_pinned(&r2, 2_000_000_000, Some("r2"), now).unwrap();
+        c.put_many_pinned(&r1, 2_000_000_000, 2_000_000_000, Some("r1"), now).unwrap();
+        c.put_many_pinned(&r2, 2_000_000_000, 2_000_000_000, Some("r2"), now).unwrap();
         assert_eq!(c.region_bytes("r1").unwrap(), 100);
         assert_eq!(c.region_bytes("r2").unwrap(), 40);
         assert_eq!(c.region_bytes("absent").unwrap(), 0);
@@ -761,7 +886,7 @@ mod tests {
         {
             let c = TileCache::open(f.path()).unwrap();
             let rows = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(10, 200, Some(vec![0; 10])) }];
-            c.put_many_pinned(&rows, 2_000_000_000, Some("r1"), 1).unwrap();
+            c.put_many_pinned(&rows, 2_000_000_000, 2_000_000_000, Some("r1"), 1).unwrap();
         }
         // Force a version mismatch so the next open wipes both tables.
         {
@@ -782,11 +907,11 @@ mod tests {
         let pw = crate::state::POSITION_WARM_REGION_ID;
         // Tile A is pinned ONLY by the position-warm pseudo-region: it must not count.
         let a = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(100, 200, Some(vec![0; 100])) }];
-        c.put_many_pinned(&a, 2_000_000_000, Some(pw), now).unwrap();
+        c.put_many_pinned(&a, 2_000_000_000, 2_000_000_000, Some(pw), now).unwrap();
         // Tile B is shared between a real region r1 and the position-warm pseudo-region: it counts once.
         let b = vec![WarmRow { source: "s".into(), z: 0, x: 1, y: 0, tile: tile(40, 200, Some(vec![0; 40])) }];
-        c.put_many_pinned(&b, 2_000_000_000, Some("r1"), now).unwrap();
-        c.put_many_pinned(&b, 2_000_000_000, Some(pw), now).unwrap();
+        c.put_many_pinned(&b, 2_000_000_000, 2_000_000_000, Some("r1"), now).unwrap();
+        c.put_many_pinned(&b, 2_000_000_000, 2_000_000_000, Some(pw), now).unwrap();
         assert_eq!(
             c.real_region_pinned_bytes(pw).unwrap(),
             40,
@@ -800,7 +925,7 @@ mod tests {
         let now = 1000i64;
         // Pin a real 100-byte tile so pinned_bytes = 100.
         let real = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(100, 200, Some(vec![0; 100])) }];
-        c.put_many_pinned(&real, 2_000_000_000, Some("r1"), now).unwrap();
+        c.put_many_pinned(&real, 2_000_000_000, 2_000_000_000, Some("r1"), now).unwrap();
         assert_eq!(c.stats().unwrap().2, 100, "pinned_bytes starts at 100");
         // A fresh negative-cache (zero-byte) row.
         let neg = CachedTile { fetched_at: now, ..tile(0, 404, None) };

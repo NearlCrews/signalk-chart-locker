@@ -1,6 +1,8 @@
 //! The warm-job engine: enumerate a bbox lazily with the shared inverse, fetch each tile through the
-//! existing guarded egress path, and store it pinned in batched transactions. A warm NEVER evicts: it
-//! does an explicit pre-store cap check and stops at `capped`. Fan-out is bounded by a warm semaphore
+//! existing guarded egress path, and store it pinned in batched transactions. A warm never evicts a
+//! pinned tile: it evicts unpinned scroll tiles to fit within the cap, with an explicit pre-store
+//! budget check that stops at `capped` when the pinned set would exceed the regions budget. Fan-out is
+//! bounded by a warm semaphore
 //! below the shared `EGRESS_CONCURRENCY`, so a large warm cannot starve interactive tile reads. The job
 //! registry is in memory, cleared on completion plus a TTL.
 
@@ -165,15 +167,15 @@ enum Fetched {
 }
 
 // The effective pinned budget for a warm: R for the position-warm pseudo-region, R - P for a real
-// region (and for a region-less warm). Read live so a POST /config retune takes effect mid-run.
+// region (and for a region-less warm). Clamped to the live cap so R <= cap holds inside the container
+// regardless of what POST /config delivered, and floored at 0. Read live so a POST /config retune
+// takes effect mid-run.
 fn effective_budget(st: &AppState, region_id: Option<&str>) -> i64 {
+    let cap = st.live_cap_bytes.load(Ordering::Relaxed);
     let r = st.live_regions_budget.load(Ordering::Relaxed);
     let p = st.live_position_warm_budget.load(Ordering::Relaxed);
-    if region_id == Some(crate::state::POSITION_WARM_REGION_ID) {
-        r
-    } else {
-        r - p
-    }
+    let raw = if region_id == Some(crate::state::POSITION_WARM_REGION_ID) { r } else { r - p };
+    raw.min(cap).max(0)
 }
 
 // Fetch and classify one tile, reusing the guarded egress path. The caller holds the warm permit, so
@@ -303,7 +305,7 @@ async fn accumulate(st: &AppState, job: &Arc<tokio::sync::Mutex<WarmJob>>, batch
 // Store the current batch pinned, with the pre-store budget check. Returns false when capped.
 async fn flush(st: &AppState, job: &Arc<tokio::sync::Mutex<WarmJob>>, batch: &mut Vec<WarmRow>, region_id: Option<&str>, final_state: &mut WarmState) -> bool {
     let now = now_secs();
-    match st.cache.put_many_pinned(batch, effective_budget(st, region_id), region_id, now) {
+    match st.cache.put_many_pinned(batch, effective_budget(st, region_id), st.live_cap_bytes.load(Ordering::Relaxed), region_id, now) {
         Ok(outcome) => {
             let mut j = job.lock().await;
             j.done += outcome.stored as u64;
@@ -386,6 +388,29 @@ mod tests {
 
     fn dev() -> Knobs {
         Knobs { allow_private_egress: true, ..Default::default() }
+    }
+
+    #[test]
+    fn effective_budget_clamps_a_configured_r_above_the_cap() {
+        let db = NamedTempFile::new().unwrap();
+        let cache = Arc::new(TileCache::open(db.path()).unwrap());
+        let st = AppState::new(cache, dev());
+        // A POST /config delivered R = 5000 with a 1000-byte cap and P = 0: R exceeds the cap.
+        st.live_cap_bytes.store(1000, Ordering::Relaxed);
+        st.live_regions_budget.store(5000, Ordering::Relaxed);
+        st.live_position_warm_budget.store(0, Ordering::Relaxed);
+        // A real region's effective budget clamps to the cap, not to R - P.
+        assert_eq!(effective_budget(&st, Some("r1")), 1000, "R - P clamps to the cap");
+        // The position-warm pseudo-region clamps to the cap too.
+        assert_eq!(
+            effective_budget(&st, Some(crate::state::POSITION_WARM_REGION_ID)),
+            1000,
+            "R clamps to the cap",
+        );
+        // A negative R - P floors at 0.
+        st.live_regions_budget.store(100, Ordering::Relaxed);
+        st.live_position_warm_budget.store(500, Ordering::Relaxed);
+        assert_eq!(effective_budget(&st, Some("r1")), 0, "R - P floors at 0");
     }
 
     #[test]

@@ -38,8 +38,10 @@ Out of scope (deferred, each its own later sub-project):
 - Region download covers the raster overlays only; the basemap and TTL are deferred (section 2).
 - Auto-name: the companion reverse-geocodes the box center via an allowlisted geocoder, shown editable in
   the UI, with a coordinate-derived fallback. The lookup fires only on the explicit Download action.
-- Storage: a hard-reserved two-budget model. Saved regions are pinned and durable within a regions budget
-  R; the scroll cache is LRU within `cap - R`. A region download that will not fit R is refused upfront,
+- Storage: a soft-reserve two-budget model. Saved regions are pinned and durable up to a regions budget
+  R, the ceiling on total pinned bytes; the on-demand scroll cache uses the rest of the cap and is
+  evicted least-recently-used when the cap is reached. A region download evicts unpinned scroll tiles to
+  make room and never pinned tiles, and a download that would exceed R is refused upfront,
   authoritatively server-side.
 - Enumeration and the byte estimate stay in the webapp panel (live, client-side); the companion is the
   executor, not the selector.
@@ -74,17 +76,21 @@ wipes the cache, hence the `needs-redownload` handling in section 4).
   join table. A tile stays pinned while ANY region references it. Per-region delete removes that region's
   join rows and unpins (and demotes to the scroll cache, LRU-eligible) only the tiles whose reference
   count reached zero, then evicts them under the scroll budget if needed.
-- Hard-reserved two budgets. Track `pinned_bytes` separately. The regions budget R is a reservation; the
-  scroll cache gets `S = cap - R`.
+- Soft-reserve two budgets. Track `pinned_bytes` separately. The regions budget R is a ceiling on total
+  pinned bytes, cap-clamped so `R <= cap` holds in the container; the scroll cache uses the rest of the
+  cap.
   - The region warm gates on `pinned_bytes + delta <= R` (in `put_many_pinned`, basing the check on
     `pinned_bytes`, not `total_bytes`, so it does not double-count the scroll cache).
-  - The live-proxy and style scroll-eviction call sites change from `evict_to(cap_bytes)` to
-    `evict_to(cap_bytes - R)`, so the scroll cache is bounded at S.
-  - With pinned `<= R` and scroll `<= S`, the physical total stays `<= cap` automatically, so a warm
-    never evicts (the v2 invariant holds), and a region download that passes the gate is guaranteed to
-    fit (no surprise mid-warm `capped`).
-  - The pin paths (`pin`, `pin_if_fresh`) used when a warm pins an already-cached scroll tile must update
-    `pinned_bytes` and respect R, so a skip-but-pin cannot push `pinned_bytes` past R.
+  - The live-proxy and style scroll-eviction call sites call `evict_to(cap_bytes)`, which drops only
+    unpinned rows, so the scroll cache fills the cap minus the bytes actually pinned (the full cap when
+    nothing is pinned).
+  - A region warm makes room by evicting unpinned scroll tiles down to the cap after its inserts, and
+    never evicts a pinned tile. With pinned `<= R <= cap`, evicting unpinned down to the cap always
+    leaves room for the pinned set, so the physical total stays `<= cap` and the R gate is the only
+    `capped` path.
+  - The pin paths (`pin`, `pin_if_fresh`, `pin_for_region`) used when a warm pins an already-cached
+    scroll tile update `pinned_bytes` and respect R but add no bytes and do not evict, so a skip-but-pin
+    cannot push `pinned_bytes` past R or drop the row it is pinning.
 - `R` and a changed `cap` reach the container via the `POST /config` push (a live value), not the
   start-only `TILECACHE_CAP_BYTES` env, so "raise the cap" and the regions budget are settable without a
   container restart.
@@ -169,7 +175,7 @@ position-warm after the box-to-list migration.
 
 Four ordered, independently gated and reviewed tasks:
 1. The region entity, the `prewarm.json` box-to-list migration, and the position-warm repoint.
-2. The cache region-tile join table, per-region delete, the hard-reserved two-budget accounting, and the
+2. The cache region-tile join table, per-region delete, the soft-reserve two-budget accounting, and the
    single SCHEMA_VERSION 3 bump.
 3. The geocode container route and the plugin proxy.
 4. The panel evolution from one box to a region list and editor, with the client-side enumeration and
@@ -183,9 +189,9 @@ Four ordered, independently gated and reviewed tasks:
 - The download flow: the server-side refuse gate against R, warm and pin with the region tag, the status
   reconciliation (ready, capped, lost job), and re-download replacing the same region id.
 - The cache: the join table and refcount (a tile shared by two regions survives deleting one), per-region
-  delete unpins and evicts only refcount-zero tiles, the hard-reserved budgets (a region warm gates on
-  `pinned_bytes + delta <= R`, the scroll cache is bounded at `cap - R`, a warm never evicts), and the
-  pin-bytes accounting on a skip-but-pin.
+  delete unpins and evicts only refcount-zero tiles, the soft-reserve budgets (a region warm gates on
+  `pinned_bytes + delta <= R`, the scroll cache uses the whole cap, a warm evicts unpinned scroll tiles
+  to make room and never a pinned tile), and the pin-bytes accounting on a skip-but-pin.
 - The geocode route: the host allowlist, the SSRF guards, the contactable User-Agent, lat/lon validation,
   and the coordinate fallback; geocoding fires once on Download, not on drag.
 - The panel: draw to download, the estimate gate against regions-free, the editable name, the region list
@@ -195,9 +201,9 @@ Four ordered, independently gated and reviewed tasks:
 
 - Region download is raster overlays only; the basemap region-warm and TTL eviction are deferred to their
   own sub-projects.
-- The cache uses a region-tile join table with reference counting and a hard-reserved two-budget model
-  (pinned regions within R, scroll within `cap - R`), one SCHEMA_VERSION 3 bump, with `needs-redownload`
-  on the wipe.
+- The cache uses a region-tile join table with reference counting and a soft-reserve two-budget model
+  (pinned regions within R, scroll using the rest of the cap), one SCHEMA_VERSION 3 bump, with
+  `needs-redownload` on the wipe.
 - Enumeration and the estimate are client-side in the panel; the companion is the executor and gates
   authoritatively server-side.
 - The geocoder is a dedicated container route to a single allowlisted host with a contactable User-Agent,

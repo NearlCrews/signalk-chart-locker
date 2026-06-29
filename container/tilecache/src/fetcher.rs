@@ -123,8 +123,10 @@ fn store_200(state: &AppState, source_id: &str, z: u32, x: u32, y: u32, fetched:
         blob: Some(fetched.body.clone()),
     };
     log_cache_err(state.cache.put(source_id, z, x, y, &tile, false, now));
-    // The scroll cache is bounded at cap - R: the saved-regions budget R is reserved for pinned tiles.
-    log_cache_err(state.cache.evict_to(state.live_cap_bytes.load(Ordering::Relaxed) - state.live_regions_budget.load(Ordering::Relaxed)));
+    // Soft reserve: the scroll cache uses the whole cap. evict_to(cap) drops only unpinned rows, so the
+    // scroll cache fills the cap minus the bytes actually pinned by saved regions (the full cap when
+    // nothing is pinned).
+    log_cache_err(state.cache.evict_to(state.live_cap_bytes.load(Ordering::Relaxed)));
     if if_none_match == Some(etag.as_str()) {
         return FetchOutcome::NotModified { etag };
     }
