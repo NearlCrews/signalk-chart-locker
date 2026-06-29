@@ -65,6 +65,37 @@ test('registerChartProvider exposes the live registry through the v2 provider an
   assert.equal(Object.keys(res.body as object).length, 1)
 })
 
+test('the v1 single-chart route returns an existing chart resource by identifier', () => {
+  const registry = new ChartRegistry()
+  const routes: Record<string, (req: { params: Record<string, string> }, res: FakeRes) => void> = {}
+  const app = {
+    get (path: string, handler: (req: { params: Record<string, string> }, res: FakeRes) => void) { routes[path] = handler },
+    registerResourceProvider () {}
+  }
+  registerChartProvider(app as never, registry)
+  registry.set(record('sf.pmtiles'))
+
+  const res = new FakeRes()
+  routes['/signalk/v1/api/resources/charts/:identifier']({ params: { identifier: 'sf-pmtiles' } }, res)
+  assert.equal(res.statusCode, 200)
+  assert.equal((res.body as { identifier: string }).identifier, 'sf-pmtiles')
+})
+
+test('the v1 single-chart route returns 404 for unknown chart identifier', () => {
+  const registry = new ChartRegistry()
+  const routes: Record<string, (req: { params: Record<string, string> }, res: FakeRes) => void> = {}
+  const app = {
+    get (path: string, handler: (req: { params: Record<string, string> }, res: FakeRes) => void) { routes[path] = handler },
+    registerResourceProvider () {}
+  }
+  registerChartProvider(app as never, registry)
+
+  const res = new FakeRes()
+  routes['/signalk/v1/api/resources/charts/:identifier']({ params: { identifier: 'nope' } }, res)
+  assert.equal(res.statusCode, 404)
+  assert.equal(res.body, 'Not found')
+})
+
 test('registerChartProvider registers the provider only once per app', () => {
   const registry = new ChartRegistry()
   let count = 0

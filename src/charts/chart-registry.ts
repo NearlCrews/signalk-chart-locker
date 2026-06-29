@@ -132,6 +132,7 @@ export function registerChartProvider (app: ChartRouteApp, registry: ChartRegist
     type: 'charts',
     methods: {
       listResources: () => {
+        // No server-side filtering; the local registry always returns all charts
         const out: Record<string, ChartResource> = {}
         for (const resource of registry.list()) out[resource.identifier] = resource
         return Promise.resolve(out)
@@ -140,8 +141,8 @@ export function registerChartProvider (app: ChartRouteApp, registry: ChartRegist
         const resource = registry.get(id)
         return resource ? Promise.resolve(resource) : Promise.reject(new Error(`Chart not found: ${id}`))
       },
-      setResource: (id: string) => Promise.reject(new Error(`Not implemented: cannot set ${id}`)),
-      deleteResource: (id: string) => Promise.reject(new Error(`Not implemented: cannot delete ${id}`))
+      setResource: (_id: string, _value: unknown) => Promise.reject(new Error(`Not implemented: cannot set ${_id}`)),
+      deleteResource: (_id: string) => Promise.reject(new Error(`Not implemented: cannot delete ${_id}`))
     }
   })
 
