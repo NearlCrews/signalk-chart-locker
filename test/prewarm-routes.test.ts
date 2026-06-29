@@ -38,25 +38,6 @@ test('routes are not mounted without a security strategy (fail closed)', () => {
   assert.equal(routes.size, 0)
 })
 
-test('GET /api/prewarm/status relays a 404 as gone', async () => {
-  const { router, routes } = collector()
-  const fetchImpl = async () => ({ ok: false, status: 404, json: async () => ({}), headers: new Headers(), body: null } as unknown as Response)
-  registerPrewarmRoutes(router, securedApp(), () => 'addr:8080', { dataDir: mkdtempSync(join(tmpdir(), 'pw-')), fetchImpl })
-  const { res, out } = fakeRes()
-  await routes.get('GET /api/prewarm/status/:jobId')!({ params: { jobId: 'warm-9' }, body: undefined }, res)
-  assert.equal(out.code, 404)
-})
-
-test('POST /api/prewarm/cancel relays a 204 without reading a body', async () => {
-  const { router, routes } = collector()
-  const fetchImpl = async () => ({ ok: true, status: 204, json: async () => { throw new Error('a 204 has no body') }, headers: new Headers(), body: null } as unknown as Response)
-  registerPrewarmRoutes(router, securedApp(), () => 'addr:8080', { dataDir: mkdtempSync(join(tmpdir(), 'pw-')), fetchImpl })
-  const { res, out } = fakeRes()
-  await routes.get('POST /api/prewarm/cancel/:jobId')!({ params: { jobId: 'warm-1' }, body: undefined }, res)
-  assert.equal(out.code, 204)
-  assert.equal(out.ended, true)
-})
-
 test('POST /api/prewarm/config floors the position-warm interval at 60 seconds', async () => {
   const { router, routes } = collector()
   const dir = mkdtempSync(join(tmpdir(), 'pw-'))
@@ -64,8 +45,8 @@ test('POST /api/prewarm/config floors the position-warm interval at 60 seconds',
   const { res, out } = fakeRes()
   await routes.get('POST /api/prewarm/config')!({ params: {}, body: { positionWarm: { intervalSecs: 5 } } }, res)
   assert.equal(out.code, 204)
-  const { loadPrewarmConfig } = await import('../src/runtime/prewarm-store.js')
-  assert.equal(loadPrewarmConfig(dir).positionWarm.intervalSecs, 60)
+  const { loadPrewarmStore } = await import('../src/runtime/prewarm-store.js')
+  assert.equal(loadPrewarmStore(dir).positionWarm.intervalSecs, 60)
 })
 
 test('routes report 503 when the container address is unset', async () => {

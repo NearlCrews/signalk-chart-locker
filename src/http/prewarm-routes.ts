@@ -7,7 +7,7 @@ import type { ServerAPI } from '@signalk/server-api'
 import { estimateBytes } from 'signalk-binnacle-chart-sources'
 import { ensureApiAdminGate } from '../shared/admin-gate.js'
 import {
-  loadPrewarmConfig, savePrewarmConfig, type PrewarmConfig,
+  loadPrewarmStore, savePrewarmStore, type PositionWarmSettings,
   addRegion, updateRegion, removeRegion, listRegions,
   type SavedRegion, type RegionStatus
 } from '../runtime/prewarm-store.js'
@@ -88,17 +88,6 @@ export function registerPrewarmRoutes (router: PrewarmRouter, app: ServerAPI, ge
     }
   }
 
-  // Relay a no-content upstream (the 204 cancel) without reading a JSON body: a 204 carries none, so
-  // r.json() would throw and mask the real status.
-  const relayNoContent = async (res: PrewarmResponse, upstream: Promise<Response>): Promise<void> => {
-    try {
-      const r = await upstream
-      res.status(r.status).end()
-    } catch {
-      res.status(502).json({ error: 'tilecache unreachable' })
-    }
-  }
-
   // The latest warm job per region, set on POST and redownload. In-memory: it does not survive a plugin
   // restart, so the status route and the startup sweep treat a missing job for a downloading region as
   // a lost job and reconcile it to error.
@@ -148,28 +137,21 @@ export function registerPrewarmRoutes (router: PrewarmRouter, app: ServerAPI, ge
     }
   }
 
-  router.get('/api/prewarm/status/:jobId', async (req, res) => {
-    const address = withAddress(res); if (address === null) return
-    return relay(res, fetchImpl(`http://${address}/warm/${encodeURIComponent(req.params.jobId)}`))
-  })
-
-  router.post('/api/prewarm/cancel/:jobId', async (req, res) => {
-    const address = withAddress(res); if (address === null) return
-    return relayNoContent(res, fetchImpl(`http://${address}/warm/${encodeURIComponent(req.params.jobId)}/cancel`, { method: 'POST' }))
-  })
-
+  // The position-warm settings live in the regions store. GET returns just the positionWarm block and
+  // POST merges ONLY the incoming positionWarm, preserving the saved regions, so saving settings never
+  // drops a region.
   router.get('/api/prewarm/config', (_req, res) => {
-    res.status(200).json(loadPrewarmConfig(dataDir))
+    res.status(200).json(loadPrewarmStore(dataDir).positionWarm)
   })
 
   router.post('/api/prewarm/config', (req, res) => {
-    const current = loadPrewarmConfig(dataDir)
-    const incoming = (req.body as Partial<PrewarmConfig> | undefined) ?? {}
-    const positionWarm = { ...current.positionWarm, ...(incoming.positionWarm ?? {}) }
+    const store = loadPrewarmStore(dataDir)
+    const incoming = (req.body as { positionWarm?: Partial<PositionWarmSettings> } | undefined) ?? {}
+    const positionWarm = { ...store.positionWarm, ...(incoming.positionWarm ?? {}) }
     // Floor the interval server-side (the panel enforces it too) so a direct POST cannot set a
     // sub-60-second loop that hammers the egress path.
     positionWarm.intervalSecs = Math.max(MIN_WARM_INTERVAL_SECS, positionWarm.intervalSecs)
-    savePrewarmConfig(dataDir, { ...current, ...incoming, positionWarm })
+    savePrewarmStore(dataDir, { ...store, positionWarm })
     res.status(204).end()
   })
 
@@ -250,13 +232,23 @@ export function registerPrewarmRoutes (router: PrewarmRouter, app: ServerAPI, ge
 
   router.delete('/api/regions/:id', async (req, res) => {
     const id = req.params.id
-    // The plugin store is the source of truth for the list, so remove it locally first, then drop the
-    // container pins best-effort.
+    // Drop the container pins FIRST, then remove the region from the store only when that succeeds. The
+    // container delete is idempotent, so a region that was never downloaded still succeeds. If the
+    // container address is absent or the delete fails, return 503 and leave the region in the store so
+    // the user can retry: removing it first would orphan its region_tiles pins and permanently shrink
+    // regionsFreeBytes.
+    const address = withAddress(res); if (address === null) return
+    let ok: boolean
+    try {
+      const r = await fetchImpl(`http://${address}/cache/region/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      ok = r.ok
+    } catch {
+      ok = false
+    }
+    if (!ok) { res.status(503).json({ error: 'tilecache unreachable' }); return }
     removeRegion(dataDir, id)
     regionJobs.delete(id)
-    const address = getAddress()
-    if (address === null) { res.status(204).end(); return }
-    return relayNoContent(res, fetchImpl(`http://${address}/cache/region/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+    res.status(204).end()
   })
 
   router.get('/api/regions/:id/status', async (req, res) => {

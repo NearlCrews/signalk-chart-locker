@@ -1,17 +1,17 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createPositionWarmer } from '../src/runtime/position-warmer.js'
-import { DEFAULT_PREWARM_CONFIG } from '../src/runtime/prewarm-store.js'
+import { DEFAULT_PREWARM_STORE } from '../src/runtime/prewarm-store.js'
 import type { PrewarmStore, SavedRegion } from '../src/runtime/prewarm-store.js'
 
 function region (bbox: [number, number, number, number]): SavedRegion {
   return { id: 'r1', name: 'Test', bbox, sourceIds: [], minzoom: 6, maxzoom: 12, createdAt: 0, lastDownloadedAt: null, bytes: 0, status: 'ready' }
 }
 
-function store (over: Partial<typeof DEFAULT_PREWARM_CONFIG.positionWarm> = {}): PrewarmStore {
+function store (over: Partial<typeof DEFAULT_PREWARM_STORE.positionWarm> = {}): PrewarmStore {
   return {
     regions: [region([-123, 37, -122, 38])],
-    positionWarm: { ...DEFAULT_PREWARM_CONFIG.positionWarm, enabled: true, sources: ['seamark'], ...over }
+    positionWarm: { ...DEFAULT_PREWARM_STORE.positionWarm, enabled: true, sources: ['seamark'], ...over }
   }
 }
 

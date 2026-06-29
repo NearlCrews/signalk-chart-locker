@@ -17,30 +17,6 @@ export interface PositionWarmSettings {
   sources: string[]
 }
 
-export interface PrewarmConfig {
-  bbox: [number, number, number, number] | null
-  sources: string[]
-  minzoom: number
-  maxzoom: number
-  positionWarm: PositionWarmSettings
-}
-
-/** Defaults: position-warm OFF (opt-in), a 2 nm radius, a 1 nm move threshold, a 60 s interval, base zoom 12. */
-export const DEFAULT_PREWARM_CONFIG: PrewarmConfig = {
-  bbox: null,
-  sources: [],
-  minzoom: 6,
-  maxzoom: 12,
-  positionWarm: {
-    enabled: false,
-    radiusMeters: 3704,
-    moveThresholdMeters: 1852,
-    intervalSecs: 60,
-    baseZoom: 12,
-    sources: []
-  }
-}
-
 export type RegionStatus = 'downloading' | 'ready' | 'capped' | 'error' | 'needs-redownload'
 
 export interface SavedRegion {
@@ -61,9 +37,17 @@ export interface PrewarmStore {
   positionWarm: PositionWarmSettings
 }
 
+/** Position-warm defaults: OFF (opt-in), a 2 nm radius, a 1 nm move threshold, a 60 s interval, base zoom 12. */
 export const DEFAULT_PREWARM_STORE: PrewarmStore = {
   regions: [],
-  positionWarm: { ...DEFAULT_PREWARM_CONFIG.positionWarm, sources: [] }
+  positionWarm: {
+    enabled: false,
+    radiusMeters: 3704,
+    moveThresholdMeters: 1852,
+    intervalSecs: 60,
+    baseZoom: 12,
+    sources: []
+  }
 }
 
 /** The reserved pseudo-region id under which position-warm tiles are pinned. It is carved its own
@@ -78,28 +62,19 @@ export function positionWarmBudgetBytes (regionsBudgetBytes: number): number {
 
 const STORE_FILE = 'prewarm.json'
 
-/** Read the persisted config, falling back to the default on a missing or corrupt file. */
-export function loadPrewarmConfig (dataDir: string): PrewarmConfig {
-  const parsed = readJsonState<Partial<PrewarmConfig>>(join(dataDir, STORE_FILE), {})
-  return {
-    ...DEFAULT_PREWARM_CONFIG,
-    ...parsed,
-    positionWarm: { ...DEFAULT_PREWARM_CONFIG.positionWarm, ...(parsed.positionWarm ?? {}) }
-  }
-}
-
-/** Write the config atomically enough for a single-writer plugin (one JSON file). */
-export function savePrewarmConfig (dataDir: string, config: PrewarmConfig): void {
-  writeJsonState(join(dataDir, STORE_FILE), config)
-}
-
 /** Detect a v2 shape (top-level `bbox` or `sources`), migrate to the regions list, write back, and
  * return the migrated store. Only called on first load of a v2 file; after write-back the file has
  * no v2 keys so subsequent loads skip migration. */
 function migrateV2 (raw: Record<string, unknown>, dataDir: string): PrewarmStore {
-  const regions: SavedRegion[] = []
+  // Defense in depth: an existing regions array is the base, so a stray top-level bbox or sources key
+  // can never discard saved regions. The legacy single box becomes one region only when there is no
+  // existing regions array. The write-back stores only regions and positionWarm, so the top-level
+  // bbox, sources, minzoom, and maxzoom are dropped either way.
+  const hasRegions = Array.isArray(raw['regions'])
+  const regions: SavedRegion[] = hasRegions ? (raw['regions'] as SavedRegion[]) : []
   const rawBbox = raw['bbox']
   if (
+    !hasRegions &&
     Array.isArray(rawBbox) &&
     rawBbox.length === 4 &&
     rawBbox.every((n) => typeof n === 'number' && Number.isFinite(n))

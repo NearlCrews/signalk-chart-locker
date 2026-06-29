@@ -1,11 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { insideBox, haversineMeters, bboxAround, shouldWarm, insideAnyRegion, type WarmTrigger } from '../src/runtime/position-warm.js'
-import { DEFAULT_PREWARM_CONFIG } from '../src/runtime/prewarm-store.js'
+import { DEFAULT_PREWARM_STORE } from '../src/runtime/prewarm-store.js'
 import type { SavedRegion } from '../src/runtime/prewarm-store.js'
 
 const here = { latitude: 37.8, longitude: -122.4 }
-const settings = { ...DEFAULT_PREWARM_CONFIG.positionWarm, enabled: true, sources: ['seamark'] }
+const settings = { ...DEFAULT_PREWARM_STORE.positionWarm, enabled: true, sources: ['seamark'] }
 const fresh: WarmTrigger = { lastPos: null, lastWarmMs: 0, backoffUntilMs: 0 }
 
 function region (bbox: [number, number, number, number]): SavedRegion {

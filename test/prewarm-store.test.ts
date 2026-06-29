@@ -3,28 +3,18 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadPrewarmConfig, savePrewarmConfig, DEFAULT_PREWARM_CONFIG, loadPrewarmStore, savePrewarmStore, type PrewarmStore } from '../src/runtime/prewarm-store.js'
+import { loadPrewarmStore, savePrewarmStore, type PrewarmStore } from '../src/runtime/prewarm-store.js'
 
 function tmp (): string {
   return mkdtempSync(join(tmpdir(), 'prewarm-store-'))
 }
 
-test('loadPrewarmConfig returns the default when no file exists', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'prewarm-'))
-  assert.deepEqual(loadPrewarmConfig(dir), DEFAULT_PREWARM_CONFIG)
-})
-
-test('saved config round-trips', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'prewarm-'))
-  const cfg = { ...DEFAULT_PREWARM_CONFIG, bbox: [-10, 40, 10, 55] as [number, number, number, number], sources: ['seamark'], minzoom: 6, maxzoom: 10 }
-  savePrewarmConfig(dir, cfg)
-  assert.deepEqual(loadPrewarmConfig(dir), cfg)
-})
-
-test('a corrupt file falls back to the default rather than throwing', () => {
+test('a corrupt file falls back to an empty store rather than throwing', () => {
   const dir = mkdtempSync(join(tmpdir(), 'prewarm-'))
   writeFileSync(join(dir, 'prewarm.json'), 'not json')
-  assert.deepEqual(loadPrewarmConfig(dir), DEFAULT_PREWARM_CONFIG)
+  const store = loadPrewarmStore(dir)
+  assert.deepEqual(store.regions, [])
+  assert.equal(store.positionWarm.enabled, false)
 })
 
 test('fresh directory returns empty regions list and default position-warm', () => {
@@ -114,4 +104,33 @@ test('a second load of a migrated file does not create a duplicate region', () =
   loadPrewarmStore(dir) // first load triggers migration and writes back
   const second = loadPrewarmStore(dir)
   assert.equal(second.regions.length, 1, 'second load must not duplicate the migrated region')
+})
+
+test('a stray top-level bbox never discards an existing regions array', () => {
+  const dir = tmp()
+  // A file that carries BOTH a saved regions array and a stray legacy top-level bbox: migration must
+  // keep the regions and must not synthesize a legacy region from the box.
+  const region: PrewarmStore['regions'][0] = {
+    id: 'keep-me',
+    name: 'San Francisco Bay',
+    bbox: [-122.5, 37.5, -122.0, 38.0],
+    sourceIds: ['seamark'],
+    minzoom: 6,
+    maxzoom: 12,
+    createdAt: 1_700_000_000,
+    lastDownloadedAt: null,
+    bytes: 0,
+    status: 'ready'
+  }
+  writeFileSync(join(dir, 'prewarm.json'), JSON.stringify({
+    regions: [region],
+    bbox: [0.0, 0.0, 1.0, 1.0],
+    sources: ['depth-gebco'],
+    minzoom: 6,
+    maxzoom: 12,
+    positionWarm: { enabled: false, radiusMeters: 3704, moveThresholdMeters: 1852, intervalSecs: 60, baseZoom: 12, sources: [] }
+  }))
+  const store = loadPrewarmStore(dir)
+  assert.equal(store.regions.length, 1, 'the existing region is preserved and no legacy region is added')
+  assert.deepEqual(store.regions[0], region, 'the existing region is unchanged')
 })
