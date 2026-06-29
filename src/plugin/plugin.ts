@@ -14,6 +14,9 @@ import { ChartRegistry, registerChartProvider, type ChartRouteApp } from '../cha
 import { type DiscoveryHandle, startDiscovery } from '../charts/discovery.js'
 import { isThirdPartyPmtilesEnabled } from '../charts/mutual-exclusion.js'
 import { registerPmtilesServeRoute, type ServeRouter } from '../http/pmtiles-routes.js'
+import { registerChartManagementRoutes, type ManagementRouter } from '../http/chart-management-routes.js'
+import { OverrideStore } from '../charts/overrides.js'
+import { ensureApiAdminGate } from '../shared/admin-gate.js'
 import { join, resolve } from 'node:path'
 import { createPositionWarmer, type PositionWarmer } from '../runtime/position-warmer.js'
 import { loadPrewarmConfig } from '../runtime/prewarm-store.js'
@@ -46,6 +49,7 @@ export function createPlugin (app: ServerAPI): Plugin {
   interface ConfigAwareApp { config: { configPath: string } }
   const configPath = (app as unknown as ConfigAwareApp).config.configPath
   const registry = new ChartRegistry()
+  const overrides = new OverrideStore(join((app as unknown as { getDataDirPath: () => string }).getDataDirPath(), 'pmtiles-overrides.json'))
   let discovery: DiscoveryHandle | undefined
   // The charts directory resolved from the active config, captured so the override re-apply closure
   // (Task 11) rescans the configured directory, not the default. Set in setupCharts.
@@ -61,10 +65,12 @@ export function createPlugin (app: ServerAPI): Plugin {
       return
     }
     activeChartsDir = chartsDirFor(config)
+    overrides.load()
     registerChartProvider(app as unknown as ChartRouteApp, registry)
     discovery = await startDiscovery({
       chartsDir: activeChartsDir,
       registry,
+      namer: overrides.namer(),
       onError: (message) => app.debug(`Chart discovery: ${message}`)
     })
   }
@@ -240,6 +246,14 @@ export function createPlugin (app: ServerAPI): Plugin {
       registerTileRoutes(router as unknown as TileRouter, () => tilecacheAddress)
       registerPrewarmRoutes(router as unknown as PrewarmRouter, app, () => tilecacheAddress)
       registerPmtilesServeRoute(router as unknown as ServeRouter, registry)
+      if (ensureApiAdminGate(app)) {
+        registerChartManagementRoutes(
+          router as unknown as ManagementRouter,
+          registry,
+          overrides,
+          () => { (async () => { const { rescanCharts } = await import('../charts/discovery.js'); await rescanCharts({ chartsDir: activeChartsDir ?? chartsDirFor({}), registry, namer: overrides.namer() }) })().catch(() => {}) }
+        )
+      }
     }
   }
 }
