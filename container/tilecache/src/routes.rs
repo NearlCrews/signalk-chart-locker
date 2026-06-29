@@ -14,6 +14,7 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
+use std::sync::atomic::Ordering;
 
 /// Build the router. The style routes are added by `crate::style::style_routes`.
 pub fn app(state: AppState) -> Router {
@@ -25,6 +26,7 @@ pub fn app(state: AppState) -> Router {
         .route("/warm", post(warm_start))
         .route("/warm/:job_id", get(warm_status))
         .route("/warm/:job_id/cancel", post(warm_cancel))
+        .route("/cache/region/:region_id", axum::routing::get(region_bytes_route).delete(delete_region_route))
         .merge(crate::style::style_routes())
         .with_state(state)
 }
@@ -34,7 +36,13 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 async fn stats(State(st): State<AppState>) -> Json<serde_json::Value> {
-    let (rows, bytes) = st.cache.stats().unwrap_or((0, 0));
+    let (rows, bytes, pinned_bytes) = st.cache.stats().unwrap_or((0, 0, 0));
+    let cap = st.live_cap_bytes.load(Ordering::Relaxed);
+    let r = st.live_regions_budget.load(Ordering::Relaxed);
+    let p = st.live_position_warm_budget.load(Ordering::Relaxed);
+    // The position-warm pseudo-region's pinned bytes, so the real-region free room excludes them.
+    let pw = st.cache.region_bytes(crate::state::POSITION_WARM_REGION_ID).unwrap_or(0);
+    let real_pinned = (pinned_bytes - pw).max(0);
     let avg: serde_json::Map<String, serde_json::Value> = st
         .cache
         .per_source_avg()
@@ -45,7 +53,13 @@ async fn stats(State(st): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "rows": rows,
         "bytes": bytes,
-        "cap": st.knobs.cap_bytes,
+        "cap": cap,
+        "pinnedBytes": pinned_bytes,
+        "scrollBytes": bytes - pinned_bytes,
+        "regionsBudgetBytes": r,
+        "positionWarmBudgetBytes": p,
+        "positionWarmBytes": pw,
+        "regionsFreeBytes": ((r - p) - real_pinned).max(0),
         "perSourceAvgBytes": avg,
     }))
 }
@@ -54,11 +68,24 @@ async fn stats(State(st): State<AppState>) -> Json<serde_json::Value> {
 #[serde(rename_all = "camelCase")]
 struct ConfigBody {
     sources: Vec<ChartSource>,
+    // public_base stays verbatim: serde rename_all = "camelCase" maps it to the wire key publicBase,
+    // which the plugin already sends.
     #[serde(default)]
     public_base: Option<String>,
+    #[serde(default)]
+    cap_bytes: Option<i64>,
+    #[serde(default)]
+    regions_budget_bytes: Option<i64>,
+    #[serde(default)]
+    position_warm_budget_bytes: Option<i64>,
 }
 
-/// Replace the source allowlist (and optionally the public base) atomically.
+/// Replace the source allowlist (and optionally the public base and the cap and budget knobs) atomically.
+///
+/// Lowering R (or P) below the currently pinned bytes is the owner's deliberate action and is accepted
+/// as-is. Existing pins are not retroactively trimmed, so the physical total can sit above the new
+/// cap - R until normal eviction and re-download converge it. This is documented and acceptable, not a
+/// bug.
 async fn config(State(st): State<AppState>, Json(body): Json<ConfigBody>) -> StatusCode {
     {
         let mut map = st.sources.write().await;
@@ -73,7 +100,45 @@ async fn config(State(st): State<AppState>, Json(body): Json<ConfigBody>) -> Sta
     if let Some(pb) = body.public_base {
         *st.public_base.write().await = pb;
     }
+    if let Some(c) = body.cap_bytes {
+        st.live_cap_bytes.store(c, Ordering::Relaxed);
+    }
+    if let Some(r) = body.regions_budget_bytes {
+        st.live_regions_budget.store(r, Ordering::Relaxed);
+    }
+    if let Some(p) = body.position_warm_budget_bytes {
+        st.live_position_warm_budget.store(p, Ordering::Relaxed);
+    }
     StatusCode::NO_CONTENT
+}
+
+/// GET /cache/region/:region_id: the total bytes a region currently pins.
+async fn region_bytes_route(State(st): State<AppState>, Path(region_id): Path<String>) -> Response {
+    match st.cache.region_bytes(&region_id) {
+        Ok(bytes) => Json(serde_json::json!({ "bytes": bytes })).into_response(),
+        Err(e) => {
+            eprintln!("tilecache: region_bytes failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// DELETE /cache/region/:region_id: drop a region's pins, then trim the scroll cache to cap - R.
+async fn delete_region_route(State(st): State<AppState>, Path(region_id): Path<String>) -> StatusCode {
+    match st.cache.delete_region(&region_id) {
+        Ok(()) => {
+            // Demoted refcount-zero tiles became scroll-eligible; trim the scroll cache back to S = cap - R
+            // so a delete cannot transiently leave the scroll cache above its budget.
+            let cap = st.live_cap_bytes.load(Ordering::Relaxed);
+            let r = st.live_regions_budget.load(Ordering::Relaxed);
+            crate::fetcher::log_cache_err(st.cache.evict_to(cap - r));
+            StatusCode::NO_CONTENT
+        }
+        Err(e) => {
+            eprintln!("tilecache: delete_region failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
 }
 
 async fn tile(State(st): State<AppState>, Path((source, z, x, y)): Path<(String, u32, u32, u32)>, headers: HeaderMap) -> Response {
@@ -95,6 +160,8 @@ struct WarmBody {
     bbox: [f64; 4],
     minzoom: u32,
     maxzoom: u32,
+    #[serde(default)]
+    region_id: Option<String>,
 }
 
 // Build placeholder ChartSource values keyed only by id; start_warm resolves each against the
@@ -120,6 +187,7 @@ async fn warm_start(State(st): State<AppState>, Json(body): Json<WarmBody>) -> R
         bbox: body.bbox,
         minzoom: body.minzoom,
         maxzoom: body.maxzoom,
+        region_id: body.region_id,
     };
     match crate::warm::start_warm(&st, req).await {
         Ok(job_id) => (StatusCode::OK, Json(serde_json::json!({ "jobId": job_id }))).into_response(),

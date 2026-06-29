@@ -8,7 +8,7 @@ use bytes::Bytes;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicI64, AtomicU64};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock, Semaphore};
@@ -16,6 +16,11 @@ use tokio::sync::{Mutex, RwLock, Semaphore};
 /// Global concurrent egress fetches. Bounds the load the proxy puts on the upstream chart providers.
 /// `pub(crate)` so the warm engine's fan-out limit can be checked against it (it must stay strictly below).
 pub(crate) const EGRESS_CONCURRENCY: usize = 8;
+
+/// The reserved pseudo-region id for position-warm pins. It is carved its own slice P of the regions
+/// budget R (real regions gate against R - P), so position-warm neither escapes nor starves the
+/// regions budget. It must match the plugin's POSITION_WARM_REGION_ID verbatim.
+pub const POSITION_WARM_REGION_ID: &str = "__position_warm__";
 
 /// A DNS resolver that drops forbidden (private, loopback, link-local, multicast, unspecified) target
 /// IPs when reqwest resolves a hostname. It closes the DNS-rebinding gap a pre-connect check leaves,
@@ -91,6 +96,13 @@ pub struct AppState {
     pub warm_semaphore: Arc<Semaphore>,
     /// Monotonic source of warm job ids.
     pub warm_seq: Arc<AtomicU64>,
+    /// The live cache byte cap, initialized from `knobs.cap_bytes` and updated by POST /config so the
+    /// owner can retune it without a container restart. The scroll cache is bounded at `cap - R`.
+    pub live_cap_bytes: Arc<AtomicI64>,
+    /// R: the hard-reserved saved-regions pinned budget. Initialized to 0, set by POST /config.
+    pub live_regions_budget: Arc<AtomicI64>,
+    /// P: the position-warm reserve carved out of R. Initialized to 0, set by POST /config.
+    pub live_position_warm_budget: Arc<AtomicI64>,
 }
 
 impl AppState {
@@ -102,6 +114,8 @@ impl AppState {
             .dns_resolver(Arc::new(GuardedResolver { allow_private: knobs.allow_private_egress }))
             .build()
             .expect("the rustls HTTP client builds with static webpki roots");
+        // Captured before the struct literal moves `knobs` into its field.
+        let cap_bytes = knobs.cap_bytes;
         Self {
             cache,
             client,
@@ -114,6 +128,9 @@ impl AppState {
             warm_jobs: Arc::new(RwLock::new(HashMap::new())),
             warm_semaphore: Arc::new(Semaphore::new(crate::warm::WARM_CONCURRENCY)),
             warm_seq: Arc::new(AtomicU64::new(0)),
+            live_cap_bytes: Arc::new(AtomicI64::new(cap_bytes)),
+            live_regions_budget: Arc::new(AtomicI64::new(0)),
+            live_position_warm_budget: Arc::new(AtomicI64::new(0)),
         }
     }
 

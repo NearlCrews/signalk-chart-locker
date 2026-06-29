@@ -9,6 +9,7 @@ use crate::state::{now_secs, AppState};
 use crate::upstream::expand_upstream;
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
+use std::sync::atomic::Ordering;
 
 /// A fetched upstream body and its metadata, bundled so the store path takes few arguments.
 pub(crate) struct Fetched {
@@ -122,7 +123,8 @@ fn store_200(state: &AppState, source_id: &str, z: u32, x: u32, y: u32, fetched:
         blob: Some(fetched.body.clone()),
     };
     log_cache_err(state.cache.put(source_id, z, x, y, &tile, false, now));
-    log_cache_err(state.cache.evict_to(state.knobs.cap_bytes));
+    // The scroll cache is bounded at cap - R: the saved-regions budget R is reserved for pinned tiles.
+    log_cache_err(state.cache.evict_to(state.live_cap_bytes.load(Ordering::Relaxed) - state.live_regions_budget.load(Ordering::Relaxed)));
     if if_none_match == Some(etag.as_str()) {
         return FetchOutcome::NotModified { etag };
     }

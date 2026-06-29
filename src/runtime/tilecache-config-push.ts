@@ -9,15 +9,28 @@ export const PLUGIN_PUBLIC_BASE = '/plugins/signalk-binnacle-companion'
 export interface TilecacheConfigPayload {
   sources: ChartSource[]
   publicBase: string
+  capBytes: number
+  regionsBudgetBytes: number
+  positionWarmBudgetBytes: number
 }
 
 /**
  * The v1 allowlist is the shared registry alone. Signal K chart resources are NOT included: a chart
  * resource may point at a LAN tile server that the container's SSRF guard blocks, and no v1 render
  * path proxies chart resources. Chart-resource proxying is a later sub-milestone.
+ *
+ * The cache cap and the two pinned budgets (R, the saved-regions reserve, and P, the position-warm
+ * slice of R) are computed by the caller from config and carried here so the container's hard-reserved
+ * two-budget accounting is non-zero. Without this push the container's regions budget stays 0 and every
+ * region warm immediately caps.
  */
-export function buildSourcePayload (publicBase: string = PLUGIN_PUBLIC_BASE): TilecacheConfigPayload {
-  return { sources: CHART_SOURCES, publicBase }
+export function buildSourcePayload (
+  capBytes: number,
+  regionsBudgetBytes: number,
+  positionWarmBudgetBytes: number,
+  publicBase: string = PLUGIN_PUBLIC_BASE
+): TilecacheConfigPayload {
+  return { sources: CHART_SOURCES, publicBase, capBytes, regionsBudgetBytes, positionWarmBudgetBytes }
 }
 
 export type PostJson = (url: string, body: string) => Promise<FetchResponse>

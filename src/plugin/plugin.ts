@@ -17,15 +17,19 @@ import { OverrideStore } from '../charts/overrides.js'
 import { ensureApiAdminGate } from '../shared/admin-gate.js'
 import { join, resolve } from 'node:path'
 import { createPositionWarmer, type PositionWarmer } from '../runtime/position-warmer.js'
-import { loadPrewarmStore, POSITION_WARM_REGION_ID } from '../runtime/prewarm-store.js'
+import { loadPrewarmStore, POSITION_WARM_REGION_ID, positionWarmBudgetBytes } from '../runtime/prewarm-store.js'
 import { warmRegion } from '../runtime/tilecache-client.js'
 
 interface CompanionConfig {
   tilecacheImageTag?: string
   tilecacheCacheCapBytes?: number
+  tilecacheRegionsBudgetBytes?: number
   tilecacheCacheVolumeSource?: string
   chartsPath?: string
 }
+
+/** The cache cap default, in bytes: 2 GiB. Mirrors the tilecacheCacheCapBytes schema default. */
+const DEFAULT_CACHE_CAP_BYTES = 2147483648
 
 export function createPlugin (app: ServerAPI): Plugin {
   // All lifecycle transitions are serialized through this chain. It always resolves: errors from
@@ -112,7 +116,15 @@ export function createPlugin (app: ServerAPI): Plugin {
         if (!(await probeTilecacheHealth(tcAddress))) {
           app.debug('Tilecache container did not pass its health probe at startup; tiles will work once it is ready.')
         }
-        const pushed = await pushTilecacheConfig(tcAddress, buildSourcePayload())
+        // R, the saved-regions reserve: the configured value, or half the cap when left at 0 (the
+        // default). P, the position-warm slice of R, is derived. Pushed so the container's hard-reserved
+        // two-budget accounting is non-zero; without it every region warm immediately caps.
+        const capBytes = config.tilecacheCacheCapBytes ?? DEFAULT_CACHE_CAP_BYTES
+        const regionsBudgetBytes = (config.tilecacheRegionsBudgetBytes ?? 0) > 0
+          ? config.tilecacheRegionsBudgetBytes!
+          : Math.floor(capBytes * 0.5)
+        const pBudget = positionWarmBudgetBytes(regionsBudgetBytes)
+        const pushed = await pushTilecacheConfig(tcAddress, buildSourcePayload(capBytes, regionsBudgetBytes, pBudget))
         if (!pushed) {
           app.debug('Tilecache config push failed; the proxy has an empty allowlist until the next push.')
         }
@@ -183,6 +195,12 @@ export function createPlugin (app: ServerAPI): Plugin {
           title: 'Tile cache size cap, in bytes',
           description: 'The maximum disk the tile cache uses before evicting the least recently used tiles. Default 2 GiB; keep it conservative on a microSD card.',
           default: 2147483648
+        },
+        tilecacheRegionsBudgetBytes: {
+          type: 'number',
+          title: 'Saved-regions reserved budget, in bytes',
+          description: 'Disk hard-reserved for downloaded saved regions, kept separate from the scrolling tile cache so a region download is never evicted by panning. Leave 0 to reserve half the cache cap.',
+          default: 0
         },
         tilecacheCacheVolumeSource: {
           type: 'string',

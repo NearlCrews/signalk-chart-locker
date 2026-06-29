@@ -18,6 +18,7 @@ use axum::{
 use bytes::Bytes;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 pub fn style_routes() -> Router<AppState> {
     Router::new()
@@ -183,7 +184,8 @@ async fn vector_tile(State(state): State<AppState>, Path((source, name, z, x, y)
                 blob: Some(body),
             };
             crate::fetcher::log_cache_err(state.cache.put(&cache_source, z, x, y, &tile, false, now));
-            crate::fetcher::log_cache_err(state.cache.evict_to(state.knobs.cap_bytes));
+            // The scroll cache is bounded at cap - R: the saved-regions budget R is reserved for pinned tiles.
+            crate::fetcher::log_cache_err(state.cache.evict_to(state.live_cap_bytes.load(Ordering::Relaxed) - state.live_regions_budget.load(Ordering::Relaxed)));
             tile_response(&tile, if_none_match.as_deref())
         }
         None => StatusCode::BAD_GATEWAY.into_response(),

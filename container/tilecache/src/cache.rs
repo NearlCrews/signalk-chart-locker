@@ -13,7 +13,7 @@ use std::sync::{Mutex, MutexGuard};
 /// disposable, so a column change rebuilds rather than reading stale rows). A bump wipes the
 /// pinned box along with the rest of the cache; the pinned-box durability guarantee holds only
 /// within a schema version, not across a bump. A warm can always be re-run.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// A stored tile, or a negative-cache marker when `blob` is `None` (a 404 or 204 from upstream). The
 /// blob is a ref-counted `Bytes`, so serving a cache hit clones a handle, not the bytes.
@@ -57,6 +57,7 @@ pub struct PutManyOutcome {
 struct Inner {
     conn: Connection,
     total_bytes: i64,
+    pinned_bytes: i64,
 }
 
 /// The disk tile cache, opened at a path on the mounted cache volume.
@@ -77,7 +78,8 @@ impl TileCache {
         conn.pragma_update(None, "wal_autocheckpoint", 1000)?;
         Self::ensure_schema(&conn)?;
         let total_bytes: i64 = conn.query_row("SELECT COALESCE(SUM(bytes), 0) FROM tiles", [], |r| r.get(0))?;
-        Ok(Self { inner: Mutex::new(Inner { conn, total_bytes }) })
+        let pinned_bytes: i64 = conn.query_row("SELECT COALESCE(SUM(bytes), 0) FROM tiles WHERE pinned = 1", [], |r| r.get(0))?;
+        Ok(Self { inner: Mutex::new(Inner { conn, total_bytes, pinned_bytes }) })
     }
 
     /// Take the connection lock, recovering the guard on a poisoned mutex so a single panic under the
@@ -89,6 +91,7 @@ impl TileCache {
     fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version != SCHEMA_VERSION {
+            conn.execute_batch("DROP TABLE IF EXISTS region_tiles;")?;
             conn.execute_batch("DROP TABLE IF EXISTS tiles;")?;
             conn.execute_batch(
                 "CREATE TABLE tiles (
@@ -104,6 +107,16 @@ impl TileCache {
                     blob BLOB,
                     pinned INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (source, z, x, y)
+                );",
+            )?;
+            conn.execute_batch(
+                "CREATE TABLE region_tiles (
+                    region_id TEXT NOT NULL,
+                    source    TEXT NOT NULL,
+                    z         INTEGER NOT NULL,
+                    x         INTEGER NOT NULL,
+                    y         INTEGER NOT NULL,
+                    PRIMARY KEY (region_id, source, z, x, y)
                 );",
             )?;
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -199,28 +212,39 @@ impl TileCache {
         Ok(())
     }
 
-    /// Store a batch of warm tiles pinned, in one transaction, with an explicit pre-store cap check.
-    /// A warm NEVER evicts: when the next sized row would cross `cap_bytes`, it stops and reports
-    /// `capped`. Negative-cache rows (zero bytes) always store. Pinned rows are eviction-exempt but
-    /// still count against the cap, so the budget stays honest. The cap check uses the NET byte delta
-    /// (new bytes minus any existing row's bytes), so re-warming an already-cached tile does not trip
-    /// the cap early on an `INSERT OR REPLACE`.
-    pub fn put_many_pinned(&self, rows: &[WarmRow], cap_bytes: i64, now: i64) -> rusqlite::Result<PutManyOutcome> {
+    /// Store a batch of warm tiles pinned, in one transaction, with an explicit pre-store budget check.
+    /// A warm NEVER evicts: when the next sized row would push the pinned set past `budget`, it stops
+    /// and reports `capped`. `budget` is the EFFECTIVE pinned budget the caller passes for this warm
+    /// (R for the position-warm pseudo-region, R - P for a real region). Negative-cache rows (zero
+    /// bytes) always store. The gate is on the PINNED byte total, never the cache total: an unpinned
+    /// scroll tile filling the cache does not trip a region warm. A row's pin contribution is the net
+    /// delta (new bytes minus old bytes) when the row was ALREADY pinned, and the full new bytes when
+    /// it was previously unpinned or absent (the tile newly enters the pinned set), so a shared tile
+    /// is counted once. When `region_id` is `Some`, each stored tile is also recorded in
+    /// `region_tiles` for reference counting.
+    pub fn put_many_pinned(&self, rows: &[WarmRow], budget: i64, region_id: Option<&str>, now: i64) -> rusqlite::Result<PutManyOutcome> {
         let mut inner = self.lock();
         let base = inner.total_bytes;
+        let pinned_base = inner.pinned_bytes;
         let mut added = 0i64;
+        let mut pinned_added = 0i64;
         let mut stored = 0usize;
         let mut capped = false;
         {
             let tx = inner.conn.unchecked_transaction()?;
             for r in rows {
-                let old: Option<i64> = tx.query_row(
-                    "SELECT bytes FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
-                    params![r.source, r.z, r.x, r.y], |row| row.get(0),
+                let prev: Option<(i64, i64)> = tx.query_row(
+                    "SELECT bytes, pinned FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
+                    params![r.source, r.z, r.x, r.y], |row| Ok((row.get(0)?, row.get(1)?)),
                 ).optional()?;
-                let delta = r.tile.bytes - old.unwrap_or(0);
-                // Only a net-positive sized row can cross the cap; a re-warm of equal or smaller bytes never does.
-                if delta > 0 && base + added + delta > cap_bytes {
+                let old_bytes = prev.map(|(b, _)| b).unwrap_or(0);
+                let was_pinned = prev.map(|(_, p)| p == 1).unwrap_or(false);
+                let delta = r.tile.bytes - old_bytes;
+                // The pin contribution is the net delta when the row was already pinned, else the full
+                // new bytes (the tile newly enters the pinned set).
+                let pin_delta = if was_pinned { r.tile.bytes - old_bytes } else { r.tile.bytes };
+                // Only a net-positive pin contribution can cross the budget; the gate is on pinned bytes.
+                if pin_delta > 0 && pinned_base + pinned_added + pin_delta > budget {
                     capped = true;
                     break;
                 }
@@ -233,31 +257,52 @@ impl TileCache {
                         r.tile.status, r.tile.fetched_at, now, r.tile.bytes, r.tile.blob.as_deref()
                     ],
                 )?;
+                if let Some(rid) = region_id {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO region_tiles (region_id, source, z, x, y) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![rid, r.source, r.z, r.x, r.y],
+                    )?;
+                }
                 added += delta;
+                pinned_added += pin_delta;
                 stored += 1;
             }
             tx.commit()?;
         }
         inner.total_bytes = base + added;
+        inner.pinned_bytes = pinned_base + pinned_added;
         Ok(PutManyOutcome { stored, bytes_added: added, capped })
     }
 
     /// Mark an already-cached row pinned (eviction-exempt) without re-fetching or changing its
-    /// bytes. A warm calls this when it skips a tile that is already cached fresh, so a tile
-    /// previously stored unpinned by the live proxy still becomes part of the eviction-exempt box.
-    /// A no-op when the row is absent.
+    /// bytes, keeping `pinned_bytes` in sync (the bytes are added only when the row was previously
+    /// unpinned). Test-only: the warm path uses `pin_if_fresh` so the budget gate and the join-table
+    /// insert run under the same lock. A no-op when the row is absent.
     pub fn pin(&self, source: &str, z: u32, x: u32, y: u32) -> rusqlite::Result<()> {
-        let inner = self.lock();
+        let mut inner = self.lock();
+        let prev: Option<(i64, i64)> = inner.conn.query_row(
+            "SELECT bytes, pinned FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
+            params![source, z, x, y], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?;
+        let Some((tile_bytes, pinned)) = prev else { return Ok(()) };
         inner.conn.execute(
             "UPDATE tiles SET pinned = 1 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
             params![source, z, x, y],
         )?;
+        if pinned != 1 {
+            inner.pinned_bytes += tile_bytes;
+        }
         Ok(())
     }
 
     /// Check freshness and pin under the same lock, eliminating the get-then-pin race where a
     /// concurrent evict_to could delete the row between the two separate calls. Returns `true`
-    /// when a fresh or negative-TTL row was found and pinned; `false` when absent or stale.
+    /// when a fresh or negative-TTL row was found and pinned; `false` when absent, stale, or when
+    /// the tile is not yet pinned and pinning it would push the pinned set past `budget`. `budget`
+    /// is the effective pinned budget for this warm (R for the pseudo-region, R - P for a real
+    /// region). `pinned_bytes` grows only when the tile newly enters the pinned set, so an
+    /// already-pinned shared tile is never double-counted; when `region_id` is `Some`, the join row
+    /// is recorded regardless so the tile is reference-counted for this region too.
     #[allow(clippy::too_many_arguments)]
     pub fn pin_if_fresh(
         &self,
@@ -268,8 +313,10 @@ impl TileCache {
         now: i64,
         fresh_secs: i64,
         negative_ttl_secs: i64,
+        budget: i64,
+        region_id: Option<&str>,
     ) -> rusqlite::Result<bool> {
-        let inner = self.lock();
+        let mut inner = self.lock();
         let row: Option<(i64, i64)> = inner
             .conn
             .query_row(
@@ -284,11 +331,122 @@ impl TileCache {
         if !fresh && !neg {
             return Ok(false);
         }
+        let (tile_bytes, was_pinned): (i64, bool) = inner.conn.query_row(
+            "SELECT bytes, pinned FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
+            params![source, z, x, y], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? == 1)),
+        ).optional()?.unwrap_or((0, false));
+        if !was_pinned && inner.pinned_bytes + tile_bytes > budget {
+            return Ok(false);
+        }
         inner.conn.execute(
             "UPDATE tiles SET pinned = 1 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
             params![source, z, x, y],
         )?;
+        if !was_pinned {
+            inner.pinned_bytes += tile_bytes;
+        }
+        if let Some(rid) = region_id {
+            inner.conn.execute(
+                "INSERT OR IGNORE INTO region_tiles (region_id, source, z, x, y) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![rid, source, z, x, y],
+            )?;
+        }
         Ok(true)
+    }
+
+    /// Pin an already-cached tile for a region, gating on the effective pinned `budget`. Returns
+    /// `false` when the tile is unpinned and pinning it would push the pinned set past `budget`;
+    /// otherwise pins it (adding the bytes to `pinned_bytes` only when it newly enters the pinned
+    /// set), records the join row when `region_id` is `Some`, and returns `true`. A no-op returning
+    /// `false` when the row is absent.
+    pub fn pin_for_region(
+        &self,
+        source: &str,
+        z: u32,
+        x: u32,
+        y: u32,
+        budget: i64,
+        region_id: Option<&str>,
+    ) -> rusqlite::Result<bool> {
+        let mut inner = self.lock();
+        let prev: Option<(i64, i64)> = inner.conn.query_row(
+            "SELECT bytes, pinned FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
+            params![source, z, x, y], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?;
+        let Some((tile_bytes, pinned)) = prev else { return Ok(false) };
+        let was_pinned = pinned == 1;
+        if !was_pinned && inner.pinned_bytes + tile_bytes > budget {
+            return Ok(false);
+        }
+        inner.conn.execute(
+            "UPDATE tiles SET pinned = 1 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
+            params![source, z, x, y],
+        )?;
+        if !was_pinned {
+            inner.pinned_bytes += tile_bytes;
+        }
+        if let Some(rid) = region_id {
+            inner.conn.execute(
+                "INSERT OR IGNORE INTO region_tiles (region_id, source, z, x, y) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![rid, source, z, x, y],
+            )?;
+        }
+        Ok(true)
+    }
+
+    /// Drop a region's join rows; for each tile whose reference count reaches zero, clear its pin and
+    /// subtract its bytes from `pinned_bytes` (it demotes to the scroll cache). `total_bytes` is
+    /// unchanged: the tile is not deleted, only made eviction-eligible. Re-running this at warm start
+    /// clears a region's prior pins before a re-download or a position-warm re-pin, so a narrower tile
+    /// set leaves no orphan join rows.
+    pub fn delete_region(&self, region_id: &str) -> rusqlite::Result<()> {
+        let mut inner = self.lock();
+        let mut freed = 0i64;
+        {
+            let tx = inner.conn.unchecked_transaction()?;
+            let tiles: Vec<(String, u32, u32, u32)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT source, z, x, y FROM region_tiles WHERE region_id = ?1",
+                )?;
+                let rows = stmt.query_map(params![region_id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?, r.get::<_, u32>(2)?, r.get::<_, u32>(3)?))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            tx.execute("DELETE FROM region_tiles WHERE region_id = ?1", params![region_id])?;
+            for (source, z, x, y) in tiles {
+                let refs: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM region_tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
+                    params![source, z, x, y], |r| r.get(0),
+                )?;
+                if refs == 0 {
+                    let bytes: Option<i64> = tx.query_row(
+                        "SELECT bytes FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4 AND pinned = 1",
+                        params![source, z, x, y], |r| r.get(0),
+                    ).optional()?;
+                    if let Some(b) = bytes {
+                        tx.execute(
+                            "UPDATE tiles SET pinned = 0 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
+                            params![source, z, x, y],
+                        )?;
+                        freed += b;
+                    }
+                }
+            }
+            tx.commit()?;
+        }
+        inner.pinned_bytes -= freed;
+        Ok(())
+    }
+
+    /// The total stored bytes pinned by a region, summing only that region's join rows.
+    pub fn region_bytes(&self, region_id: &str) -> rusqlite::Result<i64> {
+        let inner = self.lock();
+        inner.conn.query_row(
+            "SELECT COALESCE(SUM(t.bytes), 0) FROM region_tiles rt JOIN tiles t
+             ON rt.source = t.source AND rt.z = t.z AND rt.x = t.x AND rt.y = t.y WHERE rt.region_id = ?1",
+            params![region_id], |r| r.get(0),
+        )
     }
 
     /// The mean stored byte size per source over real (status 200, blob present) tiles, excluding
@@ -303,12 +461,12 @@ impl TileCache {
         rows.collect()
     }
 
-    /// Row count and total bytes. The total is O(1) (maintained on every put and delete); the count is
-    /// a `COUNT(*)`, O(n) in SQLite, but `/cache/stats` is called rarely.
-    pub fn stats(&self) -> rusqlite::Result<(i64, i64)> {
+    /// Row count, total bytes, and pinned bytes. The totals are O(1) (maintained on every mutating
+    /// call); the count is a `COUNT(*)`, O(n) in SQLite, but `/cache/stats` is called rarely.
+    pub fn stats(&self) -> rusqlite::Result<(i64, i64, i64)> {
         let inner = self.lock();
         let rows: i64 = inner.conn.query_row("SELECT COUNT(*) FROM tiles", [], |r| r.get(0))?;
-        Ok((rows, inner.total_bytes))
+        Ok((rows, inner.total_bytes, inner.pinned_bytes))
     }
 }
 
@@ -353,7 +511,7 @@ mod tests {
         let (_f, c) = open();
         c.put("s", 0, 0, 0, &tile(5, 200, Some(vec![0; 5])), false, 1).unwrap();
         c.put("s", 0, 0, 0, &tile(2, 200, Some(vec![0; 2])), false, 2).unwrap();
-        assert_eq!(c.stats().unwrap(), (1, 2));
+        assert_eq!(c.stats().unwrap(), (1, 2, 0));
     }
 
     #[test]
@@ -404,7 +562,7 @@ mod tests {
             WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(8, 200, Some(vec![0; 8])) },
             WarmRow { source: "s".into(), z: 0, x: 0, y: 1, tile: tile(8, 200, Some(vec![0; 8])) },
         ];
-        let outcome = c.put_many_pinned(&rows, 10, 5).unwrap();
+        let outcome = c.put_many_pinned(&rows, 10, None, 5).unwrap();
         assert_eq!(outcome.stored, 1, "only the first tile fits under the 10-byte cap");
         assert!(outcome.capped, "the batch reports capped rather than evicting");
         assert_eq!(c.stats().unwrap().1, 8, "no eviction happened");
@@ -418,24 +576,24 @@ mod tests {
         let neg_ttl = 600i64;
 
         // Absent row: returns false.
-        assert!(!c.pin_if_fresh("s", 0, 0, 0, now, fresh_secs, neg_ttl).unwrap());
+        assert!(!c.pin_if_fresh("s", 0, 0, 0, now, fresh_secs, neg_ttl, 2_000_000_000, None).unwrap());
 
         // Fresh 200 row: returns true and pins it.
         c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, now).unwrap();
-        assert!(c.pin_if_fresh("s", 0, 0, 0, now, fresh_secs, neg_ttl).unwrap());
+        assert!(c.pin_if_fresh("s", 0, 0, 0, now, fresh_secs, neg_ttl, 2_000_000_000, None).unwrap());
         c.evict_to(0).unwrap();
         assert!(c.get("s", 0, 0, 0).unwrap().is_some(), "pinned row survives eviction");
 
         // Stale row: fetched_at far enough in the past that now - fetched_at >= fresh_secs.
         let stale = CachedTile { fetched_at: now - fresh_secs - 1, ..tile(10, 200, Some(vec![0; 10])) };
         c.put("s", 0, 0, 1, &stale, false, now).unwrap();
-        assert!(!c.pin_if_fresh("s", 0, 0, 1, now, fresh_secs, neg_ttl).unwrap());
+        assert!(!c.pin_if_fresh("s", 0, 0, 1, now, fresh_secs, neg_ttl, 2_000_000_000, None).unwrap());
 
         // Fresh negative (404) row within negative_ttl: returns true and pins it.
         // fetched_at must be `now` so now - fetched_at = 0 < neg_ttl.
         let neg_row = CachedTile { fetched_at: now, ..tile(0, 404, None) };
         c.put("s", 0, 0, 2, &neg_row, false, now).unwrap();
-        assert!(c.pin_if_fresh("s", 0, 0, 2, now, fresh_secs, neg_ttl).unwrap());
+        assert!(c.pin_if_fresh("s", 0, 0, 2, now, fresh_secs, neg_ttl, 2_000_000_000, None).unwrap());
         c.evict_to(0).unwrap();
         assert!(c.get("s", 0, 0, 2).unwrap().is_some(), "pinned negative row survives eviction");
     }
@@ -457,5 +615,130 @@ mod tests {
         c.evict_to(0).unwrap(); // would drop every unpinned row
         assert!(c.get("s", 0, 0, 0).unwrap().is_some(), "a pinned row survives eviction");
         assert_eq!(c.stats().unwrap().1, 10, "pin changes no bytes");
+    }
+
+    #[test]
+    fn join_table_reference_counting_keeps_shared_tile_on_partial_delete() {
+        let (_f, c) = open();
+        let now = 1000i64;
+        let rows = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(10, 200, Some(vec![0; 10])) }];
+        // Two regions share the same tile.
+        c.put_many_pinned(&rows, 2_000_000_000, Some("r1"), now).unwrap();
+        c.put_many_pinned(&rows, 2_000_000_000, Some("r2"), now).unwrap();
+        // Deleting r1 must not unpin the tile because r2 still references it.
+        c.delete_region("r1").unwrap();
+        assert!(c.get("s", 0, 0, 0).unwrap().is_some(), "tile survives: r2 still holds a reference");
+        // Deleting r2 drops the last reference; the tile demotes to unpinned and is evictable.
+        c.delete_region("r2").unwrap();
+        c.evict_to(0).unwrap();
+        assert!(c.get("s", 0, 0, 0).unwrap().is_none(), "tile evicted after all references are removed");
+    }
+
+    #[test]
+    fn region_warm_gates_on_pinned_bytes_not_total_bytes() {
+        let (_f, c) = open();
+        let now = 1000i64;
+        // Fill the scroll cache to 900 bytes (unpinned); total_bytes = 900.
+        c.put("s", 0, 0, 0, &tile(900, 200, Some(vec![0; 900])), false, now).unwrap();
+        // R = 200; even though total_bytes >> R, pinned_bytes = 0 so a 150-byte region warm fits.
+        let rows = vec![WarmRow { source: "s".into(), z: 0, x: 1, y: 0, tile: tile(150, 200, Some(vec![0; 150])) }];
+        let out = c.put_many_pinned(&rows, 200, Some("r1"), now).unwrap();
+        assert!(!out.capped, "region warm fits within R even when total_bytes >> R");
+        assert_eq!(out.stored, 1);
+    }
+
+    #[test]
+    fn scroll_eviction_is_bounded_at_cap_minus_r() {
+        let (_f, c) = open();
+        let now = 1000i64;
+        // Pin 100 bytes as a region.
+        let pinned = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(100, 200, Some(vec![0; 100])) }];
+        c.put_many_pinned(&pinned, 2_000_000_000, Some("r1"), now).unwrap();
+        // Add 300 bytes unpinned (scroll).
+        c.put("s", 1, 0, 0, &tile(300, 200, Some(vec![0; 300])), false, now).unwrap();
+        // cap - R = 500 - 100 = 400; evict_to(400) leaves all 300 scroll bytes and the 100 pinned.
+        c.evict_to(400).unwrap();
+        let (_rows, total, pinned_b) = c.stats().unwrap();
+        assert_eq!(pinned_b, 100, "pinned bytes unchanged");
+        assert_eq!(total, 400, "100 pinned plus 300 scroll, all within the scroll budget");
+    }
+
+    #[test]
+    fn pin_for_region_refuses_when_budget_would_be_exceeded() {
+        let (_f, c) = open();
+        let now = 1000i64;
+        c.put("s", 0, 0, 0, &tile(500, 200, Some(vec![0; 500])), false, now).unwrap();
+        // R = 100; pinning a 500-byte tile would exceed R.
+        let pinned = c.pin_for_region("s", 0, 0, 0, 100, Some("r1")).unwrap();
+        assert!(!pinned, "pin_for_region must refuse when pinned_bytes + tile_bytes > R");
+        c.evict_to(0).unwrap();
+        assert!(c.get("s", 0, 0, 0).unwrap().is_none(), "the tile was not pinned and is evictable");
+    }
+
+    #[test]
+    fn repinning_an_existing_unpinned_tile_adds_the_full_bytes_to_pinned_bytes() {
+        let (_f, c) = open();
+        let now = 1000i64;
+        // A live-proxy scroll tile already exists UNPINNED at 100 bytes; pinned_bytes = 0.
+        c.put("s", 0, 0, 0, &tile(100, 200, Some(vec![0; 100])), false, now).unwrap();
+        let (_r0, _t0, pinned0) = c.stats().unwrap();
+        assert_eq!(pinned0, 0, "an unpinned scroll tile contributes nothing to pinned_bytes");
+        // A region warm pins that same key (equal bytes). pinned_bytes must grow by the FULL 100,
+        // not by the net delta (0), because the tile newly ENTERS the pinned set.
+        let rows = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(100, 200, Some(vec![0; 100])) }];
+        let out = c.put_many_pinned(&rows, 100, Some("r1"), now).unwrap();
+        assert!(!out.capped, "the re-pin fits exactly within R = 100");
+        let (_r1, _t1, pinned1) = c.stats().unwrap();
+        assert_eq!(pinned1, 100, "re-pinning an existing unpinned tile adds the full bytes to pinned_bytes");
+        // The R gate counts it: a second distinct pinned tile would now exceed R = 100.
+        let more = vec![WarmRow { source: "s".into(), z: 0, x: 1, y: 0, tile: tile(50, 200, Some(vec![0; 50])) }];
+        let out2 = c.put_many_pinned(&more, 100, Some("r1"), now).unwrap();
+        assert!(out2.capped, "with 100 already pinned, another 50 must trip R = 100");
+    }
+
+    #[test]
+    fn pin_if_fresh_does_not_double_count_an_already_pinned_tile() {
+        let (_f, c) = open();
+        let now = 1000i64;
+        // r1 pins the tile (100 bytes); pinned_bytes = 100.
+        let rows = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(100, 200, Some(vec![0; 100])) }];
+        c.put_many_pinned(&rows, 2_000_000_000, Some("r1"), now).unwrap();
+        // r2's warm skips-but-pins the same already-pinned tile via pin_if_fresh; pinned_bytes must NOT grow.
+        assert!(c.pin_if_fresh("s", 0, 0, 0, now, 86_400, 600, 2_000_000_000, Some("r2")).unwrap());
+        let (_r, _t, pinned) = c.stats().unwrap();
+        assert_eq!(pinned, 100, "pinning an already-pinned shared tile does not double-count pinned_bytes");
+    }
+
+    #[test]
+    fn region_bytes_sums_only_the_regions_tiles() {
+        let (_f, c) = open();
+        let now = 1000i64;
+        let r1 = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(100, 200, Some(vec![0; 100])) }];
+        let r2 = vec![WarmRow { source: "s".into(), z: 0, x: 1, y: 0, tile: tile(40, 200, Some(vec![0; 40])) }];
+        c.put_many_pinned(&r1, 2_000_000_000, Some("r1"), now).unwrap();
+        c.put_many_pinned(&r2, 2_000_000_000, Some("r2"), now).unwrap();
+        assert_eq!(c.region_bytes("r1").unwrap(), 100);
+        assert_eq!(c.region_bytes("r2").unwrap(), 40);
+        assert_eq!(c.region_bytes("absent").unwrap(), 0);
+    }
+
+    #[test]
+    fn schema_version_3_wipe_clears_both_tables() {
+        let f = NamedTempFile::new().unwrap();
+        {
+            let c = TileCache::open(f.path()).unwrap();
+            let rows = vec![WarmRow { source: "s".into(), z: 0, x: 0, y: 0, tile: tile(10, 200, Some(vec![0; 10])) }];
+            c.put_many_pinned(&rows, 2_000_000_000, Some("r1"), 1).unwrap();
+        }
+        // Force a version mismatch so the next open wipes both tables.
+        {
+            let conn = rusqlite::Connection::open(f.path()).unwrap();
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION - 1).unwrap();
+        }
+        let c2 = TileCache::open(f.path()).unwrap();
+        let (rows, total, pinned) = c2.stats().unwrap();
+        assert_eq!(rows, 0, "wipe clears all tiles");
+        assert_eq!(total, 0);
+        assert_eq!(pinned, 0);
     }
 }
