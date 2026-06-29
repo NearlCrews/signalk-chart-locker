@@ -2,9 +2,15 @@
  * the box and the settings (the source of truth) and forward warm operations to the tilecache container.
  * Mounted only when the admin gate holds, so an ungatable server leaves them unmounted (fail closed). */
 
+import { randomUUID } from 'node:crypto'
 import type { ServerAPI } from '@signalk/server-api'
+import { estimateBytes } from 'signalk-binnacle-chart-sources'
 import { ensureApiAdminGate } from '../shared/admin-gate.js'
-import { loadPrewarmConfig, savePrewarmConfig, type PrewarmConfig } from '../runtime/prewarm-store.js'
+import {
+  loadPrewarmConfig, savePrewarmConfig, type PrewarmConfig,
+  addRegion, updateRegion, removeRegion, listRegions,
+  type SavedRegion, type RegionStatus
+} from '../runtime/prewarm-store.js'
 
 export interface PrewarmRequest {
   params: Record<string, string>
@@ -21,6 +27,23 @@ export interface PrewarmResponse {
 export interface PrewarmRouter {
   get (path: string, handler: (req: PrewarmRequest, res: PrewarmResponse) => void | Promise<void>): void
   post (path: string, handler: (req: PrewarmRequest, res: PrewarmResponse) => void | Promise<void>): void
+  delete (path: string, handler: (req: PrewarmRequest, res: PrewarmResponse) => void | Promise<void>): void
+}
+
+/** A terminal-or-running warm job snapshot, as the container reports it from GET /warm/:jobId. */
+interface WarmSnapshot {
+  total: number
+  done: number
+  skipped: number
+  bytes: number
+  errors: number
+  state: 'running' | 'done' | 'cancelled' | 'capped' | 'error'
+}
+
+/** Stats the budget re-validation reads from the container. */
+interface ContainerStats {
+  regionsFreeBytes?: number
+  perSourceAvgBytes?: Record<string, number>
 }
 
 type FetchImpl = (url: string, init?: { method?: string, headers?: Record<string, string>, body?: string }) => Promise<Response>
@@ -76,25 +99,54 @@ export function registerPrewarmRoutes (router: PrewarmRouter, app: ServerAPI, ge
     }
   }
 
-  router.post('/api/prewarm', async (req, res) => {
-    const address = withAddress(res); if (address === null) return
-    const b = (req.body ?? {}) as Partial<PrewarmConfig>
-    const current = loadPrewarmConfig(dataDir)
-    const minzoom = b.minzoom ?? current.minzoom
-    const maxzoom = b.maxzoom ?? current.maxzoom
-    // Validate BEFORE persisting: a non-finite or inverted bbox stored as the source of truth would be
-    // compared against NaN in the position-warm insideBox check (always false) and warm continuously.
-    if (!isValidBbox(b.bbox) || !Array.isArray(b.sources) ||
-        !Number.isFinite(minzoom) || !Number.isFinite(maxzoom) || minzoom > maxzoom) {
-      res.status(400).json({ error: 'a finite, ordered bbox, a sources array, and minzoom <= maxzoom are required' }); return
-    }
-    savePrewarmConfig(dataDir, { ...current, bbox: b.bbox, sources: b.sources, minzoom, maxzoom })
-    return relay(res, fetchImpl(`http://${address}/warm`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ sources: b.sources, bbox: b.bbox, minzoom, maxzoom })
-    }))
+  // The latest warm job per region, set on POST and redownload. In-memory: it does not survive a plugin
+  // restart, so the status route and the startup sweep treat a missing job for a downloading region as
+  // a lost job and reconcile it to error.
+  const regionJobs = new Map<string, string>()
+
+  const warmInit = (body: unknown): { method: string, headers: Record<string, string>, body: string } => ({
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body)
   })
+
+  // Best-effort container region_bytes; falls back to the supplied default when unreachable.
+  const regionBytes = async (address: string, regionId: string, fallback: number): Promise<number> => {
+    try {
+      const r = await fetchImpl(`http://${address}/cache/region/${encodeURIComponent(regionId)}`)
+      if (!r.ok) return fallback
+      const data = (await r.json()) as { bytes?: number }
+      return typeof data.bytes === 'number' ? data.bytes : fallback
+    } catch {
+      return fallback
+    }
+  }
+
+  const statusFromState = (state: WarmSnapshot['state']): RegionStatus => {
+    if (state === 'done') return 'ready'
+    if (state === 'capped') return 'capped'
+    return 'error' // 'error' or 'cancelled'
+  }
+
+  // Map a terminal warm snapshot to the persisted region status. A running snapshot leaves the region
+  // untouched. A terminal snapshot writes status, lastDownloadedAt, and the container region_bytes.
+  const reconcile = async (address: string, regionId: string, snapshot: WarmSnapshot): Promise<void> => {
+    if (snapshot.state === 'running') return
+    const bytes = await regionBytes(address, regionId, snapshot.bytes)
+    updateRegion(dataDir, regionId, {
+      status: statusFromState(snapshot.state),
+      lastDownloadedAt: Math.floor(Date.now() / 1000),
+      bytes
+    })
+  }
+
+  // A region whose job is gone (unknown id or a 404 from the container) must not stay downloading.
+  const reconcileLostJob = (regionId: string): void => {
+    const region = listRegions(dataDir).find((r) => r.id === regionId)
+    if (region && region.status === 'downloading') {
+      updateRegion(dataDir, regionId, { status: 'error' })
+    }
+  }
 
   router.get('/api/prewarm/status/:jobId', async (req, res) => {
     const address = withAddress(res); if (address === null) return
@@ -132,6 +184,117 @@ export function registerPrewarmRoutes (router: PrewarmRouter, app: ServerAPI, ge
     const { lat, lon } = query
     if (!lat || !lon) { res.status(400).json({ error: 'lat and lon are required' }); return }
     return relay(res, fetchImpl(`http://${address}/geocode?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`))
+  })
+
+  router.get('/api/regions', async (_req, res) => {
+    const address = getAddress()
+    const regions = listRegions(dataDir)
+    const dtos = await Promise.all(regions.map(async (region) => {
+      // cachedBytes is cache-derived from the container; 0 when the container is unreachable.
+      const cachedBytes = address === null ? 0 : await regionBytes(address, region.id, region.bytes)
+      return { ...region, cachedBytes }
+    }))
+    res.status(200).json(dtos)
+  })
+
+  router.post('/api/regions', async (req, res) => {
+    const b = (req.body ?? {}) as { bbox?: unknown, sourceIds?: unknown, minzoom?: unknown, maxzoom?: unknown, name?: unknown }
+    const { bbox, sourceIds, minzoom, maxzoom, name } = b
+    // Validate BEFORE touching the container so an invalid body is a 400 even with no address.
+    if (!isValidBbox(bbox) ||
+        !Array.isArray(sourceIds) || !sourceIds.every((s) => typeof s === 'string') ||
+        typeof minzoom !== 'number' || !Number.isFinite(minzoom) ||
+        typeof maxzoom !== 'number' || !Number.isFinite(maxzoom) || minzoom > maxzoom ||
+        typeof name !== 'string' || name.trim().length === 0) {
+      res.status(400).json({ error: 'a finite ordered bbox, a sourceIds array, minzoom <= maxzoom, and a non-empty name are required' }); return
+    }
+    const address = withAddress(res); if (address === null) return
+    // Re-validate the byte estimate authoritatively server-side, upfront, with the SHARED estimateBytes
+    // (so the panel and the plugin agree), and refuse over-budget BEFORE persisting or starting the job.
+    let stats: ContainerStats
+    try {
+      stats = (await (await fetchImpl(`http://${address}/cache/stats`)).json()) as ContainerStats
+    } catch {
+      res.status(502).json({ error: 'tilecache unreachable' }); return
+    }
+    const estimate = estimateBytes(sourceIds, bbox, [minzoom, maxzoom], stats.perSourceAvgBytes ?? {})
+    if (estimate > (stats.regionsFreeBytes ?? 0)) {
+      res.status(400).json({ error: 'exceeds regions budget' }); return
+    }
+    const region: SavedRegion = {
+      id: randomUUID(),
+      name: name.trim(),
+      bbox,
+      sourceIds,
+      minzoom,
+      maxzoom,
+      createdAt: Math.floor(Date.now() / 1000),
+      lastDownloadedAt: null,
+      bytes: 0,
+      status: 'downloading'
+    }
+    addRegion(dataDir, region)
+    try {
+      const warmResp = await fetchImpl(`http://${address}/warm`, warmInit({ sources: sourceIds, bbox, minzoom, maxzoom, regionId: region.id }))
+      const { jobId } = (await warmResp.json()) as { jobId: string }
+      regionJobs.set(region.id, jobId)
+      res.status(200).json({ region, jobId })
+    } catch {
+      res.status(502).json({ error: 'tilecache unreachable' })
+    }
+  })
+
+  router.delete('/api/regions/:id', async (req, res) => {
+    const id = req.params.id
+    // The plugin store is the source of truth for the list, so remove it locally first, then drop the
+    // container pins best-effort.
+    removeRegion(dataDir, id)
+    regionJobs.delete(id)
+    const address = getAddress()
+    if (address === null) { res.status(204).end(); return }
+    return relayNoContent(res, fetchImpl(`http://${address}/cache/region/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+  })
+
+  router.get('/api/regions/:id/status', async (req, res) => {
+    const id = req.params.id
+    const address = withAddress(res); if (address === null) return
+    const jobId = regionJobs.get(id)
+    if (jobId === undefined) {
+      reconcileLostJob(id)
+      res.status(404).json({ error: 'no job for region' }); return
+    }
+    try {
+      const r = await fetchImpl(`http://${address}/warm/${encodeURIComponent(jobId)}`)
+      if (r.status === 404) {
+        reconcileLostJob(id)
+        res.status(404).json({ error: 'job gone' }); return
+      }
+      const snapshot = (await r.json()) as WarmSnapshot
+      await reconcile(address, id, snapshot)
+      res.status(r.status).json(snapshot)
+    } catch {
+      res.status(502).json({ error: 'tilecache unreachable' })
+    }
+  })
+
+  router.post('/api/regions/:id/redownload', async (req, res) => {
+    const id = req.params.id
+    const region = listRegions(dataDir).find((r) => r.id === id)
+    if (!region) { res.status(404).json({ error: 'no such region' }); return }
+    const address = withAddress(res); if (address === null) return
+    try {
+      // Same region.id: the container clears that region's prior pins at warm start, so the re-warm
+      // replaces tiles and creates no duplicate region.
+      const warmResp = await fetchImpl(`http://${address}/warm`, warmInit({
+        sources: region.sourceIds, bbox: region.bbox, minzoom: region.minzoom, maxzoom: region.maxzoom, regionId: region.id
+      }))
+      const { jobId } = (await warmResp.json()) as { jobId: string }
+      regionJobs.set(id, jobId)
+      updateRegion(dataDir, id, { status: 'downloading' })
+      res.status(200).json({ jobId })
+    } catch {
+      res.status(502).json({ error: 'tilecache unreachable' })
+    }
   })
 
   return true

@@ -152,3 +152,30 @@ export function loadPrewarmStore (dataDir: string): PrewarmStore {
 export function savePrewarmStore (dataDir: string, store: PrewarmStore): void {
   writeJsonState(join(dataDir, STORE_FILE), store)
 }
+
+/** Append a region to the persisted store and write it back. */
+export function addRegion (dataDir: string, region: SavedRegion): void {
+  const store = loadPrewarmStore(dataDir)
+  store.regions.push(region)
+  savePrewarmStore(dataDir, store)
+}
+
+/** Patch a region in place by id and write the store back; a no-op when the id is absent. */
+export function updateRegion (dataDir: string, id: string, patch: Partial<SavedRegion>): void {
+  const store = loadPrewarmStore(dataDir)
+  const idx = store.regions.findIndex((r) => r.id === id)
+  if (idx >= 0) store.regions[idx] = { ...store.regions[idx]!, ...patch }
+  savePrewarmStore(dataDir, store)
+}
+
+/** Drop a region by id from the persisted store and write it back. */
+export function removeRegion (dataDir: string, id: string): void {
+  const store = loadPrewarmStore(dataDir)
+  store.regions = store.regions.filter((r) => r.id !== id)
+  savePrewarmStore(dataDir, store)
+}
+
+/** The persisted regions list. */
+export function listRegions (dataDir: string): SavedRegion[] {
+  return loadPrewarmStore(dataDir).regions
+}

@@ -26,7 +26,8 @@ function makeRouter (): { calls: Array<{ method: string; path: string; handler: 
     calls,
     router: {
       get (path, handler) { calls.push({ method: 'GET', path, handler: handler as (req: FullRequest, res: PrewarmResponse) => void | Promise<void> }) },
-      post (path, handler) { calls.push({ method: 'POST', path, handler: handler as (req: FullRequest, res: PrewarmResponse) => void | Promise<void> }) }
+      post (path, handler) { calls.push({ method: 'POST', path, handler: handler as (req: FullRequest, res: PrewarmResponse) => void | Promise<void> }) },
+      delete (path, handler) { calls.push({ method: 'DELETE', path, handler: handler as (req: FullRequest, res: PrewarmResponse) => void | Promise<void> }) }
     }
   }
 }

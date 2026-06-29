@@ -17,7 +17,7 @@ import { OverrideStore } from '../charts/overrides.js'
 import { ensureApiAdminGate } from '../shared/admin-gate.js'
 import { join, resolve } from 'node:path'
 import { createPositionWarmer, type PositionWarmer } from '../runtime/position-warmer.js'
-import { loadPrewarmStore, POSITION_WARM_REGION_ID, positionWarmBudgetBytes } from '../runtime/prewarm-store.js'
+import { loadPrewarmStore, listRegions, updateRegion, POSITION_WARM_REGION_ID, positionWarmBudgetBytes } from '../runtime/prewarm-store.js'
 import { warmRegion } from '../runtime/tilecache-client.js'
 
 interface CompanionConfig {
@@ -136,7 +136,16 @@ export function createPlugin (app: ServerAPI): Plugin {
       app.debug('Tilecache container did not start; tile caching is disabled:', err)
     }
 
-    loadPrewarmStore(app.getDataDirPath())
+    // Eagerly load (and migrate) the prewarm store, then sweep any region left mid-download across a
+    // restart to error: the container's in-memory warm-job registry does not survive a restart, so a
+    // region caught downloading is a lost job and must never stay downloading.
+    const dataDir = app.getDataDirPath()
+    loadPrewarmStore(dataDir)
+    for (const region of listRegions(dataDir)) {
+      if (region.status === 'downloading') {
+        updateRegion(dataDir, region.id, { status: 'error' })
+      }
+    }
     warmer = createPositionWarmer({
       getStore: () => loadPrewarmStore(app.getDataDirPath()),
       warm: async (bbox, sources, minzoom, maxzoom) => {

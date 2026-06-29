@@ -21,6 +21,7 @@ export interface Recorder {
   registerResourceProvider (provider: unknown): void
   get (path: string, handler: unknown): void
   streambundle: { getSelfBus (path?: unknown): { onValue (cb: (value: unknown) => void): () => void } }
+  securityStrategy: { addAdminMiddleware (path: string): void }
 }
 
 export function fakeApp (): Recorder {
@@ -40,7 +41,8 @@ export function fakeApp (): Recorder {
     getDataDirPath () { return dir },
     registerResourceProvider () {},
     get () {},
-    streambundle: { getSelfBus (_path?: unknown) { return { onValue () { return () => { positionUnsubCalled = true } } } } }
+    streambundle: { getSelfBus (_path?: unknown) { return { onValue () { return () => { positionUnsubCalled = true } } } } },
+    securityStrategy: { addAdminMiddleware () {} }
   }
   return app
 }
