@@ -1,7 +1,7 @@
 {
   "name": "signalk-binnacle-companion",
   "version": "0.2.0",
-  "description": "Signal K companion that runs a polyglot container alongside the server, hosting compute and datasets that a JS/TS plugin cannot.",
+  "description": "Signal K companion that runs a Rust container alongside the server for a boat-wide tile cache and PMTiles chart provider.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
