@@ -1,7 +1,7 @@
 {
-  "name": "signalk-binnacle-companion",
+  "name": "signalk-chart-locker",
   "version": "0.2.0",
-  "description": "Signal K companion that runs a Rust container alongside the server for a boat-wide tile cache and PMTiles chart provider.",
+  "description": "Signal K plugin that runs a Rust container alongside the server for a boat-wide tile cache, a PMTiles chart provider, and saved downloadable map regions.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
@@ -20,11 +20,12 @@
     "signalk-node-server-plugin",
     "signalk-category-utility",
     "container",
-    "companion"
+    "tile-cache",
+    "pmtiles"
   ],
   "signalk-plugin-enabled-by-default": false,
   "signalk": {
-    "displayName": "Binnacle Companion",
+    "displayName": "Chart Locker",
     "requires": [
       "signalk-container"
     ],
@@ -43,13 +44,13 @@
     "email": "NearlCrews@users.noreply.github.com"
   },
   "license": "MIT",
-  "homepage": "https://github.com/NearlCrews/signalk-binnacle-companion#readme",
+  "homepage": "https://github.com/NearlCrews/signalk-chart-locker#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/NearlCrews/signalk-binnacle-companion.git"
+    "url": "git+https://github.com/NearlCrews/signalk-chart-locker.git"
   },
   "bugs": {
-    "url": "https://github.com/NearlCrews/signalk-binnacle-companion/issues"
+    "url": "https://github.com/NearlCrews/signalk-chart-locker/issues"
   },
   "devDependencies": {
     "@signalk/server-api": "^2.28.0",

@@ -1,9 +1,9 @@
-# Binnacle Companion
+# Chart Locker
 
-[![npm version](https://img.shields.io/npm/v/signalk-binnacle-companion.svg)](https://www.npmjs.com/package/signalk-binnacle-companion)
-[![npm downloads](https://img.shields.io/npm/dm/signalk-binnacle-companion.svg)](https://www.npmjs.com/package/signalk-binnacle-companion)
-[![CI](https://github.com/NearlCrews/signalk-binnacle-companion/actions/workflows/ci.yml/badge.svg)](https://github.com/NearlCrews/signalk-binnacle-companion/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/NearlCrews/signalk-binnacle-companion/blob/main/LICENSE)
+[![npm version](https://img.shields.io/npm/v/signalk-chart-locker.svg)](https://www.npmjs.com/package/signalk-chart-locker)
+[![npm downloads](https://img.shields.io/npm/dm/signalk-chart-locker.svg)](https://www.npmjs.com/package/signalk-chart-locker)
+[![CI](https://github.com/NearlCrews/signalk-chart-locker/actions/workflows/ci.yml/badge.svg)](https://github.com/NearlCrews/signalk-chart-locker/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/NearlCrews/signalk-chart-locker/blob/main/LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D20.3-brightgreen.svg)](https://nodejs.org)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://www.buymeacoffee.com/nearlcrews)
 
@@ -20,17 +20,17 @@ See the [changelog](CHANGELOG.md#v020) for the full list.
 
 ## What it does
 
-Binnacle Companion is a Signal K server plugin. It manages a container (via the
+Chart Locker is a Signal K server plugin. It manages a container (via the
 [signalk-container](https://github.com/dirkwa/signalk-container) plugin) that runs a Rust service
 alongside the server. That service handles workloads the Node.js plugin process cannot: a shared
 tile cache that every device on the boat reads from and local `.pmtiles` chart serving with proper
 HTTP caching semantics.
 
 The plugin side is thin by design. It resolves the `signalk-container` manager, starts the
-tilecache container, and exposes the prewarm and chart-management HTTP routes. All tile-cache
+tilecache container, and exposes the regions and chart-management HTTP routes. All tile-cache
 compute lives in the container.
 
-When the companion is absent, the Binnacle chartplotter falls back to direct upstream sources for
+When Chart Locker is absent, the Binnacle chartplotter falls back to direct upstream sources for
 tiles. A standalone install of Binnacle is unaffected.
 
 ## Features
@@ -65,13 +65,13 @@ tiles. A standalone install of Binnacle is unaffected.
 ## Installation
 
 **From the App Store (recommended).** In the Signal K admin UI, open Apps and Plugins, then
-Store, search for Binnacle Companion, and install. Restart the server when prompted.
+Store, search for Chart Locker, and install. Restart the server when prompted.
 
 **With npm.** Install into the server's home directory and restart Signal K:
 
 ```bash
 cd ~/.signalk
-npm install signalk-binnacle-companion
+npm install signalk-chart-locker
 ```
 
 ## Configuration
@@ -97,8 +97,8 @@ This project targets Node.js 20.3 or newer. The Rust container is a Cargo worksp
 `container/`.
 
 ```bash
-git clone https://github.com/NearlCrews/signalk-binnacle-companion.git
-cd signalk-binnacle-companion
+git clone https://github.com/NearlCrews/signalk-chart-locker.git
+cd signalk-chart-locker
 npm install
 npm run typecheck   # TypeScript type-check
 npm run lint        # ESLint
@@ -122,14 +122,14 @@ of any kind.
 
 ## Acknowledgments
 
-Binnacle Companion is written and maintained by [Nearl Crews](https://github.com/NearlCrews). It
+Chart Locker is written and maintained by [Nearl Crews](https://github.com/NearlCrews). It
 relies on:
 
 - [Signal K Project](https://signalk.org/) for the open marine data standard.
 - [signalk-container](https://github.com/dirkwa/signalk-container) for container lifecycle
   management.
 
-Binnacle Companion pairs with the
+Chart Locker pairs with the
 [Binnacle Chartplotter](https://www.npmjs.com/package/signalk-binnacle).
 
 ## Support
@@ -137,6 +137,6 @@ Binnacle Companion pairs with the
 Find this project useful? You can support its continued development by
 [buying me a coffee](https://www.buymeacoffee.com/nearlcrews).
 
-- [Report a bug](https://github.com/NearlCrews/signalk-binnacle-companion/issues/new?template=bug_report.yml)
-- [Request a feature](https://github.com/NearlCrews/signalk-binnacle-companion/issues/new?template=feature_request.yml)
+- [Report a bug](https://github.com/NearlCrews/signalk-chart-locker/issues/new?template=bug_report.yml)
+- [Request a feature](https://github.com/NearlCrews/signalk-chart-locker/issues/new?template=feature_request.yml)
 - [Security issues](.github/SECURITY.md)

@@ -5,6 +5,14 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The project is pre-release, so
 everything below is the initial public release.
 
+<a id="rename-chart-locker"></a>
+
+## [Unreleased]
+
+### Changed
+
+- Renamed the plugin to Chart Locker (`signalk-chart-locker`).
+
 <a id="v020"></a>
 
 ## [0.2.0] - 2026-06-29

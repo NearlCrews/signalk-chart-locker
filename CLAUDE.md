@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Guidance for Claude Code working in `signalk-binnacle-companion`.
+Guidance for Claude Code working in `signalk-chart-locker`.
 
 ## Working style for this project (standing rules)
 
