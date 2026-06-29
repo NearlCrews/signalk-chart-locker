@@ -165,7 +165,9 @@ In `impl TileCache`, after `evict_to`, add:
     /// Delete unpinned scroll rows whose `last_access` is older than `now - ttl_secs`, in bounded
     /// chunks that release the lock between chunks. A no-op when `ttl_secs <= 0`. Never deletes a
     /// pinned row. Decrements `total_bytes` by the freed bytes; leaves `pinned_bytes` unchanged.
-    /// Returns the freed bytes and the freed row count.
+    /// Returns the freed bytes and the freed row count. Relies on the invariant that an unpinned row
+    /// (`pinned = 0`) carries no `region_tiles` join row, so deleting it leaves no orphan join row:
+    /// the pin paths set `pinned = 1` and the join row together, and `delete_region` clears both.
     pub fn sweep_aged_unpinned(&self, ttl_secs: i64, now: i64) -> rusqlite::Result<(i64, i64)> {
         if ttl_secs <= 0 {
             return Ok((0, 0));
@@ -201,7 +203,8 @@ In `impl TileCache`, after `evict_to`, add:
 
     /// Delete every unpinned scroll row, in bounded chunks that release the lock between chunks. Never
     /// deletes a pinned row, so `total_bytes` settles at `pinned_bytes`. Leaves `pinned_bytes`
-    /// unchanged. Returns the freed bytes and the freed row count.
+    /// unchanged. Returns the freed bytes and the freed row count. Like the age sweep, this relies on
+    /// the invariant that an unpinned row carries no `region_tiles` join row, so it leaves none orphaned.
     pub fn clear_unpinned(&self) -> rusqlite::Result<(i64, i64)> {
         let mut freed_bytes = 0i64;
         let mut freed_rows = 0i64;
@@ -284,6 +287,7 @@ Add to the `routes.rs` tests module:
         let (status, body) = body_string(resp).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("\"bySource\""), "stats reports the per-source totals array");
+        assert!(body.contains("\"source\":\"s\""), "the warmed source appears in the per-source totals");
     }
 ```
 
@@ -354,28 +358,30 @@ git commit -m "feat(tilecache): report per-source scroll totals in cache stats"
 
 - [ ] **Step 1: Write the failing test**
 
-Add to the `routes.rs` tests module (it asserts a `/config` push with `scrollTtlSecs` is accepted; the live value is exercised end-to-end in Task A5):
+Add to the `routes.rs` tests module. It holds the `AppState` and asserts the pushed `scrollTtlSecs` reaches `live_scroll_ttl_secs`, so it genuinely fails before the field exists (it will not compile until `live_scroll_ttl_secs` is added):
 
 ```rust
     #[tokio::test]
-    async fn config_accepts_scroll_ttl_secs() {
+    async fn config_sets_the_live_scroll_ttl() {
         let hits = Arc::new(AtomicUsize::new(0));
         let addr = spawn_stub(hits).await;
         let db = NamedTempFile::new().unwrap();
-        let router = app(dev_state(&db));
+        let state = dev_state(&db);
+        let router = app(state.clone());
         let cfg = format!(
             r#"{{"sources":[{{"id":"s","title":"S","tileSize":256,"minzoom":0,"maxzoom":18,"attribution":"",
                 "upstream":{{"mode":"xyz","urlTemplate":"http://{addr}/img/{{z}}/{{x}}/{{y}}"}}}}],"publicBase":"/p","scrollTtlSecs":86400}}"#
         );
         let resp = router.oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(cfg)).unwrap()).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(state.live_scroll_ttl_secs.load(Ordering::Relaxed), 86_400, "the pushed TTL reaches the live field");
     }
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd container && cargo test -p binnacle-tilecache config_accepts_scroll_ttl_secs`
-Expected: FAIL (compile error: `scrollTtlSecs` is rejected only if `deny_unknown_fields`; the real failure to drive is the missing field plumbing in later steps, so confirm it compiles and the value is wired). If it passes trivially because unknown fields are ignored, proceed to wire the field so the value takes effect (the end-to-end assertion lives in Task A5).
+Run: `cd container && cargo test -p binnacle-tilecache config_sets_the_live_scroll_ttl`
+Expected: FAIL (does not compile: `live_scroll_ttl_secs` does not exist on `AppState` yet).
 
 - [ ] **Step 3: Add the field, the state, and the env seed**
 
@@ -438,7 +444,7 @@ and extend the `Knobs` build:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd container && cargo test -p binnacle-tilecache config_accepts_scroll_ttl_secs`
+Run: `cd container && cargo test -p binnacle-tilecache config_sets_the_live_scroll_ttl`
 Expected: PASS. Then `cargo build -p binnacle-tilecache` to confirm `main.rs` compiles.
 
 - [ ] **Step 5: Commit**
@@ -715,6 +721,7 @@ git commit -m "chore(tilecache): satisfy clippy for the scroll TTL and clear pat
 
 **Files:**
 - Modify: `src/runtime/regions-store.ts` (`RegionsStore` around line 35, `DEFAULT_REGIONS_STORE` around line 41, `loadRegionsStore` around line 111, `migrateV2` around line 101)
+- Modify: `test/position-warmer.test.ts` (the `store()` helper literal, around line 11) and `test/regions-store.test.ts` (the inline `store` literal, around line 42), to add the new required field
 - Test: `test/regions-store.test.ts` (existing) or a new `test/regions-store-ttl.test.ts`
 
 **Interfaces:**
@@ -730,7 +737,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadRegionsStore, saveRegionsStore, DEFAULT_REGIONS_STORE } from '../src/runtime/regions-store.ts'
+import { loadRegionsStore, saveRegionsStore, DEFAULT_REGIONS_STORE } from '../src/runtime/regions-store.js'
 
 test('the regions store defaults cacheScrollTtlDays to 30', () => {
   const dir = mkdtempSync(join(tmpdir(), 'rs-ttl-'))
@@ -785,10 +792,36 @@ In `migrateV2`, add `cacheScrollTtlDays` to the constructed `store` from `raw['c
   }
 ```
 
+- [ ] **Step 3b: Fix the two existing RegionsStore literals the new required field breaks**
+
+Making `cacheScrollTtlDays` required breaks two existing test literals that omit it, which would fail the B5 typecheck. Add the field to both:
+
+In `test/position-warmer.test.ts`, the `store()` helper (around line 11):
+
+```ts
+function store (over: Partial<typeof DEFAULT_REGIONS_STORE.positionWarm> = {}): RegionsStore {
+  return {
+    regions: [region([-123, 37, -122, 38])],
+    positionWarm: { ...DEFAULT_REGIONS_STORE.positionWarm, enabled: true, sources: ['seamark'], ...over },
+    cacheScrollTtlDays: 30
+  }
+}
+```
+
+In `test/regions-store.test.ts`, the inline `store` literal (around line 42):
+
+```ts
+  const store: RegionsStore = {
+    regions: [region],
+    positionWarm: { enabled: true, radiusMeters: 3704, moveThresholdMeters: 1852, intervalSecs: 60, baseZoom: 12, sources: ['seamark'] },
+    cacheScrollTtlDays: 30
+  }
+```
+
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npm test`
-Expected: PASS (the whole suite, including the two new assertions).
+Run: `npm test && npm run typecheck`
+Expected: PASS (the whole suite plus the typecheck, confirming the existing literals still compile with the new required field).
 
 - [ ] **Step 5: Commit**
 
@@ -850,10 +883,24 @@ In `tilecache-container.ts`, add `scrollTtlSecs?: number` to `TilecacheContainer
       TILECACHE_SCROLL_TTL_SECS: String(opts.scrollTtlSecs ?? 0)
 ```
 
+- [ ] **Step 3b: Update the existing three-arg buildSourcePayload callers**
+
+Making `scrollTtlSecs` a required fourth positional argument (before the optional `publicBase`) breaks three existing callers in `test/tilecache-config-push.test.ts` at lines 7, 20, and 33, which would fail the B5 typecheck. Add a fourth argument to each. Line 7:
+
+```ts
+  const payload = buildSourcePayload(2_147_483_648, 1_073_741_824, 64 * 1024 * 1024, 0)
+```
+
+Lines 20 and 33 (inside the `pushTilecacheConfig(...)` calls):
+
+```ts
+  ... await pushTilecacheConfig('addr:8080', buildSourcePayload(2_147_483_648, 1_073_741_824, 64 * 1024 * 1024, 0), ...)
+```
+
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `npm test`
-Expected: PASS.
+Run: `npm test && npm run typecheck`
+Expected: PASS (the suite plus the typecheck, confirming the updated callers compile).
 
 - [ ] **Step 5: Commit**
 
@@ -876,7 +923,9 @@ git commit -m "feat(plugin): carry the scroll TTL seconds into the container env
 At the top of the `try` block in `doStart`, before `buildTilecacheConfig`, read the TTL once (the store is the source of truth; `loadRegionsStore` is cheap and pure):
 
 ```ts
-      const scrollTtlSecs = Math.max(0, Math.round((loadRegionsStore(app.getDataDirPath()).cacheScrollTtlDays ?? 30) * 86_400))
+      // loadRegionsStore always returns cacheScrollTtlDays (default 30 from the store loader), so no
+      // fallback is needed here; clamp and convert days to seconds at this edge.
+      const scrollTtlSecs = Math.max(0, Math.round(loadRegionsStore(app.getDataDirPath()).cacheScrollTtlDays * 86_400))
 ```
 
 Pass it into the container options:
@@ -917,7 +966,7 @@ git commit -m "feat(plugin): seed the container scroll TTL from the regions stor
 
 **Files:**
 - Modify: `src/http/regions-routes.ts` (add three route handlers near the existing `/api/cache/stats` at line 158)
-- Test: `test/regions-routes.test.ts` (existing route test file; match its harness)
+- Create: `test/cache-routes.test.ts` (new, following the `test/regions-crud.test.ts` harness: `makeRouter`, `fakeRes`, `fakeApp`, a recording `fetchImpl` passed through `deps`)
 
 **Interfaces:**
 - Consumes: `loadRegionsStore`, `saveRegionsStore`, `withAddress`, `relay`, `fetchImpl`, `warmInit`.
@@ -928,52 +977,111 @@ git commit -m "feat(plugin): seed the container scroll TTL from the regions stor
 
 - [ ] **Step 1: Write the failing tests**
 
-Match the existing `regions-routes.test.ts` harness (it constructs a fake router and a `fetchImpl` stub; reuse its helpers). Add:
+Create `test/cache-routes.test.ts` following the exact harness in `test/regions-crud.test.ts`: `makeRouter()` returns `{ routes, router }`, `fakeRes()` returns `{ responded, res }` where each entry is `{ status, body }`, `fakeApp()` from `./helpers.js` provides the app, and a recording `fetchImpl` is passed through `deps`. The container is addressed by passing `() => '127.0.0.1:9999'`. Find a handler with `routes.find(r => r.method === 'POST' && r.path === '/api/cache/config')`.
 
 ```ts
-test('POST /api/cache/config rejects a non-integer, a negative, and an over-range ttlDays', async () => {
-  const { router, calls } = makeHarness() // existing helper: a router capturing handlers, a fetch stub
-  for (const bad of [3.5, -1, 366, 'x']) {
-    const res = makeRes()
-    await router.handlers.post['/api/cache/config']({ body: { ttlDays: bad } }, res)
-    assert.equal(res.statusCode, 400)
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type { ServerAPI } from '@signalk/server-api'
+import { registerRegionsRoutes, type RegionsRouter, type RegionsResponse } from '../src/http/regions-routes.js'
+import { loadRegionsStore, saveRegionsStore, DEFAULT_REGIONS_STORE } from '../src/runtime/regions-store.js'
+import { fakeApp } from './helpers.js'
+
+const app = (): ServerAPI => fakeApp() as unknown as ServerAPI
+
+function makeRouter () {
+  const routes: Array<{ method: string; path: string; handler: Function }> = []
+  const router: RegionsRouter = {
+    get (path, handler) { routes.push({ method: 'GET', path, handler }) },
+    post (path, handler) { routes.push({ method: 'POST', path, handler }) },
+    delete (path, handler) { routes.push({ method: 'DELETE', path, handler }) }
   }
-  assert.equal(calls.filter((c) => c.url.includes('/cache/scroll-ttl')).length, 0, 'no container call on a bad value')
+  return { routes, router }
+}
+
+function fakeRes (): { responded: Array<{ status: number; body: unknown }>; res: RegionsResponse } {
+  const responded: Array<{ status: number; body: unknown }> = []
+  const res: RegionsResponse = {
+    status (code) { responded.push({ status: code, body: null }); return res },
+    json (body) { if (responded.length) responded[responded.length - 1].body = body },
+    end () { if (responded.length) responded[responded.length - 1].body = null }
+  }
+  return { responded, res }
+}
+
+/** A recording fetch that returns canned container responses keyed by URL suffix. */
+function recordingFetch (responses: Record<string, { status: number; body: unknown }>) {
+  const calls: Array<{ url: string; init?: { method?: string; body?: string } }> = []
+  const fetchImpl = async (url: string, init?: { method?: string; body?: string }): Promise<Response> => {
+    calls.push({ url, init })
+    const key = Object.keys(responses).find((k) => url.endsWith(k))
+    const r = key ? responses[key] : { status: 200, body: {} }
+    return new Response(JSON.stringify(r.body), { status: r.status, headers: { 'content-type': 'application/json' } })
+  }
+  return { calls, fetchImpl }
+}
+
+test('POST /api/cache/config rejects a non-integer, a negative, and an over-range ttlDays', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
+  const { calls, fetchImpl } = recordingFetch({})
+  const { router, routes } = makeRouter()
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  const route = routes.find(r => r.method === 'POST' && r.path === '/api/cache/config')!
+  for (const bad of [3.5, -1, 366, 'x']) {
+    const { responded, res } = fakeRes()
+    await route.handler({ params: {}, body: { ttlDays: bad } }, res)
+    assert.equal(responded[0]?.status, 400, `ttlDays ${String(bad)} must be rejected`)
+  }
+  assert.equal(calls.filter((c) => c.url.endsWith('/cache/scroll-ttl')).length, 0, 'no container call on a bad value')
 })
 
 test('POST /api/cache/config saves the store and posts ttlSecs to the container', async () => {
-  const { router, dataDir, fetchCalls } = makeHarness()
-  const res = makeRes()
-  await router.handlers.post['/api/cache/config']({ body: { ttlDays: 7 } }, res)
-  assert.equal(res.statusCode, 204)
+  const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
+  const { calls, fetchImpl } = recordingFetch({ '/cache/scroll-ttl': { status: 204, body: {} } })
+  const { router, routes } = makeRouter()
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  const route = routes.find(r => r.method === 'POST' && r.path === '/api/cache/config')!
+  const { responded, res } = fakeRes()
+  await route.handler({ params: {}, body: { ttlDays: 7 } }, res)
+  assert.equal(responded[0]?.status, 204)
   assert.equal(loadRegionsStore(dataDir).cacheScrollTtlDays, 7)
-  const call = fetchCalls.find((c) => c.url.includes('/cache/scroll-ttl'))
+  const call = calls.find((c) => c.url.endsWith('/cache/scroll-ttl'))
   assert.ok(call, 'posted to the container scroll-ttl route')
-  assert.deepEqual(JSON.parse(call.init.body), { ttlSecs: 7 * 86_400 })
+  assert.deepEqual(JSON.parse(call!.init!.body!), { ttlSecs: 7 * 86_400 })
 })
 
 test('POST /api/cache/clear-scroll relays the freed totals', async () => {
-  const { router, setContainerResponse } = makeHarness()
-  setContainerResponse('/cache/clear-scroll', 200, { freedBytes: 123, freedRows: 4 })
-  const res = makeRes()
-  await router.handlers.post['/api/cache/clear-scroll']({ body: {} }, res)
-  assert.equal(res.statusCode, 200)
-  assert.deepEqual(res.body, { freedBytes: 123, freedRows: 4 })
+  const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
+  const { fetchImpl } = recordingFetch({ '/cache/clear-scroll': { status: 200, body: { freedBytes: 123, freedRows: 4 } } })
+  const { router, routes } = makeRouter()
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  const route = routes.find(r => r.method === 'POST' && r.path === '/api/cache/clear-scroll')!
+  const { responded, res } = fakeRes()
+  await route.handler({ params: {}, body: {} }, res)
+  assert.equal(responded[0]?.status, 200)
+  assert.deepEqual(responded[0]?.body, { freedBytes: 123, freedRows: 4 })
 })
 
 test('GET /api/cache/stats merges ttlDays from the store and passes bySource through', async () => {
-  const { router, dataDir, setContainerResponse } = makeHarness()
-  saveRegionsStore(dataDir, { ...loadRegionsStore(dataDir), cacheScrollTtlDays: 14 })
-  setContainerResponse('/cache/stats', 200, { rows: 1, bytes: 2, cap: 3, bySource: [{ source: 's', bytes: 2, rows: 1 }], perSourceAvgBytes: {} })
-  const res = makeRes()
-  await router.handlers.get['/api/cache/stats']({}, res)
-  assert.equal(res.statusCode, 200)
-  assert.equal(res.body.ttlDays, 14)
-  assert.deepEqual(res.body.bySource, [{ source: 's', bytes: 2, rows: 1 }])
+  const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
+  saveRegionsStore(dataDir, { ...DEFAULT_REGIONS_STORE, cacheScrollTtlDays: 14 })
+  const { fetchImpl } = recordingFetch({ '/cache/stats': { status: 200, body: { rows: 1, bytes: 2, cap: 3, bySource: [{ source: 's', bytes: 2, rows: 1 }], perSourceAvgBytes: {} } } })
+  const { router, routes } = makeRouter()
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  const route = routes.find(r => r.method === 'GET' && r.path === '/api/cache/stats')!
+  const { responded, res } = fakeRes()
+  await route.handler({ params: {}, body: null }, res)
+  assert.equal(responded[0]?.status, 200)
+  const body = responded[0]?.body as { ttlDays?: number; bySource?: unknown }
+  assert.equal(body.ttlDays, 14)
+  assert.deepEqual(body.bySource, [{ source: 's', bytes: 2, rows: 1 }])
 })
 ```
 
-If `regions-routes.test.ts` does not already expose `makeHarness`, `makeRes`, `setContainerResponse`, and a captured-`fetchImpl`, add minimal equivalents in the test file following the patterns the existing region tests use to drive `registerRegionsRoutes` (a fake `RegionsRouter` that stores handlers by method and path, a `RegionsResponse` capturing `status` and `json`, and a `fetchImpl` returning canned `Response`-shaped objects).
+Note: this test depends on Task B1 (the `DEFAULT_REGIONS_STORE.cacheScrollTtlDays` field), so run B1 first.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -990,6 +1098,9 @@ In `registerRegionsRoutes`, replace the existing `GET /api/cache/stats` handler 
     if (typeof ttlDays !== 'number' || !Number.isInteger(ttlDays) || ttlDays < 0 || ttlDays > 365) {
       res.status(400).json({ error: 'ttlDays must be an integer between 0 and 365' }); return
     }
+    // Persist to the store first, the source of truth, so the new TTL survives even when the container
+    // is down: it is pushed on the next doStart. With no address this returns 503 after persisting,
+    // which is intended.
     const store = loadRegionsStore(dataDir)
     saveRegionsStore(dataDir, { ...store, cacheScrollTtlDays: ttlDays })
     const address = withAddress(res); if (address === null) return
@@ -1141,36 +1252,75 @@ git commit -m "feat(regions): add the cache config and clear-scroll client calls
 ### Task C2: The Scroll cache panel section
 
 **Files:**
+- Modify: `src/features/prewarm/estimate.ts` (add a pure `formatBySource` helper after `formatBytes`, around line 89)
+- Modify: `src/features/prewarm/estimate.test.ts` (add a `formatBySource` test alongside the existing pure-helper tests)
 - Modify: `src/features/prewarm/RegionsPanel.svelte` (script: state and handlers near the existing stats handlers; template: a new section between the Saved regions block ending around line 642 and the `Position warm` heading at line 644)
-- Test: `src/features/prewarm/RegionsPanel.test.ts` if present, else a focused new test `src/features/prewarm/regions-cache-section.test.ts` that renders the panel with a stats fixture (follow the existing panel test harness; if the panel is not unit-rendered today, assert through the client-driven logic instead and note the manual check).
+
+There is no Svelte render harness in this feature: `regions-panel.svelte.test.ts` never mounts the component, it only unit-tests pure helpers. So the new per-source formatting is extracted into `estimate.ts` and unit-tested there, and the panel template calls that helper. The rest of the section (the TTL `UnitField` and the clear `InlineConfirm`) is verified manually in the app.
 
 **Interfaces:**
-- Consumes: `client.setCacheConfig`, `client.clearScrollCache`, `stats.bytes`, `stats.cap`, `stats.bySource`, `stats.ttlDays`, `formatBytes`, `UnitField`, `InlineConfirm`.
-- Produces: a "Scroll cache" section with a used-against-cap line, a per-source list, a TTL `UnitField`, and a clear button behind `InlineConfirm`.
+- Consumes: `client.setCacheConfig`, `client.clearScrollCache`, `stats.bytes`, `stats.cap`, `stats.ttlDays`, `formatBytes`, `formatBySource`, `UnitField`, `InlineConfirm`.
+- Produces: a pure `formatBySource(stats: CacheStats): Array<{ source: string; value: string; unit: string }>` in `estimate.ts`, and a "Scroll cache" section with a used-against-cap line, a per-source list, a TTL `UnitField`, and a clear button behind `InlineConfirm`.
 
 - [ ] **Step 1: Write the failing test**
 
-If `RegionsPanel.test.ts` exists and renders the panel, add a test that mounts it with a stats fixture including `bySource` and `ttlDays`, and asserts the section renders the used-against-cap text and a per-source row, and does not render a second "Pinned" or "Scrolling cache" label beyond the existing Estimate grid. Example shape (adapt to the existing harness and its mock client):
+Add to `src/features/prewarm/estimate.test.ts` (match the existing `describe`/`it` and import style):
 
 ```ts
-it('renders the scroll cache breakdown without duplicating the pinned and scrolling rows', async () => {
-  const stats = { rows: 3, bytes: 500, cap: 1000, pinnedBytes: 100, scrollBytes: 400, ttlDays: 30, bySource: [{ source: 'seamark', bytes: 400, rows: 3 }], perSourceAvgBytes: { seamark: 133 } };
-  const { getByText, queryAllByText } = renderRegionsPanel({ stats }); // existing harness helper
-  expect(getByText(/Scroll cache/i)).toBeTruthy();
-  expect(getByText(/seamark/i)).toBeTruthy();
-  // "Scrolling cache" appears once (only in the Estimate grid), not duplicated by the new section.
-  expect(queryAllByText(/Scrolling cache/i).length).toBe(1);
+import { formatBySource } from './estimate.js';
+import type { CacheStats } from './regions-client.js';
+
+describe('formatBySource', () => {
+  it('formats each scroll source and returns an empty list when bySource is absent', () => {
+    const base = { rows: 0, bytes: 0, cap: 0, perSourceAvgBytes: {} } as CacheStats;
+    expect(formatBySource(base)).toEqual([]);
+    const withSources = { ...base, bySource: [{ source: 'seamark', bytes: 1024, rows: 3 }] } as CacheStats;
+    const out = formatBySource(withSources);
+    expect(out).toHaveLength(1);
+    expect(out[0].source).toBe('seamark');
+    expect(typeof out[0].value).toBe('string');
+    expect(typeof out[0].unit).toBe('string');
+  });
 });
 ```
 
-If the panel has no render harness, write the test against a small extracted helper instead: move the per-source formatting into a pure function in `estimate.ts` (for example `formatBySource(stats)`) and unit-test that, then have the template call it. Prefer this extraction so the new logic is unit-tested without a full mount.
+(If `estimate.test.ts` already imports `formatBytes` or `CacheStats`, fold these imports into the existing import lines rather than duplicating them.)
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npm test -- RegionsPanel` (or the chosen test name)
-Expected: FAIL.
+Run: `npm test -- estimate`
+Expected: FAIL (`formatBySource` is not exported).
 
-- [ ] **Step 3: Add the script state and handlers**
+- [ ] **Step 3: Add the formatBySource helper, the import, and the script state and handlers**
+
+In `src/features/prewarm/estimate.ts`, after `formatBytes` (around line 89), add the pure helper:
+
+```ts
+/** Format the per-source scroll totals for the cache-management breakdown: each source's bytes through
+ * formatBytes, so the panel renders them with the same value-and-unit shape as every other stat. An
+ * absent bySource yields an empty list. */
+export function formatBySource(stats: CacheStats): Array<{ source: string; value: string; unit: string }> {
+  return (stats.bySource ?? []).map((row) => {
+    const b = formatBytes(row.bytes);
+    return { source: row.source, value: b.value, unit: b.unit };
+  });
+}
+```
+
+In `RegionsPanel.svelte`, add `formatBySource` to the existing import from `./estimate.js` (the import block at lines 9 through 17):
+
+```ts
+import {
+  canDownloadRegion,
+  coveringSources,
+  estimateBytes,
+  formatBySource,
+  formatBytes,
+  isTerminal,
+  regionSources,
+  regionsFreeBytes,
+} from './estimate.js';
+```
 
 In the `<script>` block, add state near the other stats state (around line 56):
 
@@ -1237,10 +1387,9 @@ Between the end of the Saved regions block (after the closing of the `{:else}` t
         <span class="num">{capFmt?.value ?? '--'}</span>
         <span class="unit">{capFmt?.unit ?? ''}</span>
       </dd>
-      {#each stats.bySource ?? [] as row (row.source)}
-        {@const b = formatBytes(row.bytes)}
+      {#each formatBySource(stats) as row (row.source)}
         <dt>{row.source}</dt>
-        <dd><span class="num">{b.value}</span> <span class="unit">{b.unit}</span></dd>
+        <dd><span class="num">{row.value}</span> <span class="unit">{row.unit}</span></dd>
       {/each}
     </dl>
   {/if}
@@ -1279,15 +1428,15 @@ Between the end of the Saved regions block (after the closing of the `{:else}` t
 
 (`Trash2` is already imported at line 2; no new import.)
 
-- [ ] **Step 5: Run test and the panel checks**
+- [ ] **Step 5: Run the helper test and check the build**
 
-Run: `npm test -- RegionsPanel` (or the chosen test)
-Expected: PASS.
+Run: `npm test -- estimate && npm run check`
+Expected: PASS (the `formatBySource` test and svelte-check). Manually confirm the section in the app: the TTL field commits, and the clear button arms the inline confirm.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/features/prewarm/RegionsPanel.svelte src/features/prewarm/regions-client.ts src/features/prewarm/estimate.ts
+git add src/features/prewarm/RegionsPanel.svelte src/features/prewarm/estimate.ts src/features/prewarm/estimate.test.ts
 git commit -m "feat(regions): add the scroll cache breakdown, TTL control, and clear action"
 ```
 
@@ -1327,7 +1476,9 @@ git commit -m "style(regions): biome formatting for the scroll cache section"
 
 **Placeholder scan:** none. Every step shows the code or the exact command.
 
-**Type consistency:** `buildSourcePayload` is four-arg in B2 and called four-arg in B3; `scrollTtlSecs` is seconds in B2, B3, A4, and A5; `ttlDays` is days in B1, B4, C1, and C2 and converted at the plugin edge in B3 and B4; `setCacheConfig`/`clearScrollCache` names match across C1 and C2; `sweep_aged_unpinned`/`clear_unpinned`/`per_source_totals` names match across A2, A3, A5, and A6.
+**Type consistency:** `buildSourcePayload` is four-arg in B2, called four-arg in B3, and its three existing three-arg test callers are updated in B2 Step 3b; the required `RegionsStore.cacheScrollTtlDays` added in B1 is added to the two existing test literals in B1 Step 3b; `scrollTtlSecs` is seconds in B2, B3, A4, and A5; `ttlDays` is days in B1, B4, C1, and C2 and converted at the plugin edge in B3 and B4; `setCacheConfig`/`clearScrollCache` names match across C1 and C2; `formatBySource` is defined in `estimate.ts` (C2 Step 3), tested in `estimate.test.ts` (C2 Step 1), and called in the template (C2 Step 4); `sweep_aged_unpinned`/`clear_unpinned`/`per_source_totals` names match across A2, A3, A5, and A6.
+
+**Test harness fit:** the plugin route tests (B4) and the new file `test/cache-routes.test.ts` follow the real `test/regions-crud.test.ts` harness (`makeRouter`, `fakeRes`, `fakeApp`, a `deps.fetchImpl`), not an invented one; the webapp helper test (C2) lives in `estimate.test.ts` because there is no Svelte render harness in this feature.
 
 ## Deviation from the spec (resolved during planning)
 
