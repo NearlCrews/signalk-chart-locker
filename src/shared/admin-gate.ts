@@ -4,7 +4,7 @@
  * exactly once per app and reports whether it is in place, so a caller mounts its route only when the gate
  * holds: a route that cannot be gated fails CLOSED (unmounted) rather than answering unauthenticated
  * callers. On an unsecured Signal K server every client is treated as admin, the standard Signal K behavior.
- * Shared: both the prewarm routes and the PMTiles chart-management routes gate the same /api subtree
+ * Shared: both the regions routes and the PMTiles chart-management routes gate the same /api subtree
  * through this one module, and the per-app WeakSet installs the middleware exactly once.
  */
 

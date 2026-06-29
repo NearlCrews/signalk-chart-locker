@@ -1,7 +1,7 @@
-/** Persists the prewarm box and the position-warm settings as a JSON state file under the Signal K data
+/** Persists the saved map regions and the position-warm settings as a JSON state file under the Signal K data
  * directory. This is the single source of truth; the values are deliberately NOT in schema() or
  * savePluginOptions, so they never surface as a second input surface in the plugin config screen.
- * Persistence goes through the shared sync json-state helper so the prewarm store and the chart override
+ * Persistence goes through the shared sync json-state helper so the regions store and the chart override
  * store use one idiom. */
 
 import { join } from 'node:path'
@@ -32,13 +32,13 @@ export interface SavedRegion {
   status: RegionStatus
 }
 
-export interface PrewarmStore {
+export interface RegionsStore {
   regions: SavedRegion[]
   positionWarm: PositionWarmSettings
 }
 
 /** Position-warm defaults: OFF (opt-in), a 2 nm radius, a 1 nm move threshold, a 60 s interval, base zoom 12. */
-export const DEFAULT_PREWARM_STORE: PrewarmStore = {
+export const DEFAULT_REGIONS_STORE: RegionsStore = {
   regions: [],
   positionWarm: {
     enabled: false,
@@ -60,12 +60,12 @@ export function positionWarmBudgetBytes (regionsBudgetBytes: number): number {
   return Math.min(Math.floor(regionsBudgetBytes * 0.1), 64 * 1024 * 1024)
 }
 
-const STORE_FILE = 'prewarm.json'
+const STORE_FILE = 'regions.json'
 
 /** Detect a v2 shape (top-level `bbox` or `sources`), migrate to the regions list, write back, and
  * return the migrated store. Only called on first load of a v2 file; after write-back the file has
  * no v2 keys so subsequent loads skip migration. */
-function migrateV2 (raw: Record<string, unknown>, dataDir: string): PrewarmStore {
+function migrateV2 (raw: Record<string, unknown>, dataDir: string): RegionsStore {
   // Defense in depth: an existing regions array is the base, so a stray top-level bbox or sources key
   // can never discard saved regions. The legacy single box becomes one region only when there is no
   // existing regions array. The write-back stores only regions and positionWarm, so the top-level
@@ -98,9 +98,9 @@ function migrateV2 (raw: Record<string, unknown>, dataDir: string): PrewarmStore
   const rawPositionWarm = typeof raw['positionWarm'] === 'object' && raw['positionWarm'] !== null
     ? raw['positionWarm'] as Partial<PositionWarmSettings>
     : {}
-  const store: PrewarmStore = {
+  const store: RegionsStore = {
     regions,
-    positionWarm: { ...DEFAULT_PREWARM_STORE.positionWarm, ...rawPositionWarm }
+    positionWarm: { ...DEFAULT_REGIONS_STORE.positionWarm, ...rawPositionWarm }
   }
   writeJsonState(join(dataDir, STORE_FILE), store)
   return store
@@ -108,7 +108,7 @@ function migrateV2 (raw: Record<string, unknown>, dataDir: string): PrewarmStore
 
 /** Read the persisted store, migrating a v2 box shape to a regions list if needed. Falls back to the
  * default on a missing or corrupt file. */
-export function loadPrewarmStore (dataDir: string): PrewarmStore {
+export function loadRegionsStore (dataDir: string): RegionsStore {
   const parsed = readJsonState<Record<string, unknown>>(join(dataDir, STORE_FILE), {})
   if ('bbox' in parsed || 'sources' in parsed) {
     return migrateV2(parsed, dataDir)
@@ -119,38 +119,38 @@ export function loadPrewarmStore (dataDir: string): PrewarmStore {
     : {}
   return {
     regions: rawRegions,
-    positionWarm: { ...DEFAULT_PREWARM_STORE.positionWarm, ...rawPositionWarm }
+    positionWarm: { ...DEFAULT_REGIONS_STORE.positionWarm, ...rawPositionWarm }
   }
 }
 
 /** Write the store atomically enough for a single-writer plugin (one JSON file). */
-export function savePrewarmStore (dataDir: string, store: PrewarmStore): void {
+export function saveRegionsStore (dataDir: string, store: RegionsStore): void {
   writeJsonState(join(dataDir, STORE_FILE), store)
 }
 
 /** Append a region to the persisted store and write it back. */
 export function addRegion (dataDir: string, region: SavedRegion): void {
-  const store = loadPrewarmStore(dataDir)
+  const store = loadRegionsStore(dataDir)
   store.regions.push(region)
-  savePrewarmStore(dataDir, store)
+  saveRegionsStore(dataDir, store)
 }
 
 /** Patch a region in place by id and write the store back; a no-op when the id is absent. */
 export function updateRegion (dataDir: string, id: string, patch: Partial<SavedRegion>): void {
-  const store = loadPrewarmStore(dataDir)
+  const store = loadRegionsStore(dataDir)
   const idx = store.regions.findIndex((r) => r.id === id)
   if (idx >= 0) store.regions[idx] = { ...store.regions[idx]!, ...patch }
-  savePrewarmStore(dataDir, store)
+  saveRegionsStore(dataDir, store)
 }
 
 /** Drop a region by id from the persisted store and write it back. */
 export function removeRegion (dataDir: string, id: string): void {
-  const store = loadPrewarmStore(dataDir)
+  const store = loadRegionsStore(dataDir)
   store.regions = store.regions.filter((r) => r.id !== id)
-  savePrewarmStore(dataDir, store)
+  saveRegionsStore(dataDir, store)
 }
 
 /** The persisted regions list. */
 export function listRegions (dataDir: string): SavedRegion[] {
-  return loadPrewarmStore(dataDir).regions
+  return loadRegionsStore(dataDir).regions
 }

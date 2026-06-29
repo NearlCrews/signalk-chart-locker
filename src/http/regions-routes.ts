@@ -1,4 +1,4 @@
-/** The admin-gated tile, prewarm, region, and geocode routes. They persist the position-warm settings
+/** The admin-gated tile, region, and geocode routes. They persist the position-warm settings
  * and the saved regions through the regions store, and forward warm and cache operations to the tilecache
  * container. Mounted only when the admin gate holds, so an ungatable server leaves them unmounted (fail closed). */
 
@@ -7,27 +7,27 @@ import type { ServerAPI } from '@signalk/server-api'
 import { estimateBytes } from 'signalk-binnacle-chart-sources'
 import { ensureApiAdminGate } from '../shared/admin-gate.js'
 import {
-  loadPrewarmStore, savePrewarmStore, type PositionWarmSettings,
+  loadRegionsStore, saveRegionsStore, type PositionWarmSettings,
   addRegion, updateRegion, removeRegion, listRegions,
   type SavedRegion, type RegionStatus
-} from '../runtime/prewarm-store.js'
+} from '../runtime/regions-store.js'
 
-export interface PrewarmRequest {
+export interface RegionsRequest {
   params: Record<string, string>
   body: unknown
   query?: Record<string, string>
 }
 
-export interface PrewarmResponse {
-  status (code: number): PrewarmResponse
+export interface RegionsResponse {
+  status (code: number): RegionsResponse
   json (value: unknown): void
   end (): void
 }
 
-export interface PrewarmRouter {
-  get (path: string, handler: (req: PrewarmRequest, res: PrewarmResponse) => void | Promise<void>): void
-  post (path: string, handler: (req: PrewarmRequest, res: PrewarmResponse) => void | Promise<void>): void
-  delete (path: string, handler: (req: PrewarmRequest, res: PrewarmResponse) => void | Promise<void>): void
+export interface RegionsRouter {
+  get (path: string, handler: (req: RegionsRequest, res: RegionsResponse) => void | Promise<void>): void
+  post (path: string, handler: (req: RegionsRequest, res: RegionsResponse) => void | Promise<void>): void
+  delete (path: string, handler: (req: RegionsRequest, res: RegionsResponse) => void | Promise<void>): void
 }
 
 /** A terminal-or-running warm job snapshot, as the container reports it from GET /warm/:jobId. */
@@ -63,13 +63,13 @@ function isValidBbox (value: unknown): value is [number, number, number, number]
     value[0] < value[2] && value[1] < value[3]
 }
 
-/** Mount the prewarm routes behind the admin gate. Returns whether they were mounted. */
-export function registerPrewarmRoutes (router: PrewarmRouter, app: ServerAPI, getAddress: () => string | null, deps: Deps = {}): boolean {
+/** Mount the regions routes behind the admin gate. Returns whether they were mounted. */
+export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, getAddress: () => string | null, deps: Deps = {}): boolean {
   if (!ensureApiAdminGate(app)) return false
   const dataDir = deps.dataDir ?? (app as unknown as { getDataDirPath(): string }).getDataDirPath()
   const fetchImpl: FetchImpl = deps.fetchImpl ?? ((url, init) => fetch(url, init))
 
-  const withAddress = (res: PrewarmResponse): string | null => {
+  const withAddress = (res: RegionsResponse): string | null => {
     const address = getAddress()
     if (address === null) {
       res.status(503).end()
@@ -78,7 +78,7 @@ export function registerPrewarmRoutes (router: PrewarmRouter, app: ServerAPI, ge
     return address
   }
 
-  const relay = async (res: PrewarmResponse, upstream: Promise<Response>): Promise<void> => {
+  const relay = async (res: RegionsResponse, upstream: Promise<Response>): Promise<void> => {
     try {
       const r = await upstream
       const body = await r.json().catch(() => ({}))
@@ -140,18 +140,18 @@ export function registerPrewarmRoutes (router: PrewarmRouter, app: ServerAPI, ge
   // The position-warm settings live in the regions store. GET returns just the positionWarm block and
   // POST merges ONLY the incoming positionWarm, preserving the saved regions, so saving settings never
   // drops a region.
-  router.get('/api/prewarm/config', (_req, res) => {
-    res.status(200).json(loadPrewarmStore(dataDir).positionWarm)
+  router.get('/api/position-warm/config', (_req, res) => {
+    res.status(200).json(loadRegionsStore(dataDir).positionWarm)
   })
 
-  router.post('/api/prewarm/config', (req, res) => {
-    const store = loadPrewarmStore(dataDir)
+  router.post('/api/position-warm/config', (req, res) => {
+    const store = loadRegionsStore(dataDir)
     const incoming = (req.body as { positionWarm?: Partial<PositionWarmSettings> } | undefined) ?? {}
     const positionWarm = { ...store.positionWarm, ...(incoming.positionWarm ?? {}) }
     // Floor the interval server-side (the panel enforces it too) so a direct POST cannot set a
     // sub-60-second loop that hammers the egress path.
     positionWarm.intervalSecs = Math.max(MIN_WARM_INTERVAL_SECS, positionWarm.intervalSecs)
-    savePrewarmStore(dataDir, { ...store, positionWarm })
+    saveRegionsStore(dataDir, { ...store, positionWarm })
     res.status(204).end()
   })
 

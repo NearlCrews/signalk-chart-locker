@@ -18,7 +18,7 @@ use serde::Deserialize;
 
 pub(crate) const NOMINATIM_HOST: &str = "nominatim.openstreetmap.org";
 const NOMINATIM_USER_AGENT: &str =
-    "signalk-binnacle-companion geocoder (+https://github.com/NearlCrews/signalk-binnacle-companion)";
+    "signalk-chart-locker geocoder (+https://github.com/NearlCrews/signalk-chart-locker)";
 
 pub fn geocode_routes() -> Router<AppState> {
     Router::new().route("/geocode", get(geocode))

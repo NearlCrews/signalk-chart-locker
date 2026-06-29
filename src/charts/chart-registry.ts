@@ -6,7 +6,7 @@
 import type { ResourceProvider } from '@signalk/server-api'
 import type { DecodedPmtiles } from './pmtiles-metadata.js'
 
-export const SERVE_BASE = '/plugins/signalk-binnacle-companion/pmtiles'
+export const SERVE_BASE = '/plugins/signalk-chart-locker/pmtiles'
 export const DEFAULT_SCALE = 250000
 const V1_CHARTS = '/signalk/v1/api/resources/charts'
 

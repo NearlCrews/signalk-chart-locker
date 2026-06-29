@@ -4,7 +4,7 @@ import { CHART_SOURCES, type ChartSource } from 'signalk-binnacle-chart-sources'
 import type { FetchResponse } from '../shared/types.js'
 
 /** The Signal K server route base the browser reaches the proxy through (for the container style rewrite). */
-export const PLUGIN_PUBLIC_BASE = '/plugins/signalk-binnacle-companion'
+export const PLUGIN_PUBLIC_BASE = '/plugins/signalk-chart-locker'
 
 export interface TilecacheConfigPayload {
   sources: ChartSource[]

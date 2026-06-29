@@ -4,15 +4,15 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ServerAPI } from '@signalk/server-api'
-import { registerPrewarmRoutes, type PrewarmRouter, type PrewarmResponse } from '../src/http/prewarm-routes.js'
+import { registerRegionsRoutes, type RegionsRouter, type RegionsResponse } from '../src/http/regions-routes.js'
 import { fakeApp } from './helpers.js'
 
-/** The Recorder fake carries the slice registerPrewarmRoutes reads (securityStrategy, getDataDirPath). */
+/** The Recorder fake carries the slice registerRegionsRoutes reads (securityStrategy, getDataDirPath). */
 const app = (): ServerAPI => fakeApp() as unknown as ServerAPI
 
 function makeRouter () {
   const routes: Array<{ method: string; path: string; handler: Function }> = []
-  const router: PrewarmRouter = {
+  const router: RegionsRouter = {
     get (path, handler) { routes.push({ method: 'GET', path, handler }) },
     post (path, handler) { routes.push({ method: 'POST', path, handler }) },
     delete (path, handler) { routes.push({ method: 'DELETE', path, handler }) }
@@ -20,9 +20,9 @@ function makeRouter () {
   return { routes, router }
 }
 
-function fakeRes (): { responded: Array<{ status: number; body: unknown }>; res: PrewarmResponse } {
+function fakeRes (): { responded: Array<{ status: number; body: unknown }>; res: RegionsResponse } {
   const responded: Array<{ status: number; body: unknown }> = []
-  const res: PrewarmResponse = {
+  const res: RegionsResponse = {
     status (code) { responded.push({ status: code, body: null }); return res },
     json (body) { if (responded.length) responded[responded.length - 1].body = body },
     end () { if (responded.length) responded[responded.length - 1].body = null }
@@ -30,9 +30,9 @@ function fakeRes (): { responded: Array<{ status: number; body: unknown }>; res:
   return { responded, res }
 }
 
-test('registerPrewarmRoutes mounts all region routes', () => {
+test('registerRegionsRoutes mounts all region routes', () => {
   const { router, routes } = makeRouter()
-  registerPrewarmRoutes(router, app(), () => '127.0.0.1:9999')
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999')
   const paths = routes.map(r => `${r.method} ${r.path}`)
   assert.ok(paths.includes('GET /api/regions'), 'GET /api/regions must be mounted')
   assert.ok(paths.includes('POST /api/regions'), 'POST /api/regions must be mounted')
@@ -44,7 +44,7 @@ test('registerPrewarmRoutes mounts all region routes', () => {
 test('POST /api/regions refuses an invalid bbox with 400', async () => {
   const { router, routes } = makeRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
-  registerPrewarmRoutes(router, app(), () => null, { dataDir })
+  registerRegionsRoutes(router, app(), () => null, { dataDir })
   const route = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
   const { responded, res } = fakeRes()
   await route.handler({ params: {}, body: { bbox: 'not-an-array', sourceIds: [], minzoom: 6, maxzoom: 12, name: 'Test' } }, res)
@@ -54,7 +54,7 @@ test('POST /api/regions refuses an invalid bbox with 400', async () => {
 test('POST /api/regions returns 503 when the container address is unavailable', async () => {
   const { router, routes } = makeRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
-  registerPrewarmRoutes(router, app(), () => null, { dataDir })
+  registerRegionsRoutes(router, app(), () => null, { dataDir })
   const route = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
   const { responded, res } = fakeRes()
   await route.handler({ params: {}, body: { bbox: [-10.0, 50.0, 10.0, 60.0], sourceIds: ['depth-gebco'], minzoom: 6, maxzoom: 12, name: 'Test' } }, res)
@@ -64,7 +64,7 @@ test('POST /api/regions returns 503 when the container address is unavailable', 
 test('GET /api/regions returns the persisted regions list', async () => {
   const { router, routes } = makeRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
-  registerPrewarmRoutes(router, app(), () => '127.0.0.1:9999', { dataDir })
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir })
   const route = routes.find(r => r.method === 'GET' && r.path === '/api/regions')!
   const { responded, res } = fakeRes()
   await route.handler({ params: {}, body: null }, res)
@@ -92,7 +92,7 @@ test('POST /api/regions returns 400 when the estimate exceeds the regions-free b
   }
   const { router, routes } = makeRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
-  registerPrewarmRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
   const route = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
   const { responded, res } = fakeRes()
   await route.handler({ params: {}, body: { bbox: [-10.0, 50.0, 10.0, 60.0], sourceIds: ['depth-gebco'], minzoom: 6, maxzoom: 12, name: 'Test' } }, res)
@@ -126,7 +126,7 @@ test('a warm-relay failure leaves no persisted region', async () => {
   }
   const { router, routes } = makeRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
-  registerPrewarmRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
   const post = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
   const { responded, res } = fakeRes()
   await post.handler({ params: {}, body: { bbox: [-10.0, 50.0, 10.0, 60.0], sourceIds: ['depth-gebco'], minzoom: 6, maxzoom: 12, name: 'Test' } }, res)
@@ -162,7 +162,7 @@ test('a terminal job snapshot reconciles the region status away from downloading
   }
   const { router, routes } = makeRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
-  registerPrewarmRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
   const post = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
   const { responded: created, res: postRes } = fakeRes()
   await post.handler({ params: {}, body: { bbox: [-10.0, 50.0, 10.0, 60.0], sourceIds: ['depth-gebco'], minzoom: 6, maxzoom: 12, name: 'Test' } }, postRes)
@@ -202,7 +202,7 @@ test('saving position-warm settings preserves saved regions', async () => {
   }
   const { router, routes } = makeRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
-  registerPrewarmRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
 
   // Save a region.
   const post = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
@@ -212,7 +212,7 @@ test('saving position-warm settings preserves saved regions', async () => {
   const regionId = (created[0]?.body as { region: { id: string } }).region.id
 
   // Save position-warm settings (the toggle that used to wipe all saved regions).
-  const postCfg = routes.find(r => r.method === 'POST' && r.path === '/api/prewarm/config')!
+  const postCfg = routes.find(r => r.method === 'POST' && r.path === '/api/position-warm/config')!
   const { responded: cfgSaved, res: cfgRes } = fakeRes()
   await postCfg.handler({ params: {}, body: { positionWarm: { enabled: true, sources: ['seamark'] } } }, cfgRes)
   assert.equal(cfgSaved[0]?.status, 204)
@@ -225,7 +225,7 @@ test('saving position-warm settings preserves saved regions', async () => {
   assert.ok(persisted, 'saving position-warm settings must not drop the saved region')
 
   // And the position-warm settings must have been updated.
-  const getCfg = routes.find(r => r.method === 'GET' && r.path === '/api/prewarm/config')!
+  const getCfg = routes.find(r => r.method === 'GET' && r.path === '/api/position-warm/config')!
   const { responded: cfg, res: getCfgRes } = fakeRes()
   await getCfg.handler({ params: {}, body: null }, getCfgRes)
   const pw = cfg[0]?.body as { enabled: boolean; sources: string[] }
@@ -254,7 +254,7 @@ test('DELETE /api/regions/:id removes the region after the container delete succ
   }
   const { router, routes } = makeRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
-  registerPrewarmRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
   const post = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
   const { responded: created, res: postRes } = fakeRes()
   await post.handler({ params: {}, body: { bbox: [-10.0, 50.0, 10.0, 60.0], sourceIds: ['depth-gebco'], minzoom: 6, maxzoom: 12, name: 'Bay' } }, postRes)
@@ -294,7 +294,7 @@ test('DELETE /api/regions/:id returns 503 and keeps the region when the containe
   }
   const { router, routes } = makeRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
-  registerPrewarmRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
   const post = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
   const { responded: created, res: postRes } = fakeRes()
   await post.handler({ params: {}, body: { bbox: [-10.0, 50.0, 10.0, 60.0], sourceIds: ['depth-gebco'], minzoom: 6, maxzoom: 12, name: 'Bay' } }, postRes)

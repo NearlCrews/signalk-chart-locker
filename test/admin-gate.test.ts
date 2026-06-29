@@ -16,7 +16,7 @@ test('the gate installs the admin middleware once and reports true', () => {
   const { app, gated } = fakeApp(true)
   assert.equal(ensureApiAdminGate(app), true)
   assert.equal(ensureApiAdminGate(app), true)
-  assert.deepEqual(gated, ['/plugins/signalk-binnacle-companion/api'], 'installed exactly once')
+  assert.deepEqual(gated, ['/plugins/signalk-chart-locker/api'], 'installed exactly once')
 })
 
 test('the gate fails closed when no security strategy is present', () => {

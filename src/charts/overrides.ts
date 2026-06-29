@@ -1,6 +1,6 @@
 /** Per-chart overrides of the name, description, and scale, persisted server-side in a JSON file
  * under the plugin data directory through the shared sync json-state helper (the same persistence seam
- * as the prewarm store). Keyed by chart identifier. The namer applies an override over the decoded
+ * as the regions store). Keyed by chart identifier. The namer applies an override over the decoded
  * name and the defaults. */
 
 import { type ChartNamer, defaultNamer } from './discovery.js'

@@ -83,7 +83,7 @@ pub struct AppState {
     pub cache: Arc<TileCache>,
     pub client: reqwest::Client,
     pub sources: Arc<RwLock<HashMap<String, ChartSource>>>,
-    /// The plugin-facing public base (for example /plugins/signalk-binnacle-companion), set by POST /config.
+    /// The plugin-facing public base (for example /plugins/signalk-chart-locker), set by POST /config.
     pub public_base: Arc<RwLock<String>>,
     /// Per-style learned upstream templates, keyed by source id.
     pub style_state: Arc<RwLock<HashMap<String, StyleState>>>,
@@ -112,7 +112,7 @@ impl AppState {
     pub fn new(cache: Arc<TileCache>, knobs: Knobs) -> Self {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent("signalk-binnacle-companion-tilecache")
+            .user_agent("signalk-chart-locker-tilecache")
             .timeout(std::time::Duration::from_secs(20))
             .dns_resolver(Arc::new(GuardedResolver { allow_private: knobs.allow_private_egress }))
             .build()
