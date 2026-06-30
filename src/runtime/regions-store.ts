@@ -38,11 +38,14 @@ export interface RegionsStore {
   cacheScrollTtlDays: number
 }
 
-/** Position-warm defaults: OFF (opt-in), a 2 nm radius, a 1 nm move threshold, a 60 s interval, base zoom 12. */
+/** Position-warm defaults: ON out of the box but with NO charts picked, a 2 nm radius, a 1 nm move
+ * threshold, a 60 s interval, and base zoom 12. Enabled-with-no-sources warms nothing yet: the panel
+ * surfaces auto-cache as on and prompts the navigator to choose which charts to cache around the
+ * boat, so the choice (and its bandwidth) is theirs rather than a silent default download. */
 export const DEFAULT_REGIONS_STORE: RegionsStore = {
   regions: [],
   positionWarm: {
-    enabled: false,
+    enabled: true,
     radiusMeters: 3704,
     moveThresholdMeters: 1852,
     intervalSecs: 60,

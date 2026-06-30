@@ -14,13 +14,15 @@ test('a corrupt file falls back to an empty store rather than throwing', () => {
   writeFileSync(join(dir, 'regions.json'), 'not json')
   const store = loadRegionsStore(dir)
   assert.deepEqual(store.regions, [])
-  assert.equal(store.positionWarm.enabled, false)
+  assert.equal(store.positionWarm.enabled, true)
 })
 
 test('fresh directory returns empty regions list and default position-warm', () => {
   const store = loadRegionsStore(tmp())
   assert.deepEqual(store.regions, [])
-  assert.equal(store.positionWarm.enabled, false)
+  // Auto-cache ships on but with no charts picked, so the panel prompts the navigator to choose.
+  assert.equal(store.positionWarm.enabled, true)
+  assert.deepEqual(store.positionWarm.sources, [])
   assert.equal(store.positionWarm.radiusMeters, 3704)
 })
 
