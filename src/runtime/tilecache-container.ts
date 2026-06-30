@@ -7,7 +7,7 @@ export type { FetchLike }
 
 export const TILECACHE_CONTAINER_NAME = 'chart-locker-tilecache'
 export const TILECACHE_INTERNAL_PORT = 8080
-export const DEFAULT_TILECACHE_IMAGE = 'ghcr.io/nearlcrews/signalk-binnacle-tilecache'
+export const DEFAULT_TILECACHE_IMAGE = 'ghcr.io/nearlcrews/signalk-chart-locker-tilecache'
 export const DEFAULT_TILECACHE_TAG = 'latest'
 
 /** Where signalk-container mounts the Signal K data directory inside the container (the durable default). */
