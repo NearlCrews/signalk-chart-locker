@@ -1,0 +1,58 @@
+name: Container image
+
+# Builds and pushes the tilecache container image to ghcr on a version tag (or on demand). The plugin
+# pulls ghcr.io/<owner>/signalk-chart-locker-tilecache, so this publishes that exact name. Prep only:
+# nothing here runs until a v* tag is pushed or the workflow is dispatched.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute the lowercase image name
+        # ghcr requires a lowercase path; github.repository_owner can be mixed case. Pass it through env
+        # (never interpolate a context value straight into a run shell).
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "IMAGE=ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/signalk-chart-locker-tilecache" >> "$GITHUB_ENV"
+
+      - name: Set up QEMU
+        # The Dockerfile compiles Rust inside the target stage, so the linux/arm64 build needs
+        # emulation on the amd64 runner or the arm64 RUN dies with exec format error.
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          # The Dockerfile COPYs Cargo.toml, .cargo, and tilecache relative to the container dir, so the
+          # context is container and the file is named explicitly (the default container/Dockerfile does
+          # not exist).
+          context: container
+          file: container/tilecache/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # A plain (non-attestation) manifest so podman can pull it without an OCI referrers lookup.
+          # BuildKit still writes the Dockerfile HEALTHCHECK into the image config on every platform.
+          provenance: false
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.ref_name }}
