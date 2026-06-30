@@ -15,7 +15,7 @@ test('buildTilecacheConfig exposes the port, the healthcheck, the data mount, an
   assert.deepEqual(c.signalkAccessiblePorts, [TILECACHE_INTERNAL_PORT])
   assert.deepEqual(c.healthcheck?.test, ['CMD', '/tilecache', 'healthcheck'])
   assert.equal(c.signalkDataMount, '/signalk-data')
-  assert.equal(c.env?.TILECACHE_DB, '/signalk-data/binnacle-tilecache/cache.sqlite')
+  assert.equal(c.env?.TILECACHE_DB, '/signalk-data/chart-locker-tilecache/cache.sqlite')
   assert.equal(c.env?.TILECACHE_CAP_BYTES, String(DEFAULT_CACHE_CAP_GIB * 1024 ** 3))
   assert.equal(c.volumes, undefined) // no external volume by default
 })
@@ -39,7 +39,7 @@ test('buildTilecacheConfig defaults the scroll TTL env to 0 when unset', () => {
 test('an external cache volume source mounts at the cache dir with a skip-if-missing policy', () => {
   const c = buildTilecacheConfig({ externalCacheVolumeSource: '/media/ssd/binnacle' })
   assert.deepEqual(c.volumes, {
-    '/signalk-data/binnacle-tilecache': { source: '/media/ssd/binnacle', ifMissing: 'skip' }
+    '/signalk-data/chart-locker-tilecache': { source: '/media/ssd/binnacle', ifMissing: 'skip' }
   })
 })
 

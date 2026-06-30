@@ -2,9 +2,9 @@
 //! container HEALTHCHECK, env-driven port, DB path, and cap, and a graceful SIGTERM and SIGINT
 //! shutdown. The cache DB lives on the mounted volume the plugin configures.
 
-use binnacle_tilecache::cache::TileCache;
-use binnacle_tilecache::routes::app;
-use binnacle_tilecache::state::{AppState, Knobs};
+use chart_locker_tilecache::cache::TileCache;
+use chart_locker_tilecache::routes::app;
+use chart_locker_tilecache::state::{AppState, Knobs};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -22,6 +22,10 @@ async fn main() {
     let allow_private = std::env::var("TILECACHE_ALLOW_PRIVATE").as_deref() == Ok("1");
 
     if let Some(parent) = Path::new(&db).parent() {
+        // Migrate the legacy cache dir BEFORE creating the current one: create_dir_all would otherwise
+        // create the current dir first, the migration would skip, and the warmed legacy cache would be
+        // orphaned and the cache would start cold.
+        chart_locker_tilecache::cache::migrate_legacy_cache_dir(parent);
         if let Err(e) = std::fs::create_dir_all(parent) {
             eprintln!("tilecache: could not create cache directory {}: {e}", parent.display());
         }
@@ -30,7 +34,7 @@ async fn main() {
     let knobs = Knobs { cap_bytes: cap, scroll_ttl_secs, allow_private_egress: allow_private, ..Default::default() };
     let state = AppState::new(cache, knobs);
 
-    tokio::spawn(binnacle_tilecache::sweep::run_sweeper(state.clone()));
+    tokio::spawn(chart_locker_tilecache::sweep::run_sweeper(state.clone()));
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await.expect("bind the tilecache port");
     axum::serve(listener, app(state))

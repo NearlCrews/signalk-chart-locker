@@ -634,6 +634,42 @@ impl TileCache {
     }
 }
 
+/// One-time rename of the legacy `binnacle-tilecache` cache dir to the current dir, so an upgrade keeps
+/// its warmed cache instead of starting cold. No-op when no legacy dir exists, when the legacy name is
+/// already the current name, or when the current dir already exists. Must run before the cache dir is
+/// created: once the current dir exists this skips, leaving a populated legacy dir orphaned. Both dirs
+/// share the same parent (the data mount), so the rename is same-filesystem and atomic.
+pub fn migrate_legacy_cache_dir(cache_dir: &Path) {
+    const LEGACY_NAME: &str = "binnacle-tilecache";
+    let Some(parent) = cache_dir.parent() else { return };
+    let legacy = parent.join(LEGACY_NAME);
+    if legacy == cache_dir || !legacy.is_dir() {
+        return;
+    }
+    if cache_dir.exists() {
+        // The current dir is already present, so the legacy one cannot be moved in. Leave it untouched
+        // and warn, so a populated legacy cache stays recoverable rather than silently ignored.
+        eprintln!(
+            "tilecache: legacy cache dir {} left in place; the current dir {} already exists",
+            legacy.display(),
+            cache_dir.display()
+        );
+        return;
+    }
+    match std::fs::rename(&legacy, cache_dir) {
+        Ok(()) => eprintln!(
+            "tilecache: migrated legacy cache dir {} -> {}",
+            legacy.display(),
+            cache_dir.display()
+        ),
+        Err(e) => eprintln!(
+            "tilecache: could not migrate legacy cache dir {} -> {}: {e}; starting cold",
+            legacy.display(),
+            cache_dir.display()
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,6 +692,38 @@ mod tests {
         let f = NamedTempFile::new().unwrap();
         let c = TileCache::open(f.path()).unwrap();
         (f, c)
+    }
+
+    #[test]
+    fn migrate_renames_the_legacy_dir_when_the_current_dir_is_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("binnacle-tilecache");
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join("cache.sqlite"), b"x").unwrap();
+        let current = tmp.path().join("chart-locker-tilecache");
+        migrate_legacy_cache_dir(&current);
+        assert!(current.join("cache.sqlite").exists(), "the cache moved to the current dir");
+        assert!(!legacy.exists(), "the legacy dir was renamed away");
+    }
+
+    #[test]
+    fn migrate_leaves_the_legacy_dir_when_the_current_dir_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("binnacle-tilecache");
+        std::fs::create_dir(&legacy).unwrap();
+        let current = tmp.path().join("chart-locker-tilecache");
+        std::fs::create_dir(&current).unwrap();
+        migrate_legacy_cache_dir(&current);
+        assert!(legacy.exists(), "the legacy dir is left untouched");
+        assert!(current.exists(), "the current dir is left untouched");
+    }
+
+    #[test]
+    fn migrate_is_a_noop_with_no_legacy_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let current = tmp.path().join("chart-locker-tilecache");
+        migrate_legacy_cache_dir(&current);
+        assert!(!current.exists(), "nothing is created when there is no legacy dir");
     }
 
     #[test]

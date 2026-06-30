@@ -13,7 +13,7 @@ export const DEFAULT_TILECACHE_TAG = 'latest'
 /** Where signalk-container mounts the Signal K data directory inside the container (the durable default). */
 const SIGNALK_DATA_MOUNT = '/signalk-data'
 /** The cache subdirectory under the data mount, and the DB file in it. A user-managed external volume can mount here. */
-const CACHE_DIR = `${SIGNALK_DATA_MOUNT}/binnacle-tilecache`
+const CACHE_DIR = `${SIGNALK_DATA_MOUNT}/chart-locker-tilecache`
 const TILECACHE_DB_PATH = `${CACHE_DIR}/cache.sqlite`
 /** Conservative default cap (GiB). Used as the fallback when free-space detection is unavailable. */
 export const DEFAULT_CACHE_CAP_GIB = 8

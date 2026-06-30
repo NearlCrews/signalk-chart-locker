@@ -1,10 +1,10 @@
 [package]
-name = "binnacle-tilecache"
+name = "chart-locker-tilecache"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "binnacle_tilecache"
+name = "chart_locker_tilecache"
 path = "src/lib.rs"
 
 [[bin]]
