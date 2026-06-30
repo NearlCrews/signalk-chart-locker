@@ -29,6 +29,11 @@ everything below is the initial public release.
   viewed within the window, swept at container startup and on an hourly timer; pinned saved-region and
   position-warm tiles are never aged out or cleared. The clear and the sweep run in bounded chunks so a
   large reclaim never stalls tile serving.
+- **Basemap in a saved region (geometry).** The vector basemap is now a selectable source when saving
+  a region, so a downloaded region pins the basemap geometry tiles and renders its base layer offline.
+  The basemap tiles warm at their native vector maxzoom and overzoom above it, and the basemap is
+  offered for a region download only, never for position warm. Offline labels and icons (the font
+  glyphs and the sprite) are a later step.
 
 ### Changed
 
