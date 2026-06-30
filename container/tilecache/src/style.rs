@@ -60,32 +60,26 @@ async fn fetch_bytes(state: &AppState, url: &str) -> Option<(String, Bytes)> {
     Some((content_type, body))
 }
 
-/// GET /style/:source: fetch, learn, rewrite, and serve the basemap style.
-async fn style_doc(State(state): State<AppState>, Path(source): Path<String>) -> Response {
+/// Fetch the upstream style, learn its glyph template, per-source tile templates, and per-source
+/// maxzoom (inline on the source, or from the source's TileJSON), store the StyleState, and return the
+/// parsed style document for the caller to rewrite and serve. Returns None for a non-style or unknown
+/// source, a host off the allowlist, or any fetch failure.
+async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Value> {
     let (style_url, allowed) = {
         let map = state.sources.read().await;
-        match map.get(&source).map(|s| s.upstream.clone()) {
+        match map.get(source).map(|s| s.upstream.clone()) {
             Some(UpstreamTemplate::Style { style_url, allowed_hosts }) => (style_url, allowed_hosts),
-            _ => return StatusCode::NOT_FOUND.into_response(),
+            _ => return None,
         }
     };
-
     if !host_allowed(&style_url, &allowed) {
-        return StatusCode::BAD_GATEWAY.into_response();
+        return None;
     }
-    let Some(mut style) = fetch_json(&state, &style_url).await else {
-        return StatusCode::BAD_GATEWAY.into_response();
-    };
-    let public = state.public_base.read().await.clone();
-
-    // Learn the glyphs template, then rewrite it to the plugin path.
+    let style = fetch_json(state, &style_url).await?;
     let glyphs = style.get("glyphs").and_then(|v| v.as_str()).map(String::from);
-    if glyphs.is_some() {
-        style["glyphs"] = Value::String(format!("{public}/style/{source}/glyphs/{{fontstack}}/{{range}}.pbf"));
-    }
 
-    // For each source, resolve its tile templates (inline tiles, or its TileJSON), then rewrite.
     let mut source_tiles: HashMap<String, Vec<String>> = HashMap::new();
+    let mut source_maxzoom: HashMap<String, u32> = HashMap::new();
     let names: Vec<String> = style
         .get("sources")
         .and_then(|v| v.as_object())
@@ -93,24 +87,69 @@ async fn style_doc(State(state): State<AppState>, Path(source): Path<String>) ->
         .unwrap_or_default();
     for name in &names {
         let src = style["sources"][name].clone();
-        let tiles: Vec<String> = if let Some(arr) = src.get("tiles").and_then(|v| v.as_array()) {
-            arr.iter().filter_map(|x| x.as_str().map(String::from)).collect()
+        // maxzoom can be inline on the source, or in the source's TileJSON (fetched below).
+        let inline_max = src.get("maxzoom").and_then(|v| v.as_u64()).map(|m| m as u32);
+        let (tiles, tj_max): (Vec<String>, Option<u32>) = if let Some(arr) = src.get("tiles").and_then(|v| v.as_array()) {
+            (arr.iter().filter_map(|x| x.as_str().map(String::from)).collect(), None)
         } else if let Some(url) = src.get("url").and_then(|v| v.as_str()) {
             if host_allowed(url, &allowed) {
-                fetch_json(&state, url)
-                    .await
-                    .and_then(|tj| tj.get("tiles").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()))
-                    .unwrap_or_default()
+                match fetch_json(state, url).await {
+                    Some(tj) => (
+                        tj.get("tiles").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default(),
+                        tj.get("maxzoom").and_then(|v| v.as_u64()).map(|m| m as u32),
+                    ),
+                    None => (Vec::new(), None),
+                }
             } else {
-                Vec::new()
+                (Vec::new(), None)
             }
         } else {
-            Vec::new()
+            (Vec::new(), None)
         };
         if tiles.is_empty() {
             continue;
         }
+        if let Some(m) = inline_max.or(tj_max) {
+            source_maxzoom.insert(name.clone(), m);
+        }
         source_tiles.insert(name.clone(), tiles);
+    }
+    state.style_state.write().await.insert(source.to_string(), StyleState { glyphs, source_tiles, source_maxzoom });
+    Some(style)
+}
+
+/// Ensure the StyleState for a source is learned, fetching it once if absent. Idempotent: returns
+/// true without a refetch when already learned. Used by the warm path so it can enumerate a style
+/// source's vector tiles without a prior GET /style request.
+pub async fn ensure_style_learned(state: &AppState, source: &str) -> bool {
+    if state.style_state.read().await.contains_key(source) {
+        return true;
+    }
+    fetch_and_learn(state, source).await.is_some()
+}
+
+/// GET /style/:source: fetch, learn, rewrite, and serve the basemap style.
+async fn style_doc(State(state): State<AppState>, Path(source): Path<String>) -> Response {
+    // Preserve the 404 for an unknown or non-style source; a fetch failure is a 502 below.
+    {
+        let map = state.sources.read().await;
+        match map.get(&source).map(|s| s.upstream.clone()) {
+            Some(UpstreamTemplate::Style { .. }) => {}
+            _ => return StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+    let Some(mut style) = fetch_and_learn(&state, &source).await else {
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+    let public = state.public_base.read().await.clone();
+    let learned = { state.style_state.read().await.get(&source).cloned() };
+    let Some(learned) = learned else { return StatusCode::BAD_GATEWAY.into_response() };
+
+    // Rewrite the glyphs and the learned sources to point back at the plugin.
+    if learned.glyphs.is_some() {
+        style["glyphs"] = Value::String(format!("{public}/style/{source}/glyphs/{{fontstack}}/{{range}}.pbf"));
+    }
+    for name in learned.source_tiles.keys() {
         if let Some(obj) = style["sources"][name].as_object_mut() {
             obj.remove("url");
             obj.insert(
@@ -119,8 +158,6 @@ async fn style_doc(State(state): State<AppState>, Path(source): Path<String>) ->
             );
         }
     }
-
-    state.style_state.write().await.insert(source.clone(), StyleState { glyphs, source_tiles });
 
     let body = match serde_json::to_vec(&style) {
         Ok(bytes) => bytes,
@@ -238,7 +275,7 @@ mod tests {
             .route(
                 "/tiles.json",
                 get(move || async move {
-                    ([(header::CONTENT_TYPE, "application/json")], format!(r#"{{"tiles":["http://{a}/t/{{z}}/{{x}}/{{y}}.pbf"]}}"#))
+                    ([(header::CONTENT_TYPE, "application/json")], format!(r#"{{"tiles":["http://{a}/t/{{z}}/{{x}}/{{y}}.pbf"],"maxzoom":14}}"#))
                 }),
             )
             .route("/fonts/:fontstack/:range", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![7u8, 7, 7]) }))
@@ -292,6 +329,23 @@ mod tests {
         // A glyph range is proxied.
         let glyph = router.oneshot(Request::get("/style/basemap/glyphs/NotoSans/0-255.pbf").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(glyph.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn ensure_style_learned_records_tiles_and_source_maxzoom() {
+        let addr = spawn_upstream().await;
+        let db = NamedTempFile::new().unwrap();
+        let st = dev_state(&db);
+        crate::routes::app(st.clone())
+            .oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr, "127.0.0.1"))).unwrap())
+            .await.unwrap();
+        assert!(crate::style::ensure_style_learned(&st, "basemap").await, "the style is learned");
+        let ss = st.style_state.read().await;
+        let learned = ss.get("basemap").unwrap();
+        assert!(learned.source_tiles.contains_key("openmaptiles"), "the vector source tile template is learned");
+        assert_eq!(learned.source_maxzoom.get("openmaptiles"), Some(&14), "the vector source maxzoom is learned from its TileJSON");
+        drop(ss);
+        assert!(crate::style::ensure_style_learned(&st, "basemap").await, "a second call is idempotent");
     }
 
     #[tokio::test]

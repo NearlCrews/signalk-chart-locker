@@ -233,6 +233,7 @@ async fn warm_start(State(st): State<AppState>, Json(body): Json<WarmBody>) -> R
             tile_size: 256,
             minzoom: body.minzoom,
             maxzoom: body.maxzoom,
+            vector_maxzoom: None,
             bounds: None,
             attribution: String::new(),
         })

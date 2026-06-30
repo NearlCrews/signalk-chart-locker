@@ -80,6 +80,7 @@ impl Default for Knobs {
 pub struct StyleState {
     pub glyphs: Option<String>,
     pub source_tiles: HashMap<String, Vec<String>>,
+    pub source_maxzoom: HashMap<String, u32>,
 }
 
 #[derive(Clone)]

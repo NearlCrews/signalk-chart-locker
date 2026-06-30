@@ -86,10 +86,18 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
         let map = state.sources.read().await;
         for s in &req.sources {
             match map.get(&s.id) {
-                Some(known) if !matches!(known.upstream, UpstreamTemplate::Style { .. }) => {
+                Some(known) if matches!(known.upstream, UpstreamTemplate::Style { .. }) => {
+                    // The style is not fetched yet, so count one sub-source's worth at the registry
+                    // vector maxzoom for the hard-cap gate; run() enumerates each learned sub-source.
+                    let clamp = known.vector_maxzoom.unwrap_or(known.maxzoom).min(known.maxzoom);
+                    let mut tmp = known.clone();
+                    tmp.maxzoom = clamp;
+                    total += tile_count_in_bbox(&tmp, b, req.minzoom, req.maxzoom);
+                }
+                Some(known) => {
                     total += tile_count_in_bbox(known, b, req.minzoom, req.maxzoom);
                 }
-                _ => return Err(StartError::UnknownSource(s.id.clone())),
+                None => return Err(StartError::UnknownSource(s.id.clone())),
             }
         }
     }
@@ -178,6 +186,43 @@ fn effective_budget(st: &AppState, region_id: Option<&str>) -> i64 {
     raw.min(cap).max(0)
 }
 
+// Expand a style source into one synthetic XYZ sub-source per learned in-style source, keyed
+// style:{source}:{name} so the warm writes the exact key the vector-tile serve route reads. Each
+// sub-source is clamped to the minimum of the registry vector_maxzoom and the learned source maxzoom,
+// so the enumeration never requests a tile above what the upstream serves. A non-style source passes
+// through unchanged.
+async fn expand_warm_sources(st: &AppState, sources: Vec<ChartSource>) -> Vec<ChartSource> {
+    let mut out = Vec::new();
+    for source in sources {
+        if !matches!(source.upstream, UpstreamTemplate::Style { .. }) {
+            out.push(source);
+            continue;
+        }
+        if !crate::style::ensure_style_learned(st, &source.id).await {
+            continue;
+        }
+        let learned = { st.style_state.read().await.get(&source.id).cloned() };
+        let Some(learned) = learned else { continue };
+        let registry_max = source.vector_maxzoom.unwrap_or(source.maxzoom);
+        for (name, templates) in &learned.source_tiles {
+            let Some(template) = templates.first() else { continue };
+            let native = learned.source_maxzoom.get(name).copied().unwrap_or(registry_max);
+            out.push(ChartSource {
+                id: format!("style:{}:{}", source.id, name),
+                title: source.title.clone(),
+                upstream: UpstreamTemplate::Xyz { url_template: template.clone() },
+                tile_size: source.tile_size,
+                minzoom: source.minzoom,
+                maxzoom: registry_max.min(native),
+                vector_maxzoom: None,
+                bounds: None,
+                attribution: source.attribution.clone(),
+            });
+        }
+    }
+    out
+}
+
 // Fetch and classify one tile, reusing the guarded egress path. The caller holds the warm permit, so
 // this does not take it; guarded_get still takes an egress permit inside.
 async fn warm_one(st: &AppState, source: &ChartSource, z: u32, x: u32, y: u32, region_id: Option<&str>) -> Fetched {
@@ -225,6 +270,9 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, sources: Vec<C
     if let Some(rid) = region_id.as_deref() {
         crate::fetcher::log_cache_err(st.cache.delete_region(rid));
     }
+    // Expand any style source into synthetic XYZ sub-sources keyed style:{source}:{name} (learning the
+    // style once), so the enumeration and the pin path below run unchanged for the basemap.
+    let sources = expand_warm_sources(&st, sources).await;
     let cancel = { job.lock().await.cancel.clone() };
     let mut set: tokio::task::JoinSet<Fetched> = tokio::task::JoinSet::new();
     let mut batch: Vec<WarmRow> = Vec::with_capacity(WARM_BATCH);
@@ -358,6 +406,7 @@ mod tests {
             tile_size: 256,
             minzoom: 0,
             maxzoom: 4,
+            vector_maxzoom: None,
             bounds: None,
             attribution: String::new(),
         }
@@ -583,5 +632,57 @@ mod tests {
         assert!(cancel_warm(&st, &job).await);
         let snap = wait_done(&st, &job).await;
         assert!(snap["state"] == "cancelled" || snap["state"] == "done");
+    }
+
+    async fn style_stub() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let a = addr;
+        let app = Router::new()
+            .route("/style", get(move || async move {
+                ([(header::CONTENT_TYPE, "application/json")], format!(
+                    r#"{{"version":8,"sources":{{"openmaptiles":{{"type":"vector","url":"http://{a}/tiles.json"}}}},"layers":[]}}"#))
+            }))
+            .route("/tiles.json", get(move || async move {
+                ([(header::CONTENT_TYPE, "application/json")], format!(r#"{{"tiles":["http://{a}/t/{{z}}/{{x}}/{{y}}.pbf"],"maxzoom":14}}"#))
+            }))
+            .route("/t/:z/:x/:y", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![8u8, 8, 8, 8]) }));
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        addr
+    }
+
+    fn style_source(addr: SocketAddr) -> ChartSource {
+        ChartSource {
+            id: "basemap".into(), title: "B".into(),
+            upstream: UpstreamTemplate::Style { style_url: format!("http://{addr}/style"), allowed_hosts: vec!["127.0.0.1".into()] },
+            tile_size: 256, minzoom: 0, maxzoom: 20, vector_maxzoom: Some(14), bounds: None, attribution: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn warm_pins_basemap_vector_tiles_under_the_style_cache_key() {
+        let addr = style_stub().await;
+        let db = NamedTempFile::new().unwrap();
+        let st = state(&db, dev(), style_source(addr)).await;
+        let src = st.sources.read().await["basemap"].clone();
+        let job = start_warm(&st, WarmRequest { sources: vec![src], bbox: [-1.0, -1.0, 1.0, 1.0], minzoom: 0, maxzoom: 2, region_id: Some("r1".into()) }).await.unwrap();
+        let snap = wait_done(&st, &job).await;
+        assert_eq!(snap["state"], "done");
+        assert!(snap["done"].as_u64().unwrap() >= 1, "at least one vector tile warmed");
+        st.cache.evict_to(0).unwrap();
+        assert!(st.cache.get("style:basemap:openmaptiles", 0, 0, 0).unwrap().is_some(), "the basemap vector tile is pinned under the style cache key");
+    }
+
+    #[tokio::test]
+    async fn warm_clamps_basemap_to_the_native_maxzoom() {
+        let addr = style_stub().await;
+        let db = NamedTempFile::new().unwrap();
+        let st = state(&db, dev(), style_source(addr)).await;
+        let src = st.sources.read().await["basemap"].clone();
+        let job = start_warm(&st, WarmRequest { sources: vec![src], bbox: [-0.01, -0.01, 0.01, 0.01], minzoom: 14, maxzoom: 16, region_id: Some("r1".into()) }).await.unwrap();
+        let snap = wait_done(&st, &job).await;
+        assert_eq!(snap["state"], "done");
+        assert!(st.cache.get("style:basemap:openmaptiles", 15, 0, 0).unwrap().is_none(), "no tile above the native maxzoom");
     }
 }
