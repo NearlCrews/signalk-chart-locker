@@ -14,6 +14,8 @@ pub struct ChartSource {
     pub minzoom: u32,
     pub maxzoom: u32,
     #[serde(default)]
+    pub vector_maxzoom: Option<u32>,
+    #[serde(default)]
     pub bounds: Option<[f64; 4]>,
     pub attribution: String,
 }
@@ -54,6 +56,20 @@ mod tests {
             }
             _ => panic!("expected wms"),
         }
+    }
+
+    #[test]
+    fn deserializes_vector_maxzoom_when_present_and_defaults_to_none() {
+        let with: ChartSource = serde_json::from_str(
+            r#"{"id":"basemap","title":"B","tileSize":256,"minzoom":0,"maxzoom":20,"vectorMaxzoom":14,"attribution":"",
+                "upstream":{"mode":"style","styleUrl":"https://t/s","allowedHosts":["t"]}}"#,
+        ).unwrap();
+        assert_eq!(with.vector_maxzoom, Some(14));
+        let without: ChartSource = serde_json::from_str(
+            r#"{"id":"s","title":"S","tileSize":256,"minzoom":0,"maxzoom":18,"attribution":"",
+                "upstream":{"mode":"xyz","urlTemplate":"https://h/{z}/{x}/{y}.png"}}"#,
+        ).unwrap();
+        assert_eq!(without.vector_maxzoom, None);
     }
 
     #[test]

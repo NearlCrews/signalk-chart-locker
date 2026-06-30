@@ -118,7 +118,7 @@ mod tests {
         ChartSource {
             id: "s".into(), title: "S".into(),
             upstream: UpstreamTemplate::Xyz { url_template: "http://h/{z}/{x}/{y}".into() },
-            tile_size: 256, minzoom, maxzoom, bounds, attribution: String::new(),
+            tile_size: 256, minzoom, maxzoom, vector_maxzoom: None, bounds, attribution: String::new(),
         }
     }
 

@@ -290,6 +290,7 @@ mod tests {
             tile_size: 256,
             minzoom: 0,
             maxzoom: 18,
+            vector_maxzoom: None,
             bounds: None,
             attribution: String::new(),
         }
