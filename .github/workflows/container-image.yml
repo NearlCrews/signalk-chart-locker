@@ -18,6 +18,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Assert the tag matches the plugin version
+        # On a tag push the plugin requests v${package.version}, so the tag and the version must agree
+        # or the published image and the tag the plugin pulls diverge. Fail fast on a mismatch.
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          want="v$(node -p "require('./package.json').version")"
+          if [ "$REF_NAME" != "$want" ]; then
+            echo "tag $REF_NAME does not match the plugin version ($want); aborting" >&2
+            exit 1
+          fi
+
       - name: Compute the lowercase image name
         # ghcr requires a lowercase path; github.repository_owner can be mixed case. Pass it through env
         # (never interpolate a context value straight into a run shell).
