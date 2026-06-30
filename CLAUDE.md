@@ -64,7 +64,11 @@ delegated to the installed `signalk-container` plugin.
   tiles and never a pinned tile, a per-source average-size tracker, a concurrent warm-job cap, and a
   lazy tile enumerator. It also runs a scroll-tile age sweep (a configurable TTL reclaims unpinned
   tiles not viewed within the window, at startup and on an hourly timer) and an on-demand clear of all
-  unpinned scroll tiles, both in bounded chunks and both leaving pinned tiles untouched.
+  unpinned scroll tiles, both in bounded chunks and both leaving pinned tiles untouched. A region can
+  include the vector basemap: the warm expands a style source into synthetic XYZ sub-sources keyed
+  `style:{source}:{name}` clamped to the native vector maxzoom, and after a basemap region warm it
+  warms the global glyphs (common scripts) and the sprite once, cache-first, pinned under the reserved
+  `__basemap_assets__` region, so a region renders fully offline including labels and icons.
 - `docs/superpowers/specs/`, `docs/superpowers/plans/`, `docs/superpowers/reviews/`: design
   specs, plans, and review records. The router-engine milestone docs (M1 through M4) are kept as
   historical records; the routing work was removed 2026-06-29.
