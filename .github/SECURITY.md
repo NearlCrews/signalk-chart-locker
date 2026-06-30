@@ -1,0 +1,114 @@
+# Security Policy
+
+## Supported Versions
+
+We actively support the following versions with security updates:
+
+| Version | Supported |
+| ------- | --------- |
+| 0.1.x   | Yes       |
+| < 0.1   | No        |
+
+## Reporting a Vulnerability
+
+We take the security of Chart Locker seriously. If you discover a security
+vulnerability, please follow these guidelines.
+
+### How to Report
+
+**Please do NOT report security vulnerabilities through public GitHub issues.**
+
+Instead, please report them via one of these methods:
+
+1. **GitHub Security Advisory**: Use the [GitHub Security Advisory](https://github.com/NearlCrews/signalk-chart-locker/security/advisories/new) feature (preferred).
+2. **GitHub Issues**: For non-sensitive security concerns, open an [issue](https://github.com/NearlCrews/signalk-chart-locker/issues).
+
+### What to Include
+
+Please include the following information in your report:
+
+- **Description** of the vulnerability
+- **Steps to reproduce** the issue
+- **Potential impact** of the vulnerability
+- **Suggested fix** (if you have one)
+- **Your contact information** for follow-up
+
+### Response Timeline
+
+- **Initial Response**: within 48 hours of report
+- **Status Update**: within 7 days with a preliminary assessment
+- **Fix Timeline**: depends on severity, typically within 30 days
+
+## Security Best Practices
+
+When using this plugin:
+
+1. **Keep Updated**: always use the latest version.
+2. **Review Dependencies**: regularly update dependencies.
+3. **Network Security**: ensure your Signal K server is properly secured.
+4. **Access Control**: limit access to your Signal K admin interface. The
+   regions, geocode, cache, and chart-management API endpoints share one admin
+   gate that fails closed, so an ungatable server leaves them unmounted. Keep
+   server access control enabled.
+5. **Monitor Logs**: watch for unusual activity in the Signal K logs.
+
+## Dependency Security
+
+This project uses:
+
+- `npm audit` for vulnerability scanning of the Node plugin
+- `cargo` advisories for the Rust tilecache container
+- Automated dependency updates via Dependabot for security patches
+
+Run a security audit:
+
+```bash
+npm audit
+```
+
+## Data Handling
+
+Chart Locker runs an egress-isolated Rust container (the tilecache service)
+alongside the Signal K server. The container fetches and caches map tiles from
+the allowlisted raster overlay sources and the vector basemap, glyphs, and
+sprite configured for the boat. These requests carry only tile coordinates and
+standard HTTP cache headers; the plugin sends no personal data, no credentials,
+and no account login of any kind.
+
+Saved-region naming uses a guarded `/api/geocode` proxy to the OpenStreetMap
+Nominatim service. That request carries only the region's bounding coordinates.
+
+The container is tokenless and Signal K agnostic: only the in-process plugin
+talks to it. Local `.pmtiles` chart files are served by the Node plugin
+itself, never mounted into or served by the egress container, so the Signal K
+configuration tree (including `security.json`) is never exposed to the
+internet-facing container. The runtime image carries no GDAL, GEOS, PROJ, or
+SpatiaLite: the tilecache binary links only against libc, libm, libgcc, and the
+loader.
+
+## Signal K Security
+
+This plugin operates within the Signal K server environment. Please also refer
+to the [Signal K documentation](https://signalk.org/documentation/) and Signal
+K server security best practices.
+
+## Marine Safety Notice
+
+This plugin caches and serves chart data for marine navigation systems. While
+we strive for security and reliability:
+
+- **Not for Safety-Critical Use**: this software should not be relied upon as
+  the sole means of navigation.
+- **Professional Equipment**: always maintain certified navigation equipment.
+- **Regular Verification**: cached tiles and local chart files are provided "as
+  is"; verify all navigation data against official charts and notices to
+  mariners.
+- **Test Thoroughly**: test in non-critical conditions before relying on this
+  plugin.
+
+## Disclosure Policy
+
+- We will coordinate disclosure timing with the reporter.
+- Public disclosure will occur after a fix is available.
+- Credit will be given to reporters (if desired).
+- A security advisory will be published on GitHub.

@@ -1,0 +1,51 @@
+name: Feature request
+description: Suggest a new capability or improvement
+title: "[FEATURE] "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. Please share enough detail to evaluate the use case and how it would fit the plugin.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Feature description
+      description: What the feature is and the problem it solves.
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: Who benefits and how they would use this in practice.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed solution
+      description: How you imagine the feature working.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: textarea
+    id: area
+    attributes:
+      label: Chart sources, regions, or PMTiles
+      description: If the request involves a specific chart source (a raster overlay or the vector basemap), saved-region or auto-cache behavior, or PMTiles chart serving, describe it here.
+      placeholder: |
+        Area: Saved regions
+        Chart sources: an additional raster overlay
+        Behavior: pause and resume an in-progress region download
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
