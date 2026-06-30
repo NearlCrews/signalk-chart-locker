@@ -6,6 +6,7 @@
   "types": "dist/index.d.ts",
   "files": [
     "dist",
+    "assets",
     "CHANGELOG.md"
   ],
   "scripts": {
@@ -29,6 +30,7 @@
   "signalk-plugin-enabled-by-default": false,
   "signalk": {
     "displayName": "Chart Locker",
+    "appIcon": "./assets/icons/icon-192.png",
     "requires": [
       "signalk-container"
     ],

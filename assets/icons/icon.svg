@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Signal K plugin icon for signalk-chart-locker.
+
+  Family identity (shared across @NearlCrews Signal K plugins): rounded
+  square with a deep-ocean gradient and three stacked stylized wave lines.
+  Per-project differentiation: a bottom-right circle badge in a
+  project-specific colour with a 2-3 shape glyph. This badge is the only
+  region that varies between sibling plugins.
+
+  This variant's badge: green (#2E7D32) with a folded paper map glyph: an
+  accordion-folded chart with two white fold creases. Reads as "charts /
+  offline maps" at thumbnail size, matching the plugin's chart cache and
+  PMTiles role. Green keeps it visually separable from the sibling badges
+  already in use: red (Crow's Nest lighthouse), yellow (Virtual Weather
+  thundercloud), orange (NMEA 2000 Emitter radiating arcs), and violet
+  (OpenRouter Companion chat bubble).
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Chart Locker plugin icon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0E4D6B"/>
+      <stop offset="1" stop-color="#1A8DAB"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded-square background, deep-ocean gradient -->
+  <rect width="512" height="512" rx="96" ry="96" fill="url(#bg)"/>
+
+  <!-- Family motif: three stacked wave lines centered in the canvas -->
+  <g fill="none" stroke="#FFFFFF" stroke-width="20" stroke-linecap="round" stroke-linejoin="round" opacity="0.94">
+    <path d="M 80,176 q 44,-36 88,0 t 88,0 t 88,0 t 88,0"/>
+    <path d="M 80,256 q 44,-36 88,0 t 88,0 t 88,0 t 88,0"/>
+    <path d="M 80,336 q 44,-36 88,0 t 88,0 t 88,0 t 88,0"/>
+  </g>
+
+  <!-- Project badge: bottom-right circle (green for charts and offline maps) -->
+  <circle cx="388" cy="388" r="84" fill="#2E7D32" stroke="#FFFFFF" stroke-width="8"/>
+
+  <!--
+    Badge glyph: a folded paper map. The outline zigzags along the top and
+    bottom edges so it reads as an accordion-folded chart, filled in the
+    family glyph dark (#1B3A4B), with two white fold creases so the panels
+    stay legible at 32px.
+  -->
+  <path d="M 352 372 L 376 364 L 400 372 L 424 364 L 424 408 L 400 416 L 376 408 L 352 416 Z" fill="#1B3A4B"/>
+  <g stroke="#FFFFFF" stroke-width="4" opacity="0.6">
+    <line x1="376" y1="365" x2="376" y2="409"/>
+    <line x1="400" y1="372" x2="400" y2="416"/>
+  </g>
+</svg>
