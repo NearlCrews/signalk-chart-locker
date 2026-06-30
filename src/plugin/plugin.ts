@@ -278,7 +278,7 @@ export function createPlugin (app: ServerAPI): Plugin {
     // routes remain open so every device can fetch cached tiles without authentication. Additional
     // route groups (PMTiles serve and management, v3) compose by mounting alongside these two.
     registerWithRouter (router) {
-      registerTileRoutes(router as unknown as TileRouter, () => tilecacheAddress)
+      registerTileRoutes(router as unknown as TileRouter, () => tilecacheAddress, undefined, `/plugins/${PLUGIN_ID}`)
       registerRegionsRoutes(router as unknown as RegionsRouter, app, () => tilecacheAddress)
       registerPmtilesServeRoute(router as unknown as ServeRouter, registry)
       if (ensureApiAdminGate(app)) {

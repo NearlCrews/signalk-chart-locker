@@ -101,3 +101,56 @@ test('a browser cancel aborts the upstream fetch', async () => {
   await new Promise((resolve) => setImmediate(resolve))
   assert.equal(aborted, true)
 })
+
+test('the style route rewrites the sprite to an absolute same-origin URL and passes other fields through', async () => {
+  const { routes, router } = collectRoutes()
+  const upstreamStyle = {
+    version: 8,
+    sprite: 'https://tiles.openfreemap.org/sprites/ofm_f384/ofm',
+    glyphs: '/plugins/signalk-chart-locker/style/basemap/glyphs/{fontstack}/{range}.pbf',
+    sources: { openmaptiles: { type: 'vector', maxzoom: 14 } },
+    layers: [{ id: 'bg', type: 'background' }]
+  }
+  const fetchImpl: ProxyFetch = async () => new Response(JSON.stringify(upstreamStyle), { status: 200, headers: { 'content-type': 'application/json' } })
+  registerTileRoutes(router, () => 'c:8080', fetchImpl, '/plugins/signalk-chart-locker')
+  const res = new FakeRes()
+  const chunks: Buffer[] = []
+  res.on('data', (c: Buffer) => chunks.push(c))
+  const done = new Promise((resolve) => res.on('finish', resolve))
+  routes['/style/:source'](fakeReq('/style/basemap', { host: 'boat.local:3000' }), res as never)
+  await done
+  const body = JSON.parse(Buffer.concat(chunks).toString())
+  assert.equal(body.sprite, 'http://boat.local:3000/plugins/signalk-chart-locker/style/basemap/sprite')
+  assert.deepEqual(body.sources, upstreamStyle.sources)
+  assert.equal(body.glyphs, upstreamStyle.glyphs)
+  assert.deepEqual(body.layers, upstreamStyle.layers)
+  assert.equal(res.outHeaders['content-type'], 'application/json')
+})
+
+test('the style route honors x-forwarded-proto and x-forwarded-host (first token) for the sprite URL', async () => {
+  const { routes, router } = collectRoutes()
+  const fetchImpl: ProxyFetch = async () => new Response(JSON.stringify({ sprite: 'https://up/ofm' }), { status: 200, headers: { 'content-type': 'application/json' } })
+  registerTileRoutes(router, () => 'c:8080', fetchImpl)
+  const res = new FakeRes()
+  const chunks: Buffer[] = []
+  res.on('data', (c: Buffer) => chunks.push(c))
+  const done = new Promise((resolve) => res.on('finish', resolve))
+  routes['/style/:source'](fakeReq('/style/basemap', { host: 'internal:3000', 'x-forwarded-proto': 'https, http', 'x-forwarded-host': 'charts.example.com' }), res as never)
+  await done
+  const body = JSON.parse(Buffer.concat(chunks).toString())
+  assert.equal(body.sprite, 'https://charts.example.com/plugins/signalk-chart-locker/style/basemap/sprite')
+})
+
+test('the style route relays a non-2xx upstream status without parsing', async () => {
+  const { routes, router } = collectRoutes()
+  const fetchImpl: ProxyFetch = async () => new Response('bad gateway', { status: 502, headers: { 'content-type': 'text/plain' } })
+  registerTileRoutes(router, () => 'c:8080', fetchImpl)
+  const res = new FakeRes()
+  const chunks: Buffer[] = []
+  res.on('data', (c: Buffer) => chunks.push(c))
+  const done = new Promise((resolve) => res.on('finish', resolve))
+  routes['/style/:source'](fakeReq('/style/basemap', { host: 'boat.local' }), res as never)
+  await done
+  assert.equal(res.statusCode, 502)
+  assert.equal(Buffer.concat(chunks).toString(), 'bad gateway')
+})
