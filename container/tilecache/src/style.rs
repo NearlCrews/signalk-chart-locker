@@ -192,17 +192,29 @@ async fn style_doc(State(state): State<AppState>, Path(source): Path<String>) ->
         style["glyphs"] = Value::String(format!("{public}/style/{source}/glyphs/{{fontstack}}/{{range}}.pbf"));
     }
     for name in learned.source_tiles.keys() {
+        let maxzoom = learned.source_maxzoom.get(name).copied();
         if let Some(obj) = style["sources"][name].as_object_mut() {
             obj.remove("url");
             obj.insert(
                 "tiles".to_string(),
                 Value::Array(vec![Value::String(format!("{public}/style/{source}/tiles/{name}/{{z}}/{{x}}/{{y}}"))]),
             );
+            // Carry the learned maxzoom back into the served source. Replacing the source's TileJSON
+            // url with a tiles array drops the TileJSON maxzoom; without it MapLibre assumes tiles
+            // exist past the native max zoom and requests 404s above it instead of overzooming the
+            // deepest cached tile.
+            if !obj.contains_key("maxzoom") {
+                if let Some(m) = maxzoom {
+                    obj.insert("maxzoom".to_string(), Value::from(m));
+                }
+            }
         }
     }
-    if learned.sprite_base.is_some() {
-        style["sprite"] = Value::String(format!("{public}/style/{source}/sprite"));
-    }
+    // The sprite is intentionally NOT rewritten to the plugin path: MapLibre requires the sprite URL
+    // to be absolute and rejects a path-absolute /plugins/... value ("Invalid sprite URL, must be
+    // absolute"), which aborts the whole style load. The sprite stays the upstream absolute URL (so it
+    // loads online); the /style/:source/sprite route and its cache remain for a later offline-sprite
+    // pass that absolutizes the URL at the webapp edge.
 
     let body = match serde_json::to_vec(&style) {
         Ok(bytes) => bytes,
@@ -521,7 +533,9 @@ mod tests {
         router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr, "127.0.0.1"))).unwrap()).await.unwrap();
         let style_resp = router.clone().oneshot(Request::get("/style/basemap").body(Body::empty()).unwrap()).await.unwrap();
         let style = body_json(style_resp).await;
-        assert_eq!(style["sprite"], "/plugins/p/style/basemap/sprite");
+        // The sprite URL is left absolute (upstream), not rewritten, because MapLibre rejects a
+        // path-absolute sprite. The route still serves and caches the sprite for a later offline pass.
+        assert_eq!(style["sprite"], format!("http://{addr}/sprites/ofm"));
         let sprite = router.clone().oneshot(Request::get("/style/basemap/sprite.json").body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(sprite.status(), StatusCode::OK);
         assert!(st.cache.get(&crate::style::sprite_cache_source("basemap"), 0, 0, 0).unwrap().is_some(), "sprite.json is cached under variant index 0");
