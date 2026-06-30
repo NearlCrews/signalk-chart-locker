@@ -26,6 +26,14 @@ test('buildTilecacheConfig honors a custom cap and image tag', () => {
   assert.equal(c.env?.TILECACHE_CAP_BYTES, '1000')
 })
 
+test('buildTilecacheConfig defaults the image tag to the plugin version, not latest', () => {
+  // A version tag (vX.Y.Z) changes every release, which is what forces signalk-container to recreate
+  // the container; a floating "latest" never would.
+  assert.match(buildTilecacheConfig().tag ?? '', /^v\d+\.\d+\.\d+/)
+  // An explicit override still wins, so a developer can point at latest or a hand-built tag.
+  assert.equal(buildTilecacheConfig({ tag: 'latest' }).tag, 'latest')
+})
+
 test('buildTilecacheConfig sets the scroll TTL env in seconds', () => {
   const c = buildTilecacheConfig({ capBytes: 1024, scrollTtlSecs: 2_592_000 })
   assert.equal(c.env?.TILECACHE_SCROLL_TTL_SECS, '2592000')
