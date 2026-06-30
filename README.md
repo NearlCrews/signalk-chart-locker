@@ -10,13 +10,18 @@
 A Signal K plugin that runs a Rust container alongside the server to host a shared tile cache
 and local PMTiles chart serving.
 
-## What's new in 0.2.0
+> The cached tiles and local chart files are advisory. They are not certified for
+> safety-of-life navigation: always cross-check against official charts and your primary
+> instruments.
 
-The routing engine and offline geodata pipeline are removed. The companion is now a tile cache
-and PMTiles chart provider only. The tilecache container remains; the router container, the
-route-on-water bridge, and the geodata prep tool are gone.
+## What's new in 0.1.0
 
-See the [changelog](CHANGELOG.md#v020) for the full list.
+The first public release. Chart Locker hosts a boat-wide tile cache and local PMTiles chart serving
+in an egress-isolated Rust container managed by signalk-container: shared overlay and basemap
+caching, saved region downloads that work fully offline, around-the-boat auto-cache, scroll-cache
+management, and a local PMTiles chart provider.
+
+See the [changelog](CHANGELOG.md#v010) for the full list.
 
 ## What it does
 
@@ -45,8 +50,8 @@ tiles. A standalone install of Binnacle is unaffected.
   byte estimate is re-validated on the server against the saved-regions budget before the download
   starts, so an over-budget region is refused. The region tiles are pinned and never evicted, and a
   region never stays stuck downloading.
-- **Off-plan position-warm.** An optional throttled fill keeps a small tile radius warm around
-  the vessel when it travels outside the saved region, always LRU-bounded so it never displaces
+- **Auto-cache around the boat.** An optional throttled fill keeps a small tile radius warm around
+  the vessel as it travels outside the saved regions, always LRU-bounded so it never displaces
   the pinned coverage.
 - **Local PMTiles chart provider.** Drop `.pmtiles` archives in the charts folder and the
   companion discovers, validates, and registers them without a plugin restart. Each archive is
