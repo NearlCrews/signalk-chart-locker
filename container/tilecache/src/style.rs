@@ -24,12 +24,40 @@ pub fn style_routes() -> Router<AppState> {
     Router::new()
         .route("/style/:source", get(style_doc))
         .route("/style/:source/glyphs/:fontstack/:range", get(glyphs))
+        .route("/style/:source/sprite.json", get(sprite_json))
+        .route("/style/:source/sprite.png", get(sprite_png))
+        .route("/style/:source/sprite@2x.json", get(sprite_2x_json))
+        .route("/style/:source/sprite@2x.png", get(sprite_2x_png))
         .route("/style/:source/tiles/:name/:z/:x/:y", get(vector_tile))
+}
+
+/// The synthetic cache source for a fontstack's glyph ranges. The fontstack is the canonical DECODED
+/// comma-joined form (the axum path param after decoding), so the warm-write and serve-read keys match.
+pub(crate) fn glyph_cache_source(style_source: &str, fontstack: &str) -> String {
+    format!("style:{style_source}:glyphs:{fontstack}")
+}
+
+/// The synthetic cache source for the sprite variants.
+pub(crate) fn sprite_cache_source(style_source: &str) -> String {
+    format!("style:{style_source}:sprite")
+}
+
+/// Parse the 256-aligned range start from a glyph range param like `0-255.pbf`. Returns None for a
+/// malformed or non-256-aligned range so a crafted range cannot mis-key the cache.
+pub(crate) fn glyph_range_start(range: &str) -> Option<u32> {
+    let start: u32 = range.split('-').next()?.parse().ok()?;
+    if start.is_multiple_of(256) { Some(start) } else { None }
+}
+
+/// Percent-encode a fontstack for an upstream glyph URL segment (the cache key uses the decoded form).
+/// A space becomes %20; the glyph server expects the comma between names left as-is.
+pub(crate) fn encode_fontstack(fontstack: &str) -> String {
+    fontstack.replace(' ', "%20")
 }
 
 /// True when a URL's host is one the style is allowed to reference. Defense in depth on top of the
 /// client's guarded DNS resolver, which already rejects private and loopback targets.
-fn host_allowed(url: &str, allowed_hosts: &[String]) -> bool {
+pub(crate) fn host_allowed(url: &str, allowed_hosts: &[String]) -> bool {
     match reqwest::Url::parse(url) {
         Ok(u) => u.host_str().map(|h| allowed_hosts.iter().any(|a| a.eq_ignore_ascii_case(h))).unwrap_or(false),
         Err(_) => false,
@@ -77,6 +105,20 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Value> {
     }
     let style = fetch_json(state, &style_url).await?;
     let glyphs = style.get("glyphs").and_then(|v| v.as_str()).map(String::from);
+    let sprite_base = style.get("sprite").and_then(|v| v.as_str()).map(String::from);
+    // The distinct fontstacks the style references, in the canonical decoded comma-joined form the
+    // glyph route keys on. A data-driven (non-array) text-font is skipped rather than panicking.
+    let mut fontstacks: Vec<String> = Vec::new();
+    if let Some(layers) = style.get("layers").and_then(|v| v.as_array()) {
+        for layer in layers {
+            if let Some(arr) = layer.get("layout").and_then(|l| l.get("text-font")).and_then(|v| v.as_array()) {
+                let joined: String = arr.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",");
+                if !joined.is_empty() && !fontstacks.contains(&joined) {
+                    fontstacks.push(joined);
+                }
+            }
+        }
+    }
 
     let mut source_tiles: HashMap<String, Vec<String>> = HashMap::new();
     let mut source_maxzoom: HashMap<String, u32> = HashMap::new();
@@ -114,7 +156,7 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Value> {
         }
         source_tiles.insert(name.clone(), tiles);
     }
-    state.style_state.write().await.insert(source.to_string(), StyleState { glyphs, source_tiles, source_maxzoom });
+    state.style_state.write().await.insert(source.to_string(), StyleState { glyphs, source_tiles, source_maxzoom, fontstacks, sprite_base });
     Some(style)
 }
 
@@ -158,6 +200,9 @@ async fn style_doc(State(state): State<AppState>, Path(source): Path<String>) ->
             );
         }
     }
+    if learned.sprite_base.is_some() {
+        style["sprite"] = Value::String(format!("{public}/style/{source}/sprite"));
+    }
 
     let body = match serde_json::to_vec(&style) {
         Ok(bytes) => bytes,
@@ -166,20 +211,84 @@ async fn style_doc(State(state): State<AppState>, Path(source): Path<String>) ->
     ([(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
-/// GET /style/:source/glyphs/:fontstack/:range: reconstruct and proxy a glyph range (not persistently cached in v1).
+/// GET /style/:source/glyphs/:fontstack/:range: serve a glyph range cache-first, keyed by the decoded
+/// fontstack so a warmed glyph (warm-write under the same key) serves offline.
 async fn glyphs(State(state): State<AppState>, Path((source, fontstack, range)): Path<(String, String, String)>) -> Response {
+    let Some(range_start) = glyph_range_start(&range) else { return StatusCode::NOT_FOUND.into_response() };
+    let cache_source = glyph_cache_source(&source, &fontstack);
+
+    // Cache first (also the offline path). A cached negative (zero-byte) row serves as a 404 so
+    // MapLibre treats the range as absent rather than an error.
+    if let Ok(Some(tile)) = state.cache.get(&cache_source, 0, range_start, 0) {
+        if tile.status == 200 {
+            if now_secs() - tile.last_access >= crate::fetcher::TOUCH_THROTTLE_SECS {
+                crate::fetcher::log_cache_err(state.cache.touch(&cache_source, 0, range_start, 0, now_secs()));
+            }
+            return ([(header::CONTENT_TYPE, tile.content_type.clone())], tile.blob.clone().unwrap_or_default()).into_response();
+        }
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
     let template = { state.style_state.read().await.get(&source).and_then(|s| s.glyphs.clone()) };
     let Some(template) = template else { return StatusCode::NOT_FOUND.into_response() };
     let allowed = style_allowed_hosts(&state, &source).await;
-    // The learned template carries literal {fontstack} and {range}.pbf, so the incoming range (which
-    // already ends in .pbf) replaces the whole {range}.pbf token.
-    let upstream = template.replace("{fontstack}", &fontstack).replace("{range}.pbf", &range);
+    let upstream = template.replace("{fontstack}", &encode_fontstack(&fontstack)).replace("{range}.pbf", &range);
     if !host_allowed(&upstream, &allowed) {
         return StatusCode::BAD_GATEWAY.into_response();
     }
-    match fetch_bytes(&state, &upstream).await {
-        Some((content_type, body)) => ([(header::CONTENT_TYPE, content_type)], body).into_response(),
-        None => StatusCode::BAD_GATEWAY.into_response(),
+    match crate::fetcher::fetch_upstream(&state, &upstream, None).await {
+        Ok((200, f)) => {
+            let now = now_secs();
+            let tile = CachedTile {
+                content_type: f.content_type, strong_etag: crate::fetcher::strong_etag(&f.body), upstream_validator: None,
+                status: 200, fetched_at: now, last_access: now, bytes: f.body.len() as i64, blob: Some(f.body),
+            };
+            crate::fetcher::log_cache_err(state.cache.put(&cache_source, 0, range_start, 0, &tile, false, now));
+            crate::fetcher::log_cache_err(state.cache.evict_to(state.live_cap_bytes.load(Ordering::Relaxed)));
+            ([(header::CONTENT_TYPE, tile.content_type.clone())], tile.blob.clone().unwrap_or_default()).into_response()
+        }
+        Ok((404, _)) | Ok((204, _)) => StatusCode::NOT_FOUND.into_response(),
+        _ => StatusCode::BAD_GATEWAY.into_response(),
+    }
+}
+
+// The sprite variants. MapLibre appends the suffix to the sprite base with no slash, so each is an
+// explicit route. The variant index is the synthetic cache x.
+async fn sprite_json(s: State<AppState>, p: Path<String>) -> Response { sprite_variant(s.0, p.0, 0, ".json").await }
+async fn sprite_png(s: State<AppState>, p: Path<String>) -> Response { sprite_variant(s.0, p.0, 1, ".png").await }
+async fn sprite_2x_json(s: State<AppState>, p: Path<String>) -> Response { sprite_variant(s.0, p.0, 2, "@2x.json").await }
+async fn sprite_2x_png(s: State<AppState>, p: Path<String>) -> Response { sprite_variant(s.0, p.0, 3, "@2x.png").await }
+
+/// Serve a sprite variant cache-first under sprite_cache_source at x = variant, reconstructing the
+/// upstream from the learned sprite base plus the suffix.
+async fn sprite_variant(state: AppState, source: String, variant: u32, suffix: &str) -> Response {
+    let cache_source = sprite_cache_source(&source);
+    if let Ok(Some(tile)) = state.cache.get(&cache_source, 0, variant, 0) {
+        if tile.status == 200 {
+            return ([(header::CONTENT_TYPE, tile.content_type.clone())], tile.blob.clone().unwrap_or_default()).into_response();
+        }
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let base = { state.style_state.read().await.get(&source).and_then(|s| s.sprite_base.clone()) };
+    let Some(base) = base else { return StatusCode::NOT_FOUND.into_response() };
+    let allowed = style_allowed_hosts(&state, &source).await;
+    let upstream = format!("{base}{suffix}");
+    if !host_allowed(&upstream, &allowed) {
+        return StatusCode::BAD_GATEWAY.into_response();
+    }
+    match crate::fetcher::fetch_upstream(&state, &upstream, None).await {
+        Ok((200, f)) => {
+            let now = now_secs();
+            let tile = CachedTile {
+                content_type: f.content_type, strong_etag: crate::fetcher::strong_etag(&f.body), upstream_validator: None,
+                status: 200, fetched_at: now, last_access: now, bytes: f.body.len() as i64, blob: Some(f.body),
+            };
+            crate::fetcher::log_cache_err(state.cache.put(&cache_source, 0, variant, 0, &tile, false, now));
+            crate::fetcher::log_cache_err(state.cache.evict_to(state.live_cap_bytes.load(Ordering::Relaxed)));
+            ([(header::CONTENT_TYPE, tile.content_type.clone())], tile.blob.clone().unwrap_or_default()).into_response()
+        }
+        Ok((404, _)) | Ok((204, _)) => StatusCode::NOT_FOUND.into_response(),
+        _ => StatusCode::BAD_GATEWAY.into_response(),
     }
 }
 
@@ -267,7 +376,7 @@ mod tests {
                 "/style",
                 get(move || async move {
                     let body = format!(
-                        r#"{{"version":8,"glyphs":"http://{a}/fonts/{{fontstack}}/{{range}}.pbf","sources":{{"openmaptiles":{{"type":"vector","url":"http://{a}/tiles.json"}}}},"layers":[]}}"#
+                        r#"{{"version":8,"glyphs":"http://{a}/fonts/{{fontstack}}/{{range}}.pbf","sprite":"http://{a}/sprites/ofm","sources":{{"openmaptiles":{{"type":"vector","url":"http://{a}/tiles.json"}}}},"layers":[{{"id":"l","type":"symbol","layout":{{"text-font":["Noto Sans Regular"]}}}}]}}"#
                     );
                     ([(header::CONTENT_TYPE, "application/json")], body)
                 }),
@@ -279,6 +388,7 @@ mod tests {
                 }),
             )
             .route("/fonts/:fontstack/:range", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![7u8, 7, 7]) }))
+            .route("/sprites/:name", get(|| async { ([(header::CONTENT_TYPE, "application/json")], r#"{"ok":1}"#) }))
             .route("/t/:z/:x/:y", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![8u8, 8, 8, 8]) }));
         tokio::spawn(async move { axum::serve(listener, stub).await.unwrap(); });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -346,6 +456,75 @@ mod tests {
         assert_eq!(learned.source_maxzoom.get("openmaptiles"), Some(&14), "the vector source maxzoom is learned from its TileJSON");
         drop(ss);
         assert!(crate::style::ensure_style_learned(&st, "basemap").await, "a second call is idempotent");
+    }
+
+    #[tokio::test]
+    async fn learn_records_fontstacks_and_sprite_base() {
+        let addr = spawn_upstream().await;
+        let db = NamedTempFile::new().unwrap();
+        let st = dev_state(&db);
+        crate::routes::app(st.clone())
+            .oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr, "127.0.0.1"))).unwrap())
+            .await.unwrap();
+        assert!(crate::style::ensure_style_learned(&st, "basemap").await);
+        let ss = st.style_state.read().await;
+        let learned = ss.get("basemap").unwrap();
+        assert!(learned.fontstacks.iter().any(|f| f == "Noto Sans Regular"), "the multi-word fontstack is learned in decoded form");
+        assert_eq!(learned.sprite_base.as_deref(), Some(format!("http://{addr}/sprites/ofm").as_str()), "the sprite base is learned");
+    }
+
+    #[tokio::test]
+    async fn glyph_route_serves_a_cached_multi_word_fontstack_without_refetch() {
+        let addr = spawn_upstream().await;
+        let db = NamedTempFile::new().unwrap();
+        let st = dev_state(&db);
+        let router = crate::routes::app(st.clone());
+        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr, "127.0.0.1"))).unwrap()).await.unwrap();
+        router.clone().oneshot(Request::get("/style/basemap").body(Body::empty()).unwrap()).await.unwrap();
+        // Seed a cached glyph under the synthetic key with a body distinct from the upstream stub (7,7,7),
+        // so serving the seed (not a refetch) is detectable.
+        let key = crate::style::glyph_cache_source("basemap", "Noto Sans Regular");
+        let now = crate::state::now_secs();
+        let tile = crate::cache::CachedTile {
+            content_type: "application/x-protobuf".into(), strong_etag: "g".into(), upstream_validator: None,
+            status: 200, fetched_at: now, last_access: now, bytes: 3, blob: Some(bytes::Bytes::from(vec![9u8, 9, 9])),
+        };
+        st.cache.put(&key, 0, 0, 0, &tile, true, now).unwrap();
+        let resp = router.oneshot(Request::get("/style/basemap/glyphs/Noto%20Sans%20Regular/0-255.pbf").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body.as_ref(), &[9u8, 9, 9], "the cached glyph is served, not refetched");
+    }
+
+    #[tokio::test]
+    async fn glyph_route_serves_a_cached_negative_as_404() {
+        let addr = spawn_upstream().await;
+        let db = NamedTempFile::new().unwrap();
+        let st = dev_state(&db);
+        let router = crate::routes::app(st.clone());
+        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr, "127.0.0.1"))).unwrap()).await.unwrap();
+        router.clone().oneshot(Request::get("/style/basemap").body(Body::empty()).unwrap()).await.unwrap();
+        let key = crate::style::glyph_cache_source("basemap", "Noto Sans Regular");
+        let now = crate::state::now_secs();
+        let neg = crate::cache::CachedTile { content_type: String::new(), strong_etag: String::new(), upstream_validator: None, status: 404, fetched_at: now, last_access: now, bytes: 0, blob: None };
+        st.cache.put(&key, 0, 0, 0, &neg, true, now).unwrap();
+        let resp = router.oneshot(Request::get("/style/basemap/glyphs/Noto%20Sans%20Regular/0-255.pbf").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "a cached negative glyph serves as a 404");
+    }
+
+    #[tokio::test]
+    async fn sprite_route_proxies_caches_and_the_style_rewrites_sprite() {
+        let addr = spawn_upstream().await;
+        let db = NamedTempFile::new().unwrap();
+        let st = dev_state(&db);
+        let router = crate::routes::app(st.clone());
+        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr, "127.0.0.1"))).unwrap()).await.unwrap();
+        let style_resp = router.clone().oneshot(Request::get("/style/basemap").body(Body::empty()).unwrap()).await.unwrap();
+        let style = body_json(style_resp).await;
+        assert_eq!(style["sprite"], "/plugins/p/style/basemap/sprite");
+        let sprite = router.clone().oneshot(Request::get("/style/basemap/sprite.json").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(sprite.status(), StatusCode::OK);
+        assert!(st.cache.get(&crate::style::sprite_cache_source("basemap"), 0, 0, 0).unwrap().is_some(), "sprite.json is cached under variant index 0");
     }
 
     #[tokio::test]

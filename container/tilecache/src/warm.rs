@@ -223,6 +223,115 @@ async fn expand_warm_sources(st: &AppState, sources: Vec<ChartSource>) -> Vec<Ch
     out
 }
 
+// Glyph codepoint ranges to warm: U+0000 through U+2FFF in 256-wide blocks (48 ranges), enough for
+// Latin, Greek, and Cyrillic map labels without paying for the full CJK range.
+const GLYPH_RANGE_END: u32 = 12288;
+const GLYPH_RANGE_STEP: u32 = 256;
+
+// Resets the single-flight flag on every exit path (early return, panic, or normal completion).
+struct AssetsFlag<'a>(&'a std::sync::atomic::AtomicBool);
+impl Drop for AssetsFlag<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
+// Flush a batch of assets pinned under the given region, additive (no delete_region). The assets warm
+// does not touch the region job, so this calls put_many_pinned directly. A capped result is logged.
+async fn flush_pinned(st: &AppState, batch: &mut Vec<WarmRow>, region: &str) {
+    let now = now_secs();
+    let budget = effective_budget(st, Some(region));
+    let cap = st.live_cap_bytes.load(Ordering::Relaxed);
+    // A capped outcome (the assets did not all fit under the budget) is dropped here; the next basemap
+    // warm completes the set cache-first.
+    crate::fetcher::log_cache_err(st.cache.put_many_pinned(batch, budget, cap, Some(region), now));
+    batch.clear();
+}
+
+// Warm one asset (a glyph range or a sprite variant) cache-first: skip it when already fresh-pinned,
+// else fetch it (host-checked, status-returning) and push a WarmRow with the synthetic key. Builds the
+// WarmRow directly rather than through warm_one because the sprite JSON is rejected by the tile
+// content-type gate.
+async fn warm_one_asset(st: &AppState, cache_source: &str, x: u32, url: &str, allowed: &[String], region: &str, batch: &mut Vec<WarmRow>) {
+    let now = now_secs();
+    match st.cache.pin_if_fresh(cache_source, 0, x, 0, now, st.knobs.fresh_secs, st.knobs.negative_ttl_secs, effective_budget(st, Some(region)), Some(region)) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(e) => eprintln!("tilecache: assets pin_if_fresh failed: {e}"),
+    }
+    if !crate::style::host_allowed(url, allowed) {
+        return;
+    }
+    let _permit = match st.warm_semaphore.clone().acquire_owned().await { Ok(p) => p, Err(_) => return };
+    match crate::fetcher::fetch_upstream(st, url, None).await {
+        Ok((200, f)) => {
+            batch.push(WarmRow {
+                source: cache_source.to_string(), z: 0, x, y: 0,
+                tile: CachedTile {
+                    content_type: f.content_type, strong_etag: crate::fetcher::strong_etag(&f.body), upstream_validator: None,
+                    status: 200, fetched_at: now, last_access: now, bytes: f.body.len() as i64, blob: Some(f.body),
+                },
+            });
+        }
+        Ok((404, _)) | Ok((204, _)) => {
+            batch.push(WarmRow {
+                source: cache_source.to_string(), z: 0, x, y: 0,
+                tile: CachedTile { content_type: String::new(), strong_etag: String::new(), upstream_validator: None, status: 404, fetched_at: now, last_access: now, bytes: 0, blob: None },
+            });
+        }
+        _ => {}
+    }
+}
+
+// Warm the global basemap glyphs and the sprite once, cache-first per key, pinned under
+// __basemap_assets__. Single-flight via the AppState flag (reset on every exit by the RAII guard).
+// Each asset is skipped when already fresh-pinned, so this is idempotent and recovers a partial set.
+// It never touches the region job's counters and bounds its fan-out through the warm semaphore.
+async fn warm_basemap_assets(st: &AppState, style_source: &str) {
+    if st.assets_warming.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return; // another basemap warm is already fetching the set
+    }
+    let _flag = AssetsFlag(&st.assets_warming);
+
+    let region = crate::state::BASEMAP_ASSETS_REGION_ID;
+    // Snapshot the learned templates and the allowed hosts, then drop the read guards before fetching.
+    let (glyph_template, fontstacks, sprite_base, allowed) = {
+        let ss = st.style_state.read().await;
+        let Some(s) = ss.get(style_source) else { return };
+        let allowed = match st.sources.read().await.get(style_source).map(|c| c.upstream.clone()) {
+            Some(UpstreamTemplate::Style { allowed_hosts, .. }) => allowed_hosts,
+            _ => return,
+        };
+        (s.glyphs.clone(), s.fontstacks.clone(), s.sprite_base.clone(), allowed)
+    };
+
+    let mut batch: Vec<WarmRow> = Vec::with_capacity(WARM_BATCH);
+    if let Some(template) = glyph_template {
+        for fontstack in &fontstacks {
+            let cache_source = crate::style::glyph_cache_source(style_source, fontstack);
+            let encoded = crate::style::encode_fontstack(fontstack);
+            for range_start in (0..GLYPH_RANGE_END).step_by(GLYPH_RANGE_STEP as usize) {
+                let range = format!("{range_start}-{}.pbf", range_start + GLYPH_RANGE_STEP - 1);
+                let url = template.replace("{fontstack}", &encoded).replace("{range}.pbf", &range);
+                warm_one_asset(st, &cache_source, range_start, &url, &allowed, region, &mut batch).await;
+                if batch.len() >= WARM_BATCH {
+                    flush_pinned(st, &mut batch, region).await;
+                }
+            }
+        }
+    }
+    if let Some(base) = sprite_base {
+        let cache_source = crate::style::sprite_cache_source(style_source);
+        for (idx, suffix) in [(0u32, ".json"), (1, ".png"), (2, "@2x.json"), (3, "@2x.png")] {
+            let url = format!("{base}{suffix}");
+            warm_one_asset(st, &cache_source, idx, &url, &allowed, region, &mut batch).await;
+        }
+    }
+    if !batch.is_empty() {
+        flush_pinned(st, &mut batch, region).await;
+    }
+}
+
 // Fetch and classify one tile, reusing the guarded egress path. The caller holds the warm permit, so
 // this does not take it; guarded_get still takes an egress permit inside.
 async fn warm_one(st: &AppState, source: &ChartSource, z: u32, x: u32, y: u32, region_id: Option<&str>) -> Fetched {
@@ -270,6 +379,11 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, sources: Vec<C
     if let Some(rid) = region_id.as_deref() {
         crate::fetcher::log_cache_err(st.cache.delete_region(rid));
     }
+    // Capture the style source (if any) before expansion replaces it with synthetic XYZ sub-sources,
+    // so the folded assets warm can look up the learned glyph template, fontstacks, and sprite base.
+    let style_source_id: Option<String> = sources.iter()
+        .find(|s| matches!(s.upstream, UpstreamTemplate::Style { .. }))
+        .map(|s| s.id.clone());
     // Expand any style source into synthetic XYZ sub-sources keyed style:{source}:{name} (learning the
     // style once), so the enumeration and the pin path below run unchanged for the basemap.
     let sources = expand_warm_sources(&st, sources).await;
@@ -324,9 +438,19 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, sources: Vec<C
     if !batch.is_empty() {
         flush(&st, &job, &mut batch, region_id.as_deref(), &mut final_state).await;
     }
-    let mut j = job.lock().await;
-    j.state = final_state;
-    j.finished_at = Some(now_secs());
+    {
+        let mut j = job.lock().await;
+        j.state = final_state;
+        j.finished_at = Some(now_secs());
+    }
+    // Fold the one-time global assets warm in after a successful basemap region warm. The job is
+    // already marked Done so the panel shows the region complete; the assets warm runs on this task
+    // with its own counters and pins under __basemap_assets__.
+    if final_state == WarmState::Done {
+        if let Some(style_id) = style_source_id {
+            warm_basemap_assets(&st, &style_id).await;
+        }
+    }
 }
 
 // Apply one fetch result to the batch and the counters. Returns false when a flush reports capped.
@@ -684,5 +808,111 @@ mod tests {
         let snap = wait_done(&st, &job).await;
         assert_eq!(snap["state"], "done");
         assert!(st.cache.get("style:basemap:openmaptiles", 15, 0, 0).unwrap().is_none(), "no tile above the native maxzoom");
+    }
+
+    async fn style_stub_with_assets() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let a = addr;
+        let app = Router::new()
+            .route("/style", get(move || async move {
+                ([(header::CONTENT_TYPE, "application/json")], format!(
+                    r#"{{"version":8,"glyphs":"http://{a}/fonts/{{fontstack}}/{{range}}.pbf","sprite":"http://{a}/sprites/ofm","sources":{{"openmaptiles":{{"type":"vector","url":"http://{a}/tiles.json"}}}},"layers":[{{"id":"l","type":"symbol","layout":{{"text-font":["Noto Sans Regular"]}}}}]}}"#))
+            }))
+            .route("/tiles.json", get(move || async move {
+                ([(header::CONTENT_TYPE, "application/json")], format!(r#"{{"tiles":["http://{a}/t/{{z}}/{{x}}/{{y}}.pbf"],"maxzoom":14}}"#))
+            }))
+            .route("/t/:z/:x/:y", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![8u8, 8, 8, 8]) }))
+            .route("/fonts/:fontstack/:range", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![7u8, 7, 7]) }))
+            .route("/sprites/:name", get(|| async { ([(header::CONTENT_TYPE, "application/json")], r#"{"ok":1}"#) }));
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        addr
+    }
+
+    // The assets warm runs after the region job is marked Done, so wait_done returns before the assets
+    // pin; poll the assets region until it holds bytes.
+    async fn wait_assets(st: &AppState) {
+        for _ in 0..200 {
+            if st.cache.region_bytes(crate::state::BASEMAP_ASSETS_REGION_ID).unwrap() > 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the basemap assets warm did not pin within the timeout");
+    }
+
+    #[tokio::test]
+    async fn a_basemap_warm_pins_the_global_glyphs_and_sprite_once() {
+        let addr = style_stub_with_assets().await;
+        let db = NamedTempFile::new().unwrap();
+        let st = state(&db, dev(), style_source(addr)).await;
+        let src = st.sources.read().await["basemap"].clone();
+        let job = start_warm(&st, WarmRequest { sources: vec![src], bbox: [-0.5, -0.5, 0.5, 0.5], minzoom: 0, maxzoom: 0, region_id: Some("r1".into()) }).await.unwrap();
+        let snap = wait_done(&st, &job).await;
+        assert_eq!(snap["state"], "done");
+        wait_assets(&st).await;
+        let gk = crate::style::glyph_cache_source("basemap", "Noto Sans Regular");
+        assert!(st.cache.get(&gk, 0, 0, 0).unwrap().is_some(), "a glyph range is pinned under the assets region");
+        let sk = crate::style::sprite_cache_source("basemap");
+        assert!(st.cache.get(&sk, 0, 0, 0).unwrap().is_some(), "the sprite json is pinned");
+        // Pinned: a deep eviction keeps them.
+        st.cache.evict_to(0).unwrap();
+        assert!(st.cache.get(&gk, 0, 0, 0).unwrap().is_some(), "the glyph is pinned, not evicted");
+    }
+
+    #[tokio::test]
+    async fn a_second_basemap_warm_adds_no_duplicate_asset_bytes() {
+        let addr = style_stub_with_assets().await;
+        let db = NamedTempFile::new().unwrap();
+        let st = state(&db, dev(), style_source(addr)).await;
+        let src = st.sources.read().await["basemap"].clone();
+        let j1 = start_warm(&st, WarmRequest { sources: vec![src.clone()], bbox: [-0.5, -0.5, 0.5, 0.5], minzoom: 0, maxzoom: 0, region_id: Some("r1".into()) }).await.unwrap();
+        wait_done(&st, &j1).await;
+        wait_assets(&st).await;
+        let after_first = st.cache.region_bytes(crate::state::BASEMAP_ASSETS_REGION_ID).unwrap();
+        let j2 = start_warm(&st, WarmRequest { sources: vec![src], bbox: [-0.5, -0.5, 0.5, 0.5], minzoom: 0, maxzoom: 0, region_id: Some("r1".into()) }).await.unwrap();
+        wait_done(&st, &j2).await;
+        // The second run is cache-first per key: no new fetch, no duplicate pinned bytes.
+        let after_second = st.cache.region_bytes(crate::state::BASEMAP_ASSETS_REGION_ID).unwrap();
+        assert_eq!(after_first, after_second, "the second basemap warm adds no duplicate asset bytes");
+        assert!(after_first > 0);
+    }
+
+    #[tokio::test]
+    async fn a_non_basemap_warm_pins_no_assets() {
+        let addr = stub().await;
+        let db = NamedTempFile::new().unwrap();
+        let st = state(&db, dev(), xyz(addr, "img")).await;
+        let job = start_warm(&st, WarmRequest { sources: vec![st.sources.read().await["s"].clone()], bbox: [-1.0, -1.0, 1.0, 1.0], minzoom: 0, maxzoom: 0, region_id: Some("r1".into()) }).await.unwrap();
+        wait_done(&st, &job).await;
+        assert_eq!(st.cache.region_bytes(crate::state::BASEMAP_ASSETS_REGION_ID).unwrap(), 0, "a raster warm pins no basemap assets");
+    }
+
+    #[tokio::test]
+    async fn assets_warm_recovers_a_partial_set() {
+        let addr = style_stub_with_assets().await;
+        let db = NamedTempFile::new().unwrap();
+        let st = state(&db, dev(), style_source(addr)).await;
+        // Pre-pin one glyph range under the assets region (simulating a prior partial run); the warm
+        // must skip it (cache-first) and fill the rest.
+        let gk = crate::style::glyph_cache_source("basemap", "Noto Sans Regular");
+        let now = crate::state::now_secs();
+        let seeded = CachedTile { content_type: "application/x-protobuf".into(), strong_etag: "s".into(), upstream_validator: None, status: 200, fetched_at: now, last_access: now, bytes: 3, blob: Some(vec![1u8, 2, 3].into()) };
+        st.cache.put(&gk, 0, 0, 0, &seeded, false, now).unwrap();
+        st.cache.pin_for_region(&gk, 0, 0, 0, 2_000_000_000, Some(crate::state::BASEMAP_ASSETS_REGION_ID)).unwrap();
+        let src = st.sources.read().await["basemap"].clone();
+        let job = start_warm(&st, WarmRequest { sources: vec![src], bbox: [-0.5, -0.5, 0.5, 0.5], minzoom: 0, maxzoom: 0, region_id: Some("r1".into()) }).await.unwrap();
+        wait_done(&st, &job).await;
+        // The seed already makes region_bytes non-zero, so poll the LATER range, not wait_assets, to
+        // know the warm filled the rest.
+        let mut filled = false;
+        for _ in 0..200 {
+            if st.cache.get(&gk, 0, 256, 0).unwrap().is_some() { filled = true; break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(filled, "a later glyph range was filled");
+        // The seeded range keeps its seeded bytes (not refetched).
+        assert_eq!(st.cache.get(&gk, 0, 0, 0).unwrap().unwrap().blob, Some(vec![1u8, 2, 3].into()), "the seeded glyph was not refetched");
     }
 }
