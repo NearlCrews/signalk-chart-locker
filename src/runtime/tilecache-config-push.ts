@@ -1,6 +1,6 @@
 /** Builds the tilecache POST /config payload from the shared source registry and pushes it to the container. */
 
-import { CHART_SOURCES, type ChartSource } from 'signalk-binnacle-chart-sources'
+import { CHART_SOURCES, type ChartSource } from 'signalk-chart-sources'
 import type { FetchResponse } from '../shared/types.js'
 
 /** The Signal K server route base the browser reaches the proxy through (for the container style rewrite). */

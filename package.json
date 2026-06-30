@@ -62,6 +62,6 @@
   },
   "dependencies": {
     "pmtiles": "^4.4.1",
-    "signalk-binnacle-chart-sources": "file:../signalk-binnacle-chart-sources"
+    "signalk-chart-sources": "file:../signalk-chart-sources"
   }
 }

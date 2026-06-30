@@ -4,7 +4,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { ServerAPI } from '@signalk/server-api'
-import { estimateBytes } from 'signalk-binnacle-chart-sources'
+import { estimateBytes } from 'signalk-chart-sources'
 import { ensureApiAdminGate } from '../shared/admin-gate.js'
 import {
   loadRegionsStore, saveRegionsStore, type PositionWarmSettings,

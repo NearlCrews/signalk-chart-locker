@@ -1,5 +1,5 @@
 //! The Rust mirror of the shared `ChartSource` and `UpstreamTemplate`, deserialized from the plugin
-//! `POST /config` payload (camelCase JSON from the `signalk-binnacle-chart-sources` package). The
+//! `POST /config` payload (camelCase JSON from the `signalk-chart-sources` package). The
 //! container holds only this; it never reads Signal K.
 
 use serde::Deserialize;
