@@ -48,8 +48,8 @@ test('stop with no prior start and a manager present is a clean no-op', async ()
 test('schema() cap field is integer with fixed maximum 1024, minimum 1, and default >= 1', () => {
   const plugin = createPlugin(fakeApp() as never)
   const schema = typeof plugin.schema === 'function' ? plugin.schema() : plugin.schema
-  const props = (schema as { properties: Record<string, unknown> }).properties
-  const cap = props.tilecacheCacheCapGiB as {
+  const props = (schema as { properties: Record<string, { properties: Record<string, unknown> }> }).properties
+  const cap = props.tileCache.properties.cacheCapGiB as {
     type: string
     maximum: number
     minimum: number
@@ -65,9 +65,9 @@ test('schema() cap field is integer with fixed maximum 1024, minimum 1, and defa
 
 test('plugin exposes uiSchema with a range widget on the cap field', () => {
   const plugin = createPlugin(fakeApp() as never)
-  const ui = (plugin as unknown as { uiSchema: Record<string, { 'ui:widget': string }> }).uiSchema
+  const ui = (plugin as unknown as { uiSchema: Record<string, Record<string, { 'ui:widget': string }>> }).uiSchema
   assert.ok(ui != null, 'uiSchema must be present')
-  assert.equal(ui.tilecacheCacheCapGiB['ui:widget'], 'range')
+  assert.equal(ui.tileCache.cacheCapGiB['ui:widget'], 'range')
 })
 
 test('stop calls the navigation.position unsubscribe returned by streambundle', async () => {

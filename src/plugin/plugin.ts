@@ -22,11 +22,19 @@ import { loadRegionsStore, listRegions, updateRegion, POSITION_WARM_REGION_ID, p
 import { warmRegion } from '../runtime/tilecache-client.js'
 
 interface CompanionConfig {
-  tilecacheImageTag?: string
-  tilecacheCacheCapGiB?: number
-  tilecacheRegionsBudgetGiB?: number
-  tilecacheCacheVolumeSource?: string
-  chartsPath?: string
+  // Sectioned to match how the admin form groups the fields: nested objects render as titled
+  // sections in the Signal K admin UI (rjsf), and the saved config mirrors that shape.
+  tileCache?: {
+    cacheCapGiB?: number
+    regionsBudgetGiB?: number
+  }
+  charts?: {
+    path?: string
+  }
+  advanced?: {
+    imageTag?: string
+    cacheVolumeSource?: string
+  }
 }
 
 export function createPlugin (app: ServerAPI): Plugin {
@@ -66,7 +74,7 @@ export function createPlugin (app: ServerAPI): Plugin {
   let rescanInProgress = false
 
   function chartsDirFor (config: CompanionConfig): string {
-    const override = config.chartsPath?.trim()
+    const override = config.charts?.path?.trim()
     return override ? resolve(configPath, override) : join(configPath, 'charts', 'pmtiles')
   }
 
@@ -101,15 +109,15 @@ export function createPlugin (app: ServerAPI): Plugin {
     // The tilecache is non-fatal: a failure here disables tile caching but leaves the PMTiles chart
     // provider and the plugin serve routes fully working.
     try {
-      const capBytes = (config.tilecacheCacheCapGiB ?? DEFAULT_CACHE_CAP_GIB) * 1024 ** 3
+      const capBytes = (config.tileCache?.cacheCapGiB ?? DEFAULT_CACHE_CAP_GIB) * 1024 ** 3
       // loadRegionsStore always returns cacheScrollTtlDays (default 30 from the store loader), so no
       // fallback is needed here; clamp and convert days to seconds at this edge.
       const scrollTtlSecs = Math.max(0, Math.round(loadRegionsStore(app.getDataDirPath()).cacheScrollTtlDays * 86_400))
       const tilecacheConfig = buildTilecacheConfig({
-        tag: config?.tilecacheImageTag?.trim() || undefined,
+        tag: config.advanced?.imageTag?.trim() || undefined,
         capBytes,
         scrollTtlSecs,
-        ...(config?.tilecacheCacheVolumeSource?.trim() ? { externalCacheVolumeSource: config.tilecacheCacheVolumeSource.trim() } : {})
+        ...(config.advanced?.cacheVolumeSource?.trim() ? { externalCacheVolumeSource: config.advanced.cacheVolumeSource.trim() } : {})
       })
       await manager.ensureRunning(TILECACHE_CONTAINER_NAME, tilecacheConfig, { pluginId: PLUGIN_ID })
       tilecacheLaunched = true
@@ -123,8 +131,8 @@ export function createPlugin (app: ServerAPI): Plugin {
         // when left at 0 (the default). P, the position-warm slice of R, is derived. Pushed so the
         // container's hard-reserved two-budget accounting is non-zero; without it every region warm
         // immediately caps.
-        const rawR = (config.tilecacheRegionsBudgetGiB ?? 0) > 0
-          ? config.tilecacheRegionsBudgetGiB! * 1024 ** 3
+        const rawR = (config.tileCache?.regionsBudgetGiB ?? 0) > 0
+          ? config.tileCache!.regionsBudgetGiB! * 1024 ** 3
           : Math.floor(capBytes * 0.5)
         // Clamp R to the cap: a value above the cap makes cap - R negative, so evict_to would drop the
         // whole scroll cache and the pinned bytes could exceed the cap.
@@ -212,48 +220,88 @@ export function createPlugin (app: ServerAPI): Plugin {
       }
       return {
         type: 'object',
+        // The Signal K admin UI (rjsf) renders this top-level description as the form preamble, so it
+        // is the intro. Nested object properties below render as titled sections.
+        description: 'Chart Locker runs a tile cache and proxy container alongside Signal K and serves your local PMTiles charts. Set the cache size and the saved-regions budget below. Most installs need no other changes.',
         properties: {
-          tilecacheImageTag: {
-            type: 'string',
-            title: 'Tile cache container image tag',
-            description: 'The image tag to run for the tile cache and proxy container.',
-            default: DEFAULT_TILECACHE_TAG
+          tileCache: {
+            type: 'object',
+            title: 'Tile cache',
+            description: 'The on-disk cache for map tiles, plus the budget reserved for saved regions you keep for offline use.',
+            properties: {
+              cacheCapGiB: {
+                type: 'integer',
+                multipleOf: 1,
+                minimum: 1,
+                maximum: 1024,
+                title: 'Cache size cap (GiB)',
+                description: 'The most disk space the tile cache may use. When it reaches this size it evicts the least recently used unpinned tiles to stay under the cap.',
+                default: capDefaultGiB
+              },
+              regionsBudgetGiB: {
+                type: 'integer',
+                multipleOf: 1,
+                minimum: 0,
+                title: 'Saved-regions reserved budget (GiB)',
+                description: 'A ceiling on how much of the cache saved regions may pin. Leave 0 to reserve half the cache cap.',
+                default: 0
+              }
+            }
           },
-          tilecacheCacheCapGiB: {
-            type: 'integer',
-            multipleOf: 1,
-            minimum: 1,
-            maximum: 1024,
-            title: 'Tile cache size cap (GiB)',
-            description: 'The most disk space the on-disk tile cache may use. When the cache reaches this size it evicts the least recently used unpinned tiles to stay under the cap. The default is about 80 percent of the free space detected on the Signal K data directory when this form loaded, which leaves roughly 20 percent headroom. Do not set this to all of your free space: the cache grows to fill the cap, and a full disk can stop the server from writing. If you point the cache at an external drive in the field below, this value reflects the data directory filesystem, not the drive, so set the cap manually to suit the drive.',
-            default: capDefaultGiB
+          charts: {
+            type: 'object',
+            title: 'Charts',
+            description: 'Local PMTiles charts served by the plugin.',
+            properties: {
+              path: {
+                type: 'string',
+                title: 'PMTiles charts directory',
+                description: 'Directory holding .pmtiles charts, relative to the Signal K config path. Leave blank for the default charts/pmtiles.',
+                default: ''
+              }
+            }
           },
-          tilecacheRegionsBudgetGiB: {
-            type: 'integer',
-            multipleOf: 1,
-            minimum: 0,
-            title: 'Saved-regions reserved budget (GiB)',
-            description: 'A ceiling on how much disk space saved regions may pin. Leave 0 to reserve half the cache cap. This is not space taken from the scroll cache until a region is actually saved. A value above the cache cap is clamped to the cap.',
-            default: 0
-          },
-          tilecacheCacheVolumeSource: {
-            type: 'string',
-            title: 'External tile cache drive (optional)',
-            description: 'Host path of a USB SSD or NVMe drive to hold the tile cache. Leave blank to keep the cache on the Signal K data directory.',
-            default: ''
-          },
-          chartsPath: {
-            type: 'string',
-            title: 'PMTiles charts directory',
-            description: 'Directory holding .pmtiles charts, relative to the Signal K config path. Leave blank for the default charts/pmtiles.',
-            default: ''
+          advanced: {
+            type: 'object',
+            title: 'Advanced',
+            description: 'Settings most installs never change.',
+            properties: {
+              imageTag: {
+                type: 'string',
+                title: 'Tile cache container image tag',
+                description: 'The image tag to run for the tile cache and proxy container. Pinned to the plugin version, so change it only to test a specific build.',
+                default: DEFAULT_TILECACHE_TAG
+              },
+              cacheVolumeSource: {
+                type: 'string',
+                title: 'External tile cache drive',
+                description: 'Host path of a USB SSD or NVMe drive to hold the tile cache. Leave blank to keep the cache on the Signal K data directory.',
+                default: ''
+              }
+            }
           }
         }
       }
     },
     uiSchema: {
-      tilecacheCacheCapGiB: { 'ui:widget': 'range' },
-      tilecacheRegionsBudgetGiB: { 'ui:widget': 'updown' }
+      'ui:order': ['tileCache', 'charts', 'advanced'],
+      tileCache: {
+        'ui:order': ['cacheCapGiB', 'regionsBudgetGiB'],
+        cacheCapGiB: {
+          'ui:widget': 'range',
+          'ui:help': 'Defaults to about 80 percent of the free space detected on the Signal K data directory when this form loaded, leaving roughly 20 percent headroom. Do not set this to all of your free space: the cache grows to fill the cap, and a full disk can stop the server from writing. If you move the cache to an external drive under Advanced, this value reflects the data directory filesystem, not the drive, so set the cap to suit the drive.'
+        },
+        regionsBudgetGiB: {
+          'ui:widget': 'updown',
+          'ui:help': 'This is not space taken from the scroll cache until a region is actually saved. A value above the cache cap is clamped to the cap.'
+        }
+      },
+      charts: {
+        'ui:order': ['path']
+      },
+      advanced: {
+        'ui:order': ['imageTag', 'cacheVolumeSource']
+      }
     },
     // Signal K calls start synchronously and does not await it, so the async work runs detached with
     // an explicit catch: a doStart rejection surfaces as a plugin error instead of an unhandled
