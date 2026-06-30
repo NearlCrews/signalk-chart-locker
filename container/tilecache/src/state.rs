@@ -8,7 +8,7 @@ use bytes::Bytes;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicI64, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock, Semaphore};
@@ -21,6 +21,11 @@ pub(crate) const EGRESS_CONCURRENCY: usize = 8;
 /// budget R (real regions gate against R - P), so position-warm neither escapes nor starves the
 /// regions budget. It must match the plugin's POSITION_WARM_REGION_ID verbatim.
 pub const POSITION_WARM_REGION_ID: &str = "__position_warm__";
+
+/// The reserved pseudo-region id under which the global basemap assets (font glyphs and the sprite)
+/// are pinned. Budgeted as a normal saved region (it gates against R - P, not the position-warm
+/// reserve), and counted once toward the regions budget R through the existing EXISTS dedup.
+pub const BASEMAP_ASSETS_REGION_ID: &str = "__basemap_assets__";
 
 /// A DNS resolver that drops forbidden (private, loopback, link-local, multicast, unspecified) target
 /// IPs when reqwest resolves a hostname. It closes the DNS-rebinding gap a pre-connect check leaves,
@@ -81,6 +86,8 @@ pub struct StyleState {
     pub glyphs: Option<String>,
     pub source_tiles: HashMap<String, Vec<String>>,
     pub source_maxzoom: HashMap<String, u32>,
+    pub fontstacks: Vec<String>,
+    pub sprite_base: Option<String>,
 }
 
 #[derive(Clone)]
@@ -114,6 +121,9 @@ pub struct AppState {
     /// The live scroll-tile TTL in seconds, seeded from `knobs.scroll_ttl_secs` and updated by the
     /// dedicated POST /cache/scroll-ttl route. Zero disables the age sweep.
     pub live_scroll_ttl_secs: Arc<AtomicI64>,
+    /// Single-flight guard for the one-time global basemap assets warm, so two concurrent basemap
+    /// downloads do not both fetch the full glyph and sprite set.
+    pub assets_warming: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -144,6 +154,7 @@ impl AppState {
             live_regions_budget: Arc::new(AtomicI64::new(0)),
             live_position_warm_budget: Arc::new(AtomicI64::new(0)),
             live_scroll_ttl_secs: Arc::new(AtomicI64::new(scroll_ttl_secs)),
+            assets_warming: Arc::new(AtomicBool::new(false)),
         }
     }
 
