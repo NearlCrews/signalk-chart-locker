@@ -81,3 +81,9 @@ delegated to the installed `signalk-container` plugin.
   `cargo build --release --bin tilecache`.
 - No `prepare` or `prepack` lifecycle script in `package.json` (it corrupts the App Store
   install-simulation CI step).
+- The container image tag is pinned to the plugin version (`DEFAULT_TILECACHE_TAG = v${version}`),
+  because `signalk-container` recreates a container only when a config field (here the image tag
+  string) changes, never on rebuilt-but-same-tag image content. So **any change to `container/`
+  requires a plugin version bump**, or existing installs keep the stale image, and the release git tag
+  must be exactly `v` + the `package.json` version so the published image matches the tag the plugin
+  pulls. See `docs/superpowers/2026-06-30-publish-runbook.md`.

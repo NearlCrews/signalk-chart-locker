@@ -51,25 +51,58 @@ Commit the dependency and lockfile change in each repo.
 
 ## 3. Publish the container image
 
-The plugin pulls `ghcr.io/<owner>/signalk-chart-locker-tilecache:latest`. Pushing a `v*` tag to
-`signalk-chart-locker` runs `.github/workflows/container-image.yml`, which builds linux/amd64 and
-linux/arm64 and pushes that name. To publish the image without cutting a plugin release yet, dispatch the
-workflow by hand instead:
+The plugin requests `ghcr.io/<owner>/signalk-chart-locker-tilecache:v${version}`, pinned to the plugin
+version, so each release changes the requested tag and forces signalk-container to recreate the
+container with the new binary. That makes the image-before-plugin ordering mandatory.
 
-```sh
-gh workflow run container-image.yml --repo NearlCrews/signalk-chart-locker
-```
+Rules that follow from the pinned tag:
 
-After it succeeds, make the ghcr package public once (ghcr packages are private by default) so a fresh
-install can pull it without credentials: GitHub package settings for
-`signalk-chart-locker-tilecache`, change visibility to public.
+- The image is born from the `v*` tag push, not from a `workflow_dispatch`. On a manual dispatch
+  `github.ref_name` is the branch, so it would push `:latest` and `:main`, never `:v${version}`. Push
+  the tag to get the versioned image.
+- The git tag must be exactly `v` + the `package.json` version (for example version `0.3.0` and tag
+  `v0.3.0`). The workflow asserts this and fails on a mismatch, but get it right so the build is not
+  wasted.
+- Only Docker-tag-safe versions work: a prerelease suffix like `-rc.1` is fine, a build-metadata
+  suffix like `+build.5` is not.
+- Any container code change requires a plugin version bump. The tag string is the only recreate
+  trigger, so a container fix shipped without a version bump never reaches existing installs.
+- A failed pull of a missing or mis-tagged image leaves no running container (the recreate removes the
+  old one first), so the image must be live on ghcr before the plugin reaches installs.
+
+Sequence:
+
+1. Push the version tag, which runs `.github/workflows/container-image.yml` and builds and pushes
+   `:v${version}` (and `:latest`) for linux/amd64 and linux/arm64:
+
+   ```sh
+   git tag "v$(node -p "require('./package.json').version")"
+   git push origin "v$(node -p "require('./package.json').version")"
+   ```
+
+2. Wait for the workflow to finish, then verify the image is pullable:
+
+   ```sh
+   podman pull ghcr.io/<owner>/signalk-chart-locker-tilecache:v${version}
+   ```
+
+3. On the first publish only, make the ghcr package public (ghcr packages are private by default), so a
+   fresh install can pull without credentials: GitHub package settings for
+   `signalk-chart-locker-tilecache`, change visibility to public. New tags under an already-public
+   package stay public.
+
+A developer running an unpublished local version sets the schema field `tilecacheImageTag` back to
+`latest` (or a hand-built tag) so the plugin does not try to pull a `:v${version}` that was never
+published.
 
 ## 4. Publish the plugin
 
-Follow the standing SignalK plugin pre-push release checklist for `signalk-chart-locker`: bring deps
-current, reach plugin compliance, bring docs current (version bump, dated CHANGELOG entry, README "What's
-New"), prove the pipeline is green, confirm the npm publish credential, then tag and release. Tagging
-`v*` also re-runs the image workflow, which is harmless (it republishes the same image).
+Only after the image for this version is live and pullable on ghcr (step 3 above), follow the standing
+SignalK plugin pre-push release checklist for `signalk-chart-locker`: bring deps current, reach plugin
+compliance, bring docs current (version bump, dated CHANGELOG entry, README "What's New"), prove the
+pipeline is green, confirm the npm publish credential, then publish. Do not let the npm publish race
+ahead of the image: a plugin on npm whose `:v${version}` image is not yet on ghcr fails to start on
+fresh installs.
 
 ## Reverse-proxy note
 
