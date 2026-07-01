@@ -36,6 +36,11 @@
   "signalk": {
     "displayName": "Chart Locker",
     "appIcon": "./assets/icons/icon-192.png",
+    "screenshots": [
+      "./assets/screenshots/config-panel.png",
+      "./assets/screenshots/config-panel-dark.png",
+      "./assets/screenshots/config-panel-night.png"
+    ],
     "requires": [
       "signalk-container"
     ],
