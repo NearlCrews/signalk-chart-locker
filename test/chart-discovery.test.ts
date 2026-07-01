@@ -45,7 +45,10 @@ test('rescanCharts drops a record whose file has been removed', async () => {
   }
 })
 
-test('rescanCharts rejects a symlink that escapes the charts directory', async () => {
+// Skipped on Windows: fs.symlink needs elevated privilege there (and on Windows CI), so the setup
+// throws EPERM before the assertion runs. The realpath containment this guards is platform-independent
+// and is exercised on Linux and macOS.
+test('rescanCharts rejects a symlink that escapes the charts directory', { skip: process.platform === 'win32' }, async () => {
   const outside = await mkdtemp(join(tmpdir(), 'outside-'))
   const target = join(outside, 'secret.pmtiles')
   await writeFile(target, buildPmtilesFixture())
