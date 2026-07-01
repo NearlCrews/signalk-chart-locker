@@ -16,7 +16,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Assert the tag matches the plugin version
         # On a tag push the plugin requests v${package.version}, so the tag and the version must agree
@@ -41,20 +41,20 @@ jobs:
       - name: Set up QEMU
         # The Dockerfile compiles Rust inside the target stage, so the linux/arm64 build needs
         # emulation on the amd64 runner or the arm64 RUN dies with exec format error.
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to ghcr
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           # The Dockerfile COPYs Cargo.toml, .cargo, and tilecache relative to the container dir, so the
           # context is container and the file is named explicitly (the default container/Dockerfile does
