@@ -32,7 +32,7 @@ test('cache-info reports free GiB and a recommended cap from injected statfs', (
   const { res, out } = fakeRes()
   routes.get('GET /api/cache-info')!({ params: {} }, res)
   assert.equal(out.code, 200)
-  assert.deepEqual(out.body, { freeGiB: 120, recommendedCapGiB: 95 })
+  assert.deepEqual(out.body, { freeGiB: 120, recommendedCapGiB: 32 })
 })
 
 test('cache-info falls back to nulls and the static default when statfs throws', () => {
@@ -41,7 +41,7 @@ test('cache-info falls back to nulls and the static default when statfs throws',
   const { res, out } = fakeRes()
   routes.get('GET /api/cache-info')!({ params: {} }, res)
   assert.equal(out.code, 200)
-  assert.deepEqual(out.body, { freeGiB: null, recommendedCapGiB: 10 })
+  assert.deepEqual(out.body, { freeGiB: null, recommendedCapGiB: 8 })
 })
 
 test('cache-info is not mounted without a security strategy (fail closed)', () => {

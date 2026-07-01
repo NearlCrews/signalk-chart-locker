@@ -289,7 +289,7 @@ export function createPlugin (app: ServerAPI): Plugin {
         'ui:order': ['cacheCapGiB', 'regionsBudgetGiB'],
         cacheCapGiB: {
           'ui:widget': 'range',
-          'ui:help': 'Defaults to about 80 percent of the free space detected on the Signal K data directory when this form loaded, floored to the nearest 5 GiB to leave headroom. The Chart Locker settings panel moves this in 5 GiB steps. Do not set this to all of your free space: the cache grows to fill the cap, and a full disk can stop the server from writing. If you move the cache to an external drive under Advanced, this value reflects the data directory filesystem, not the drive, so set the cap to suit the drive.'
+          'ui:help': 'Defaults to about 80 percent of the free space detected on the Signal K data directory when this form loaded, floored to the nearest 4 GiB to leave headroom, and capped at 32 GiB. The Chart Locker settings panel moves this in 4 GiB steps. Do not set this to all of your free space: the cache grows to fill the cap, and a full disk can stop the server from writing. If you move the cache to an external drive under Advanced, this value reflects the data directory filesystem, not the drive, so set the cap to suit the drive.'
         },
         regionsBudgetGiB: {
           'ui:widget': 'updown',

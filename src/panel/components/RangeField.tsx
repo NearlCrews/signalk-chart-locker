@@ -1,7 +1,7 @@
 /**
  * A controlled whole-number field rendered as a slider paired with a compact
  * numeric readout and a unit suffix. Used by the cache size cap, whose bounds
- * (5 to 1024 GiB) suit a slider while the number box keeps an exact value one
+ * (4 to 32 GiB) suit a slider while the number box keeps an exact value one
  * keystroke away.
  *
  * The slider and the number box drive the same committed value. The slider

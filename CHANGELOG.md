@@ -38,7 +38,7 @@ All tile-cache compute lives in the container.
   the navigator to choose which charts to cache rather than starting a silent download.
 - **Cache size cap and scroll-cache management.** The plugin settings size the on-disk cache cap to
   about 80 percent of the free space on the Signal K data directory, presented as a slider that
-  moves in 5 GiB steps and warns when the cap exceeds the detected free space, with a second GiB
+  moves in 4 GiB steps up to 32 GiB and warns when the cap exceeds the detected free space, with a second GiB
   control for the saved-regions budget. A storage view shows the cache total
   against the cap and a per-source breakdown, sets an age limit in days for the on-demand scroll
   cache, and clears the scroll cache on demand. The age sweep and the clear run in bounded chunks

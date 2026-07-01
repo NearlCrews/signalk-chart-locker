@@ -5,25 +5,25 @@ import { commitNumberDraft } from '../src/panel/hooks/use-number-draft.js'
 
 test('normalizeConfig yields the schema defaults for a never-configured plugin', () => {
   const config = normalizeConfig(null)
-  assert.equal(config.tileCache.cacheCapGiB, 10)
+  assert.equal(config.tileCache.cacheCapGiB, 8)
   assert.equal(config.tileCache.regionsBudgetGiB, 0)
   assert.equal(config.charts.path, '')
   assert.equal(config.advanced.imageTag, '')
   assert.equal(config.advanced.cacheVolumeSource, '')
 })
 
-test('normalizeConfig clamps a cap below the minimum up to 5', () => {
-  assert.equal(normalizeConfig({ tileCache: { cacheCapGiB: 2 } }).tileCache.cacheCapGiB, 5)
+test('normalizeConfig clamps a cap below the minimum up to 4', () => {
+  assert.equal(normalizeConfig({ tileCache: { cacheCapGiB: 2 } }).tileCache.cacheCapGiB, 4)
 })
 
-test('normalizeConfig snaps an off-grid cap to the nearest 5 GiB', () => {
-  assert.equal(normalizeConfig({ tileCache: { cacheCapGiB: 8 } }).tileCache.cacheCapGiB, 10)
-  assert.equal(normalizeConfig({ tileCache: { cacheCapGiB: 97 } }).tileCache.cacheCapGiB, 95)
+test('normalizeConfig snaps an off-grid cap to the nearest 4 GiB', () => {
+  assert.equal(normalizeConfig({ tileCache: { cacheCapGiB: 6 } }).tileCache.cacheCapGiB, 8)
+  assert.equal(normalizeConfig({ tileCache: { cacheCapGiB: 14 } }).tileCache.cacheCapGiB, 16)
 })
 
 test('normalizeConfig keeps the snapped cap within the maximum', () => {
-  assert.equal(normalizeConfig({ tileCache: { cacheCapGiB: 1024 } }).tileCache.cacheCapGiB, 1024)
-  assert.equal(normalizeConfig({ tileCache: { cacheCapGiB: 99999 } }).tileCache.cacheCapGiB, 1024)
+  assert.equal(normalizeConfig({ tileCache: { cacheCapGiB: 32 } }).tileCache.cacheCapGiB, 32)
+  assert.equal(normalizeConfig({ tileCache: { cacheCapGiB: 99999 } }).tileCache.cacheCapGiB, 32)
 })
 
 test('normalizeConfig trims string fields and clamps a negative regions budget to 0', () => {
@@ -39,9 +39,9 @@ test('normalizeConfig trims string fields and clamps a negative regions budget t
 })
 
 test('commitNumberDraft snaps a typed cap to the step and stays within the bounds', () => {
-  const opts = { min: 5, max: 1024, integer: true, step: 5 }
-  assert.equal(commitNumberDraft('7', opts), 5)
-  assert.equal(commitNumberDraft('13', opts), 15)
-  assert.equal(commitNumberDraft('1024', opts), 1024) // snap to 1025 then clamp to 1024
-  assert.equal(commitNumberDraft('', opts), 5) // empty falls back to min
+  const opts = { min: 4, max: 32, integer: true, step: 4 }
+  assert.equal(commitNumberDraft('6', opts), 8)
+  assert.equal(commitNumberDraft('13', opts), 12)
+  assert.equal(commitNumberDraft('99', opts), 32) // snap then clamp to the max
+  assert.equal(commitNumberDraft('', opts), 4) // empty falls back to min
 })

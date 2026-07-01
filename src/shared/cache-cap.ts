@@ -6,13 +6,14 @@
  */
 
 /** Smallest cache cap the plugin accepts, in whole GiB. */
-export const CACHE_CAP_MIN_GIB = 5
-/** Largest cache cap the plugin accepts, in whole GiB. */
-export const CACHE_CAP_MAX_GIB = 1024
+export const CACHE_CAP_MIN_GIB = 4
+/** Largest cache cap the plugin accepts, in whole GiB. A tile cache larger than this is more than any
+ *  realistic install needs, so the slider tops out here rather than at the free-space ceiling. */
+export const CACHE_CAP_MAX_GIB = 32
 /** The increment the cache-cap slider and stepper move by, in GiB. */
-export const CACHE_CAP_STEP_GIB = 5
+export const CACHE_CAP_STEP_GIB = 4
 /** The cap used when free space cannot be detected, in GiB. A multiple of the step. */
-export const CACHE_CAP_STATIC_DEFAULT_GIB = 10
+export const CACHE_CAP_STATIC_DEFAULT_GIB = 8
 
 /**
  * Round a value down to the nearest multiple of `step`, never below zero. A non-finite value or a
@@ -34,9 +35,12 @@ export function snapToStep (value: number, step: number): number {
 
 /**
  * The recommended cap for a filesystem with `freeGiB` free: about 80 percent of free space, floored
- * to the step to leave headroom, and never below the minimum. A non-finite input yields the minimum.
+ * to the step to leave headroom, clamped to `[CACHE_CAP_MIN_GIB, CACHE_CAP_MAX_GIB]`. A non-finite
+ * input yields the minimum. A large disk is capped at the maximum rather than reserving far more than
+ * a tile cache needs.
  */
 export function deriveDefaultCapGiB (freeGiB: number): number {
   if (!Number.isFinite(freeGiB)) return CACHE_CAP_MIN_GIB
-  return Math.max(CACHE_CAP_MIN_GIB, floorToStep(freeGiB * 0.8, CACHE_CAP_STEP_GIB))
+  const floored = floorToStep(freeGiB * 0.8, CACHE_CAP_STEP_GIB)
+  return Math.min(CACHE_CAP_MAX_GIB, Math.max(CACHE_CAP_MIN_GIB, floored))
 }

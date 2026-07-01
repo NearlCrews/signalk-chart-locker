@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  CACHE_CAP_MAX_GIB,
   CACHE_CAP_MIN_GIB,
   deriveDefaultCapGiB,
   floorToStep,
@@ -28,12 +29,17 @@ test('snapToStep rounds to the nearest multiple of the step', () => {
 })
 
 test('deriveDefaultCapGiB takes 80 percent of free space, floored to the step', () => {
-  assert.equal(deriveDefaultCapGiB(120), 95) // 120 * 0.8 = 96, floored to 95
-  assert.equal(deriveDefaultCapGiB(1000), 800)
+  assert.equal(deriveDefaultCapGiB(20), 16) // 20 * 0.8 = 16, already on the 4 GiB grid
+  assert.equal(deriveDefaultCapGiB(30), 24) // 30 * 0.8 = 24
+})
+
+test('deriveDefaultCapGiB clamps a large disk to the maximum', () => {
+  assert.equal(deriveDefaultCapGiB(120), CACHE_CAP_MAX_GIB) // 96 floored, clamped to 32
+  assert.equal(deriveDefaultCapGiB(1000), CACHE_CAP_MAX_GIB)
 })
 
 test('deriveDefaultCapGiB never returns below the minimum', () => {
-  assert.equal(deriveDefaultCapGiB(1), CACHE_CAP_MIN_GIB) // 0.8 floored to 0, clamped to 5
+  assert.equal(deriveDefaultCapGiB(1), CACHE_CAP_MIN_GIB) // 0.8 floored to 0, clamped to 4
   assert.equal(deriveDefaultCapGiB(0), CACHE_CAP_MIN_GIB)
   assert.equal(deriveDefaultCapGiB(Number.NaN), CACHE_CAP_MIN_GIB)
 })
