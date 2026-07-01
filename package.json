@@ -67,6 +67,6 @@
   },
   "dependencies": {
     "pmtiles": "^4.4.1",
-    "signalk-chart-sources": "file:../signalk-chart-sources"
+    "signalk-chart-sources": "^0.1.0"
   }
 }
