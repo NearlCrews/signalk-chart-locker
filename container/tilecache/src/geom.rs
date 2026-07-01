@@ -53,7 +53,10 @@ fn clip(source: &ChartSource, bbox: [f64; 4]) -> Option<[f64; 4]> {
 const MAX_EFFECTIVE_ZOOM: u32 = 24;
 
 fn zoom_bounds(source: &ChartSource, zmin: u32, zmax: u32) -> (u32, u32) {
-    (zmin.max(source.minzoom), zmax.min(source.maxzoom).min(MAX_EFFECTIVE_ZOOM))
+    (
+        zmin.max(source.minzoom),
+        zmax.min(source.maxzoom).min(MAX_EFFECTIVE_ZOOM),
+    )
 }
 
 // The inclusive tile rectangle (x0, x1, y0, y1) for the clipped bbox at zoom z. y increases downward, so
@@ -66,7 +69,9 @@ fn tile_rect(clip: [f64; 4], z: u32) -> (u32, u32, u32, u32) {
 
 /// The number of tiles a warm over this bbox and zoom range would touch.
 pub fn tile_count_in_bbox(source: &ChartSource, bbox: [f64; 4], zmin: u32, zmax: u32) -> u64 {
-    let Some(c) = clip(source, bbox) else { return 0 };
+    let Some(c) = clip(source, bbox) else {
+        return 0;
+    };
     let (zmin, zmax) = zoom_bounds(source, zmin, zmax);
     let mut count = 0u64;
     for z in zmin..=zmax {
@@ -97,7 +102,13 @@ pub fn tiles_iter(
 
 /// Call `f(z, x, y)` for every tile a warm over this bbox and zoom range would touch, allocating nothing.
 #[cfg(test)]
-pub fn for_tiles_in_bbox(source: &ChartSource, bbox: [f64; 4], zmin: u32, zmax: u32, mut f: impl FnMut(u32, u32, u32)) {
+pub fn for_tiles_in_bbox(
+    source: &ChartSource,
+    bbox: [f64; 4],
+    zmin: u32,
+    zmax: u32,
+    mut f: impl FnMut(u32, u32, u32),
+) {
     let Some(c) = clip(source, bbox) else { return };
     let (zmin, zmax) = zoom_bounds(source, zmin, zmax);
     for z in zmin..=zmax {
@@ -117,9 +128,17 @@ mod tests {
 
     fn src(minzoom: u32, maxzoom: u32, bounds: Option<[f64; 4]>) -> ChartSource {
         ChartSource {
-            id: "s".into(), title: "S".into(),
-            upstream: UpstreamTemplate::Xyz { url_template: "http://h/{z}/{x}/{y}".into() },
-            tile_size: 256, minzoom, maxzoom, vector_maxzoom: None, bounds, attribution: String::new(),
+            id: "s".into(),
+            title: "S".into(),
+            upstream: UpstreamTemplate::Xyz {
+                url_template: "http://h/{z}/{x}/{y}".into(),
+            },
+            tile_size: 256,
+            minzoom,
+            maxzoom,
+            vector_maxzoom: None,
+            bounds,
+            attribution: String::new(),
         }
     }
 
@@ -133,7 +152,10 @@ mod tests {
 
     #[test]
     fn latitude_beyond_the_limit_clamps_and_stays_in_range() {
-        assert_eq!(tile_for_lng_lat(0.0, 89.0, 4), tile_for_lng_lat(0.0, MAX_MERCATOR_LAT, 4));
+        assert_eq!(
+            tile_for_lng_lat(0.0, 89.0, 4),
+            tile_for_lng_lat(0.0, MAX_MERCATOR_LAT, 4)
+        );
         let (_, y) = tile_for_lng_lat(0.0, 89.0, 4);
         assert!(y < 16);
     }
@@ -157,13 +179,22 @@ mod tests {
         let s = src(0, 33, None);
         // Tiny bbox: about 0.001 degree square. At zoom 24 this yields a small, predictable count.
         let count = tile_count_in_bbox(&s, [0.0, 50.0, 0.001, 50.001], 24, 33);
-        assert!(count >= 1, "at least one tile expected after clamping to zoom 24");
-        assert!(count < 1_000_000, "count must not be a u32-wrapped undercount at zoom >= 32");
+        assert!(
+            count >= 1,
+            "at least one tile expected after clamping to zoom 24"
+        );
+        assert!(
+            count < 1_000_000,
+            "count must not be a u32-wrapped undercount at zoom >= 32"
+        );
         // Enumeration and count must agree; all emitted zooms must be <= MAX_EFFECTIVE_ZOOM.
         let mut n = 0u64;
         let mut max_z = 0u32;
         for_tiles_in_bbox(&s, [0.0, 50.0, 0.001, 50.001], 24, 33, |z, _, _| {
-            assert!(z <= MAX_EFFECTIVE_ZOOM, "zoom {z} exceeded MAX_EFFECTIVE_ZOOM");
+            assert!(
+                z <= MAX_EFFECTIVE_ZOOM,
+                "zoom {z} exceeded MAX_EFFECTIVE_ZOOM"
+            );
             max_z = max_z.max(z);
             n += 1;
         });
@@ -171,16 +202,31 @@ mod tests {
         assert!(max_z <= MAX_EFFECTIVE_ZOOM);
         // tiles_iter must produce the same count.
         let iter_count = tiles_iter(&s, [0.0, 50.0, 0.001, 50.001], 24, 33).count() as u64;
-        assert_eq!(iter_count, count, "tiles_iter count must match tile_count_in_bbox");
+        assert_eq!(
+            iter_count, count,
+            "tiles_iter count must match tile_count_in_bbox"
+        );
     }
 
     #[test]
     fn bounds_clip_and_antimeridian_and_degenerate_are_rejected() {
         let bounded = src(0, 18, Some([0.0, 0.0, 5.0, 5.0]));
         let unbounded = src(0, 18, None);
-        assert!(tile_count_in_bbox(&bounded, [-20.0, -20.0, 20.0, 20.0], 6, 6) < tile_count_in_bbox(&unbounded, [-20.0, -20.0, 20.0, 20.0], 6, 6));
-        assert_eq!(tile_count_in_bbox(&unbounded, [170.0, -10.0, -170.0, 10.0], 3, 3), 0); // antimeridian
-        assert_eq!(tile_count_in_bbox(&unbounded, [5.0, 5.0, 5.0, 5.0], 2, 2), 0); // degenerate
-        assert_eq!(tile_count_in_bbox(&unbounded, [f64::NAN, 0.0, 1.0, 1.0], 2, 2), 0); // non-finite
+        assert!(
+            tile_count_in_bbox(&bounded, [-20.0, -20.0, 20.0, 20.0], 6, 6)
+                < tile_count_in_bbox(&unbounded, [-20.0, -20.0, 20.0, 20.0], 6, 6)
+        );
+        assert_eq!(
+            tile_count_in_bbox(&unbounded, [170.0, -10.0, -170.0, 10.0], 3, 3),
+            0
+        ); // antimeridian
+        assert_eq!(
+            tile_count_in_bbox(&unbounded, [5.0, 5.0, 5.0, 5.0], 2, 2),
+            0
+        ); // degenerate
+        assert_eq!(
+            tile_count_in_bbox(&unbounded, [f64::NAN, 0.0, 1.0, 1.0], 2, 2),
+            0
+        ); // non-finite
     }
 }

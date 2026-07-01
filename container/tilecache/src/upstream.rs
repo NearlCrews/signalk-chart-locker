@@ -49,7 +49,14 @@ pub fn expand_upstream(source: &ChartSource, z: u32, x: u32, y: u32) -> Result<S
                 .replace("{x}", &x.to_string())
                 .replace("{y}", &y.to_string()))
         }
-        UpstreamTemplate::Wms { base, layers, styles, version, format, transparent } => {
+        UpstreamTemplate::Wms {
+            base,
+            layers,
+            styles,
+            version,
+            format,
+            transparent,
+        } => {
             in_range(source, z, x, y)?;
             Ok(format!(
                 "{base}?SERVICE=WMS&VERSION={version}&REQUEST=GetMap&LAYERS={layers}&CRS=EPSG:3857&BBOX={}&WIDTH={ts}&HEIGHT={ts}&FORMAT={format}&TRANSPARENT={transparent}&STYLES={styles}",
@@ -65,7 +72,10 @@ pub fn expand_upstream(source: &ChartSource, z: u32, x: u32, y: u32) -> Result<S
                 ts = source.tile_size,
             ))
         }
-        UpstreamTemplate::Style { .. } => Err(BadRequest(format!("{} is a style source, not a tile source", source.id))),
+        UpstreamTemplate::Style { .. } => Err(BadRequest(format!(
+            "{} is a style source, not a tile source",
+            source.id
+        ))),
     }
 }
 
@@ -90,12 +100,18 @@ mod tests {
 
     #[test]
     fn z0_bounds_are_the_full_extent() {
-        assert_eq!(web_mercator_tile_bounds(0, 0, 0), [-ORIGIN, -ORIGIN, ORIGIN, ORIGIN]);
+        assert_eq!(
+            web_mercator_tile_bounds(0, 0, 0),
+            [-ORIGIN, -ORIGIN, ORIGIN, ORIGIN]
+        );
     }
 
     #[test]
     fn xyz_substitutes_the_tile_coordinate() {
-        assert_eq!(expand_upstream(&xyz(), 3, 2, 1).unwrap(), "https://h/3/2/1.png");
+        assert_eq!(
+            expand_upstream(&xyz(), 3, 2, 1).unwrap(),
+            "https://h/3/2/1.png"
+        );
     }
 
     #[test]

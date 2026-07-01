@@ -5,9 +5,9 @@
 //! allowed hosts (and the client's guarded DNS resolver). The vector tiles are cached through the tile
 //! cache so the basemap geometry works offline. Sprite stays direct in v1 (a small visual degradation).
 
+use crate::cache::CachedTile;
 use crate::source::UpstreamTemplate;
 use crate::state::{now_secs, AppState, StyleState};
-use crate::cache::CachedTile;
 use axum::{
     extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
@@ -46,7 +46,11 @@ pub(crate) fn sprite_cache_source(style_source: &str) -> String {
 /// malformed or non-256-aligned range so a crafted range cannot mis-key the cache.
 pub(crate) fn glyph_range_start(range: &str) -> Option<u32> {
     let start: u32 = range.split('-').next()?.parse().ok()?;
-    if start.is_multiple_of(256) { Some(start) } else { None }
+    if start.is_multiple_of(256) {
+        Some(start)
+    } else {
+        None
+    }
 }
 
 /// Percent-encode a fontstack for an upstream glyph URL segment (the cache key uses the decoded form).
@@ -59,7 +63,10 @@ pub(crate) fn encode_fontstack(fontstack: &str) -> String {
 /// client's guarded DNS resolver, which already rejects private and loopback targets.
 pub(crate) fn host_allowed(url: &str, allowed_hosts: &[String]) -> bool {
     match reqwest::Url::parse(url) {
-        Ok(u) => u.host_str().map(|h| allowed_hosts.iter().any(|a| a.eq_ignore_ascii_case(h))).unwrap_or(false),
+        Ok(u) => u
+            .host_str()
+            .map(|h| allowed_hosts.iter().any(|a| a.eq_ignore_ascii_case(h)))
+            .unwrap_or(false),
         Err(_) => false,
     }
 }
@@ -96,7 +103,10 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Value> {
     let (style_url, allowed) = {
         let map = state.sources.read().await;
         match map.get(source).map(|s| s.upstream.clone()) {
-            Some(UpstreamTemplate::Style { style_url, allowed_hosts }) => (style_url, allowed_hosts),
+            Some(UpstreamTemplate::Style {
+                style_url,
+                allowed_hosts,
+            }) => (style_url, allowed_hosts),
             _ => return None,
         }
     };
@@ -104,15 +114,29 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Value> {
         return None;
     }
     let style = fetch_json(state, &style_url).await?;
-    let glyphs = style.get("glyphs").and_then(|v| v.as_str()).map(String::from);
-    let sprite_base = style.get("sprite").and_then(|v| v.as_str()).map(String::from);
+    let glyphs = style
+        .get("glyphs")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let sprite_base = style
+        .get("sprite")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     // The distinct fontstacks the style references, in the canonical decoded comma-joined form the
     // glyph route keys on. A data-driven (non-array) text-font is skipped rather than panicking.
     let mut fontstacks: Vec<String> = Vec::new();
     if let Some(layers) = style.get("layers").and_then(|v| v.as_array()) {
         for layer in layers {
-            if let Some(arr) = layer.get("layout").and_then(|l| l.get("text-font")).and_then(|v| v.as_array()) {
-                let joined: String = arr.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",");
+            if let Some(arr) = layer
+                .get("layout")
+                .and_then(|l| l.get("text-font"))
+                .and_then(|v| v.as_array())
+            {
+                let joined: String = arr
+                    .iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
                 if !joined.is_empty() && !fontstacks.contains(&joined) {
                     fontstacks.push(joined);
                 }
@@ -130,24 +154,40 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Value> {
     for name in &names {
         let src = style["sources"][name].clone();
         // maxzoom can be inline on the source, or in the source's TileJSON (fetched below).
-        let inline_max = src.get("maxzoom").and_then(|v| v.as_u64()).map(|m| m as u32);
-        let (tiles, tj_max): (Vec<String>, Option<u32>) = if let Some(arr) = src.get("tiles").and_then(|v| v.as_array()) {
-            (arr.iter().filter_map(|x| x.as_str().map(String::from)).collect(), None)
-        } else if let Some(url) = src.get("url").and_then(|v| v.as_str()) {
-            if host_allowed(url, &allowed) {
-                match fetch_json(state, url).await {
-                    Some(tj) => (
-                        tj.get("tiles").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default(),
-                        tj.get("maxzoom").and_then(|v| v.as_u64()).map(|m| m as u32),
-                    ),
-                    None => (Vec::new(), None),
+        let inline_max = src
+            .get("maxzoom")
+            .and_then(|v| v.as_u64())
+            .map(|m| m as u32);
+        let (tiles, tj_max): (Vec<String>, Option<u32>) =
+            if let Some(arr) = src.get("tiles").and_then(|v| v.as_array()) {
+                (
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect(),
+                    None,
+                )
+            } else if let Some(url) = src.get("url").and_then(|v| v.as_str()) {
+                if host_allowed(url, &allowed) {
+                    match fetch_json(state, url).await {
+                        Some(tj) => (
+                            tj.get("tiles")
+                                .and_then(|v| v.as_array())
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|x| x.as_str().map(String::from))
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            tj.get("maxzoom").and_then(|v| v.as_u64()).map(|m| m as u32),
+                        ),
+                        None => (Vec::new(), None),
+                    }
+                } else {
+                    (Vec::new(), None)
                 }
             } else {
                 (Vec::new(), None)
-            }
-        } else {
-            (Vec::new(), None)
-        };
+            };
         if tiles.is_empty() {
             continue;
         }
@@ -156,7 +196,16 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Value> {
         }
         source_tiles.insert(name.clone(), tiles);
     }
-    state.style_state.write().await.insert(source.to_string(), StyleState { glyphs, source_tiles, source_maxzoom, fontstacks, sprite_base });
+    state.style_state.write().await.insert(
+        source.to_string(),
+        StyleState {
+            glyphs,
+            source_tiles,
+            source_maxzoom,
+            fontstacks,
+            sprite_base,
+        },
+    );
     Some(style)
 }
 
@@ -185,11 +234,15 @@ async fn style_doc(State(state): State<AppState>, Path(source): Path<String>) ->
     };
     let public = state.public_base.read().await.clone();
     let learned = { state.style_state.read().await.get(&source).cloned() };
-    let Some(learned) = learned else { return StatusCode::BAD_GATEWAY.into_response() };
+    let Some(learned) = learned else {
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
 
     // Rewrite the glyphs and the learned sources to point back at the plugin.
     if learned.glyphs.is_some() {
-        style["glyphs"] = Value::String(format!("{public}/style/{source}/glyphs/{{fontstack}}/{{range}}.pbf"));
+        style["glyphs"] = Value::String(format!(
+            "{public}/style/{source}/glyphs/{{fontstack}}/{{range}}.pbf"
+        ));
     }
     for name in learned.source_tiles.keys() {
         let maxzoom = learned.source_maxzoom.get(name).copied();
@@ -197,7 +250,9 @@ async fn style_doc(State(state): State<AppState>, Path(source): Path<String>) ->
             obj.remove("url");
             obj.insert(
                 "tiles".to_string(),
-                Value::Array(vec![Value::String(format!("{public}/style/{source}/tiles/{name}/{{z}}/{{x}}/{{y}}"))]),
+                Value::Array(vec![Value::String(format!(
+                    "{public}/style/{source}/tiles/{name}/{{z}}/{{x}}/{{y}}"
+                ))]),
             );
             // Carry the learned maxzoom back into the served source. Replacing the source's TileJSON
             // url with a tiles array drops the TileJSON maxzoom; without it MapLibre assumes tiles
@@ -225,8 +280,13 @@ async fn style_doc(State(state): State<AppState>, Path(source): Path<String>) ->
 
 /// GET /style/:source/glyphs/:fontstack/:range: serve a glyph range cache-first, keyed by the decoded
 /// fontstack so a warmed glyph (warm-write under the same key) serves offline.
-async fn glyphs(State(state): State<AppState>, Path((source, fontstack, range)): Path<(String, String, String)>) -> Response {
-    let Some(range_start) = glyph_range_start(&range) else { return StatusCode::NOT_FOUND.into_response() };
+async fn glyphs(
+    State(state): State<AppState>,
+    Path((source, fontstack, range)): Path<(String, String, String)>,
+) -> Response {
+    let Some(range_start) = glyph_range_start(&range) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let cache_source = glyph_cache_source(&source, &fontstack);
 
     // Cache first (also the offline path). A cached negative (zero-byte) row serves as a 404 so
@@ -234,17 +294,38 @@ async fn glyphs(State(state): State<AppState>, Path((source, fontstack, range)):
     if let Ok(Some(tile)) = state.cache.get(&cache_source, 0, range_start, 0) {
         if tile.status == 200 {
             if now_secs() - tile.last_access >= crate::fetcher::TOUCH_THROTTLE_SECS {
-                crate::fetcher::log_cache_err(state.cache.touch(&cache_source, 0, range_start, 0, now_secs()));
+                crate::fetcher::log_cache_err(state.cache.touch(
+                    &cache_source,
+                    0,
+                    range_start,
+                    0,
+                    now_secs(),
+                ));
             }
-            return ([(header::CONTENT_TYPE, tile.content_type.clone())], tile.blob.clone().unwrap_or_default()).into_response();
+            return (
+                [(header::CONTENT_TYPE, tile.content_type.clone())],
+                tile.blob.clone().unwrap_or_default(),
+            )
+                .into_response();
         }
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    let template = { state.style_state.read().await.get(&source).and_then(|s| s.glyphs.clone()) };
-    let Some(template) = template else { return StatusCode::NOT_FOUND.into_response() };
+    let template = {
+        state
+            .style_state
+            .read()
+            .await
+            .get(&source)
+            .and_then(|s| s.glyphs.clone())
+    };
+    let Some(template) = template else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let allowed = style_allowed_hosts(&state, &source).await;
-    let upstream = template.replace("{fontstack}", &encode_fontstack(&fontstack)).replace("{range}.pbf", &range);
+    let upstream = template
+        .replace("{fontstack}", &encode_fontstack(&fontstack))
+        .replace("{range}.pbf", &range);
     if !host_allowed(&upstream, &allowed) {
         return StatusCode::BAD_GATEWAY.into_response();
     }
@@ -256,7 +337,11 @@ async fn glyphs(State(state): State<AppState>, Path((source, fontstack, range)):
     if let Ok(Some(tile)) = state.cache.get(&cache_source, 0, range_start, 0) {
         if tile.status == 200 {
             state.inflight_finish(&key, &lock).await;
-            return ([(header::CONTENT_TYPE, tile.content_type.clone())], tile.blob.clone().unwrap_or_default()).into_response();
+            return (
+                [(header::CONTENT_TYPE, tile.content_type.clone())],
+                tile.blob.clone().unwrap_or_default(),
+            )
+                .into_response();
         }
         if now_secs() - tile.fetched_at < state.knobs.negative_ttl_secs {
             state.inflight_finish(&key, &lock).await;
@@ -267,8 +352,14 @@ async fn glyphs(State(state): State<AppState>, Path((source, fontstack, range)):
         Ok((200, f)) => {
             let now = now_secs();
             let tile = CachedTile {
-                content_type: f.content_type, strong_etag: crate::fetcher::strong_etag(&f.body), upstream_validator: None,
-                status: 200, fetched_at: now, last_access: now, bytes: f.body.len() as i64, blob: Some(f.body),
+                content_type: f.content_type,
+                strong_etag: crate::fetcher::strong_etag(&f.body),
+                upstream_validator: None,
+                status: 200,
+                fetched_at: now,
+                last_access: now,
+                bytes: f.body.len() as i64,
+                blob: Some(f.body),
             };
             let content_type = tile.content_type.clone();
             let body = tile.blob.clone().unwrap_or_default();
@@ -284,10 +375,18 @@ async fn glyphs(State(state): State<AppState>, Path((source, fontstack, range)):
 
 // The sprite variants. MapLibre appends the suffix to the sprite base with no slash, so each is an
 // explicit route. The variant index is the synthetic cache x.
-async fn sprite_json(s: State<AppState>, p: Path<String>) -> Response { sprite_variant(s.0, p.0, 0, ".json").await }
-async fn sprite_png(s: State<AppState>, p: Path<String>) -> Response { sprite_variant(s.0, p.0, 1, ".png").await }
-async fn sprite_2x_json(s: State<AppState>, p: Path<String>) -> Response { sprite_variant(s.0, p.0, 2, "@2x.json").await }
-async fn sprite_2x_png(s: State<AppState>, p: Path<String>) -> Response { sprite_variant(s.0, p.0, 3, "@2x.png").await }
+async fn sprite_json(s: State<AppState>, p: Path<String>) -> Response {
+    sprite_variant(s.0, p.0, 0, ".json").await
+}
+async fn sprite_png(s: State<AppState>, p: Path<String>) -> Response {
+    sprite_variant(s.0, p.0, 1, ".png").await
+}
+async fn sprite_2x_json(s: State<AppState>, p: Path<String>) -> Response {
+    sprite_variant(s.0, p.0, 2, "@2x.json").await
+}
+async fn sprite_2x_png(s: State<AppState>, p: Path<String>) -> Response {
+    sprite_variant(s.0, p.0, 3, "@2x.png").await
+}
 
 /// Serve a sprite variant cache-first under sprite_cache_source at x = variant, reconstructing the
 /// upstream from the learned sprite base plus the suffix.
@@ -295,12 +394,25 @@ async fn sprite_variant(state: AppState, source: String, variant: u32, suffix: &
     let cache_source = sprite_cache_source(&source);
     if let Ok(Some(tile)) = state.cache.get(&cache_source, 0, variant, 0) {
         if tile.status == 200 {
-            return ([(header::CONTENT_TYPE, tile.content_type.clone())], tile.blob.clone().unwrap_or_default()).into_response();
+            return (
+                [(header::CONTENT_TYPE, tile.content_type.clone())],
+                tile.blob.clone().unwrap_or_default(),
+            )
+                .into_response();
         }
         return StatusCode::NOT_FOUND.into_response();
     }
-    let base = { state.style_state.read().await.get(&source).and_then(|s| s.sprite_base.clone()) };
-    let Some(base) = base else { return StatusCode::NOT_FOUND.into_response() };
+    let base = {
+        state
+            .style_state
+            .read()
+            .await
+            .get(&source)
+            .and_then(|s| s.sprite_base.clone())
+    };
+    let Some(base) = base else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let allowed = style_allowed_hosts(&state, &source).await;
     let upstream = format!("{base}{suffix}");
     if !host_allowed(&upstream, &allowed) {
@@ -314,7 +426,11 @@ async fn sprite_variant(state: AppState, source: String, variant: u32, suffix: &
     if let Ok(Some(tile)) = state.cache.get(&cache_source, 0, variant, 0) {
         if tile.status == 200 {
             state.inflight_finish(&key, &lock).await;
-            return ([(header::CONTENT_TYPE, tile.content_type.clone())], tile.blob.clone().unwrap_or_default()).into_response();
+            return (
+                [(header::CONTENT_TYPE, tile.content_type.clone())],
+                tile.blob.clone().unwrap_or_default(),
+            )
+                .into_response();
         }
         if now_secs() - tile.fetched_at < state.knobs.negative_ttl_secs {
             state.inflight_finish(&key, &lock).await;
@@ -325,8 +441,14 @@ async fn sprite_variant(state: AppState, source: String, variant: u32, suffix: &
         Ok((200, f)) => {
             let now = now_secs();
             let tile = CachedTile {
-                content_type: f.content_type, strong_etag: crate::fetcher::strong_etag(&f.body), upstream_validator: None,
-                status: 200, fetched_at: now, last_access: now, bytes: f.body.len() as i64, blob: Some(f.body),
+                content_type: f.content_type,
+                strong_etag: crate::fetcher::strong_etag(&f.body),
+                upstream_validator: None,
+                status: 200,
+                fetched_at: now,
+                last_access: now,
+                bytes: f.body.len() as i64,
+                blob: Some(f.body),
             };
             let content_type = tile.content_type.clone();
             let body = tile.blob.clone().unwrap_or_default();
@@ -341,19 +463,39 @@ async fn sprite_variant(state: AppState, source: String, variant: u32, suffix: &
 }
 
 /// GET /style/:source/tiles/:name/:z/:x/:y: serve a basemap vector tile, cached through the tile cache.
-async fn vector_tile(State(state): State<AppState>, Path((source, name, z, x, y)): Path<(String, String, u32, u32, u32)>, headers: HeaderMap) -> Response {
+async fn vector_tile(
+    State(state): State<AppState>,
+    Path((source, name, z, x, y)): Path<(String, String, u32, u32, u32)>,
+    headers: HeaderMap,
+) -> Response {
     let template = {
-        state.style_state.read().await.get(&source).and_then(|s| s.source_tiles.get(&name).and_then(|t| t.first().cloned()))
+        state
+            .style_state
+            .read()
+            .await
+            .get(&source)
+            .and_then(|s| s.source_tiles.get(&name).and_then(|t| t.first().cloned()))
     };
-    let Some(template) = template else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(template) = template else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let cache_source = format!("style:{source}:{name}");
-    let if_none_match = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let if_none_match = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
 
     // Cache first (also the offline path: serve a cached tile when the upstream is unreachable).
     if let Ok(Some(tile)) = state.cache.get(&cache_source, z, x, y) {
         if tile.status == 200 {
             if now_secs() - tile.last_access >= crate::fetcher::TOUCH_THROTTLE_SECS {
-                crate::fetcher::log_cache_err(state.cache.touch(&cache_source, z, x, y, now_secs()));
+                crate::fetcher::log_cache_err(state.cache.touch(
+                    &cache_source,
+                    z,
+                    x,
+                    y,
+                    now_secs(),
+                ));
             }
             return tile_response(&tile, if_none_match.as_deref());
         }
@@ -365,7 +507,10 @@ async fn vector_tile(State(state): State<AppState>, Path((source, name, z, x, y)
     }
 
     let allowed = style_allowed_hosts(&state, &source).await;
-    let upstream = template.replace("{z}", &z.to_string()).replace("{x}", &x.to_string()).replace("{y}", &y.to_string());
+    let upstream = template
+        .replace("{z}", &z.to_string())
+        .replace("{x}", &x.to_string())
+        .replace("{y}", &y.to_string());
     if !host_allowed(&upstream, &allowed) {
         return StatusCode::BAD_GATEWAY.into_response();
     }
@@ -411,20 +556,40 @@ async fn vector_tile(State(state): State<AppState>, Path((source, name, z, x, y)
 }
 
 async fn style_allowed_hosts(state: &AppState, source: &str) -> Vec<String> {
-    match state.sources.read().await.get(source).map(|s| s.upstream.clone()) {
+    match state
+        .sources
+        .read()
+        .await
+        .get(source)
+        .map(|s| s.upstream.clone())
+    {
         Some(UpstreamTemplate::Style { allowed_hosts, .. }) => allowed_hosts,
         _ => Vec::new(),
     }
 }
 
 fn tile_response(tile: &CachedTile, if_none_match: Option<&str>) -> Response {
-    crate::response::tile_http_response(&tile.content_type, &tile.strong_etag, false, tile.blob.clone().unwrap_or_default(), if_none_match)
+    crate::response::tile_http_response(
+        &tile.content_type,
+        &tile.strong_etag,
+        false,
+        tile.blob.clone().unwrap_or_default(),
+        if_none_match,
+    )
 }
 
 /// Store a fetched style sub-resource (glyph, sprite, or vector tile) and evict to the cap on the
 /// blocking pool, so the window-function eviction scan never runs on the single-worker reactor. Mirrors
 /// the raster store path in `fetcher::store_200`.
-async fn store_and_evict(state: &AppState, cache_source: String, z: u32, x: u32, y: u32, tile: CachedTile, now: i64) {
+async fn store_and_evict(
+    state: &AppState,
+    cache_source: String,
+    z: u32,
+    x: u32,
+    y: u32,
+    tile: CachedTile,
+    now: i64,
+) {
     let cache = state.cache.clone();
     let cap = state.live_cap_bytes.load(Ordering::Relaxed);
     if let Err(e) = tokio::task::spawn_blocking(move || {
@@ -477,14 +642,22 @@ mod tests {
             .route("/fonts/:fontstack/:range", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![7u8, 7, 7]) }))
             .route("/sprites/:name", get(|| async { ([(header::CONTENT_TYPE, "application/json")], r#"{"ok":1}"#) }))
             .route("/t/:z/:x/:y", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![8u8, 8, 8, 8]) }));
-        tokio::spawn(async move { axum::serve(listener, stub).await.unwrap(); });
+        tokio::spawn(async move {
+            axum::serve(listener, stub).await.unwrap();
+        });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         addr
     }
 
     fn dev_state(db: &NamedTempFile) -> AppState {
         let cache = Arc::new(TileCache::open(db.path()).unwrap());
-        AppState::new(cache, Knobs { allow_private_egress: true, ..Default::default() })
+        AppState::new(
+            cache,
+            Knobs {
+                allow_private_egress: true,
+                ..Default::default()
+            },
+        )
     }
 
     fn config_json(addr: SocketAddr, allowed_host: &str) -> String {
@@ -506,25 +679,61 @@ mod tests {
         let router = app(dev_state(&db));
         router
             .clone()
-            .oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr, "127.0.0.1"))).unwrap())
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr, "127.0.0.1")))
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
         // The style document is rewritten so its glyphs and tiles point back at the plugin.
-        let style_resp = router.clone().oneshot(Request::get("/style/basemap").body(Body::empty()).unwrap()).await.unwrap();
+        let style_resp = router
+            .clone()
+            .oneshot(Request::get("/style/basemap").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         assert_eq!(style_resp.status(), StatusCode::OK);
         let style = body_json(style_resp).await;
-        assert_eq!(style["glyphs"], "/plugins/p/style/basemap/glyphs/{fontstack}/{range}.pbf");
-        assert_eq!(style["sources"]["openmaptiles"]["tiles"][0], "/plugins/p/style/basemap/tiles/openmaptiles/{z}/{x}/{y}");
-        assert!(style["sources"]["openmaptiles"].get("url").is_none(), "the upstream url is replaced by the proxied tiles");
+        assert_eq!(
+            style["glyphs"],
+            "/plugins/p/style/basemap/glyphs/{fontstack}/{range}.pbf"
+        );
+        assert_eq!(
+            style["sources"]["openmaptiles"]["tiles"][0],
+            "/plugins/p/style/basemap/tiles/openmaptiles/{z}/{x}/{y}"
+        );
+        assert!(
+            style["sources"]["openmaptiles"].get("url").is_none(),
+            "the upstream url is replaced by the proxied tiles"
+        );
 
         // A vector tile is fetched, cached, and served.
-        let tile = router.clone().oneshot(Request::get("/style/basemap/tiles/openmaptiles/0/0/0").body(Body::empty()).unwrap()).await.unwrap();
+        let tile = router
+            .clone()
+            .oneshot(
+                Request::get("/style/basemap/tiles/openmaptiles/0/0/0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(tile.status(), StatusCode::OK);
-        assert_eq!(tile.headers().get(header::CONTENT_TYPE).unwrap(), "application/x-protobuf");
+        assert_eq!(
+            tile.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/x-protobuf"
+        );
 
         // A glyph range is proxied.
-        let glyph = router.oneshot(Request::get("/style/basemap/glyphs/NotoSans/0-255.pbf").body(Body::empty()).unwrap()).await.unwrap();
+        let glyph = router
+            .oneshot(
+                Request::get("/style/basemap/glyphs/NotoSans/0-255.pbf")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(glyph.status(), StatusCode::OK);
     }
 
@@ -534,15 +743,34 @@ mod tests {
         let db = NamedTempFile::new().unwrap();
         let st = dev_state(&db);
         crate::routes::app(st.clone())
-            .oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr, "127.0.0.1"))).unwrap())
-            .await.unwrap();
-        assert!(crate::style::ensure_style_learned(&st, "basemap").await, "the style is learned");
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr, "127.0.0.1")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            crate::style::ensure_style_learned(&st, "basemap").await,
+            "the style is learned"
+        );
         let ss = st.style_state.read().await;
         let learned = ss.get("basemap").unwrap();
-        assert!(learned.source_tiles.contains_key("openmaptiles"), "the vector source tile template is learned");
-        assert_eq!(learned.source_maxzoom.get("openmaptiles"), Some(&14), "the vector source maxzoom is learned from its TileJSON");
+        assert!(
+            learned.source_tiles.contains_key("openmaptiles"),
+            "the vector source tile template is learned"
+        );
+        assert_eq!(
+            learned.source_maxzoom.get("openmaptiles"),
+            Some(&14),
+            "the vector source maxzoom is learned from its TileJSON"
+        );
         drop(ss);
-        assert!(crate::style::ensure_style_learned(&st, "basemap").await, "a second call is idempotent");
+        assert!(
+            crate::style::ensure_style_learned(&st, "basemap").await,
+            "a second call is idempotent"
+        );
     }
 
     #[tokio::test]
@@ -551,13 +779,26 @@ mod tests {
         let db = NamedTempFile::new().unwrap();
         let st = dev_state(&db);
         crate::routes::app(st.clone())
-            .oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr, "127.0.0.1"))).unwrap())
-            .await.unwrap();
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr, "127.0.0.1")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert!(crate::style::ensure_style_learned(&st, "basemap").await);
         let ss = st.style_state.read().await;
         let learned = ss.get("basemap").unwrap();
-        assert!(learned.fontstacks.iter().any(|f| f == "Noto Sans Regular"), "the multi-word fontstack is learned in decoded form");
-        assert_eq!(learned.sprite_base.as_deref(), Some(format!("http://{addr}/sprites/ofm").as_str()), "the sprite base is learned");
+        assert!(
+            learned.fontstacks.iter().any(|f| f == "Noto Sans Regular"),
+            "the multi-word fontstack is learned in decoded form"
+        );
+        assert_eq!(
+            learned.sprite_base.as_deref(),
+            Some(format!("http://{addr}/sprites/ofm").as_str()),
+            "the sprite base is learned"
+        );
     }
 
     #[tokio::test]
@@ -566,21 +807,51 @@ mod tests {
         let db = NamedTempFile::new().unwrap();
         let st = dev_state(&db);
         let router = crate::routes::app(st.clone());
-        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr, "127.0.0.1"))).unwrap()).await.unwrap();
-        router.clone().oneshot(Request::get("/style/basemap").body(Body::empty()).unwrap()).await.unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr, "127.0.0.1")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(Request::get("/style/basemap").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         // Seed a cached glyph under the synthetic key with a body distinct from the upstream stub (7,7,7),
         // so serving the seed (not a refetch) is detectable.
         let key = crate::style::glyph_cache_source("basemap", "Noto Sans Regular");
         let now = crate::state::now_secs();
         let tile = crate::cache::CachedTile {
-            content_type: "application/x-protobuf".into(), strong_etag: "g".into(), upstream_validator: None,
-            status: 200, fetched_at: now, last_access: now, bytes: 3, blob: Some(bytes::Bytes::from(vec![9u8, 9, 9])),
+            content_type: "application/x-protobuf".into(),
+            strong_etag: "g".into(),
+            upstream_validator: None,
+            status: 200,
+            fetched_at: now,
+            last_access: now,
+            bytes: 3,
+            blob: Some(bytes::Bytes::from(vec![9u8, 9, 9])),
         };
         st.cache.put(&key, 0, 0, 0, &tile, true, now).unwrap();
-        let resp = router.oneshot(Request::get("/style/basemap/glyphs/Noto%20Sans%20Regular/0-255.pbf").body(Body::empty()).unwrap()).await.unwrap();
+        let resp = router
+            .oneshot(
+                Request::get("/style/basemap/glyphs/Noto%20Sans%20Regular/0-255.pbf")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(body.as_ref(), &[9u8, 9, 9], "the cached glyph is served, not refetched");
+        assert_eq!(
+            body.as_ref(),
+            &[9u8, 9, 9],
+            "the cached glyph is served, not refetched"
+        );
     }
 
     #[tokio::test]
@@ -589,14 +860,47 @@ mod tests {
         let db = NamedTempFile::new().unwrap();
         let st = dev_state(&db);
         let router = crate::routes::app(st.clone());
-        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr, "127.0.0.1"))).unwrap()).await.unwrap();
-        router.clone().oneshot(Request::get("/style/basemap").body(Body::empty()).unwrap()).await.unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr, "127.0.0.1")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(Request::get("/style/basemap").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         let key = crate::style::glyph_cache_source("basemap", "Noto Sans Regular");
         let now = crate::state::now_secs();
-        let neg = crate::cache::CachedTile { content_type: String::new(), strong_etag: String::new(), upstream_validator: None, status: 404, fetched_at: now, last_access: now, bytes: 0, blob: None };
+        let neg = crate::cache::CachedTile {
+            content_type: String::new(),
+            strong_etag: String::new(),
+            upstream_validator: None,
+            status: 404,
+            fetched_at: now,
+            last_access: now,
+            bytes: 0,
+            blob: None,
+        };
         st.cache.put(&key, 0, 0, 0, &neg, true, now).unwrap();
-        let resp = router.oneshot(Request::get("/style/basemap/glyphs/Noto%20Sans%20Regular/0-255.pbf").body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "a cached negative glyph serves as a 404");
+        let resp = router
+            .oneshot(
+                Request::get("/style/basemap/glyphs/Noto%20Sans%20Regular/0-255.pbf")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "a cached negative glyph serves as a 404"
+        );
     }
 
     #[tokio::test]
@@ -605,15 +909,42 @@ mod tests {
         let db = NamedTempFile::new().unwrap();
         let st = dev_state(&db);
         let router = crate::routes::app(st.clone());
-        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr, "127.0.0.1"))).unwrap()).await.unwrap();
-        let style_resp = router.clone().oneshot(Request::get("/style/basemap").body(Body::empty()).unwrap()).await.unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr, "127.0.0.1")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let style_resp = router
+            .clone()
+            .oneshot(Request::get("/style/basemap").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         let style = body_json(style_resp).await;
         // The sprite URL is left absolute (upstream), not rewritten, because MapLibre rejects a
         // path-absolute sprite. The route still serves and caches the sprite for a later offline pass.
         assert_eq!(style["sprite"], format!("http://{addr}/sprites/ofm"));
-        let sprite = router.clone().oneshot(Request::get("/style/basemap/sprite.json").body(Body::empty()).unwrap()).await.unwrap();
+        let sprite = router
+            .clone()
+            .oneshot(
+                Request::get("/style/basemap/sprite.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(sprite.status(), StatusCode::OK);
-        assert!(st.cache.get(&crate::style::sprite_cache_source("basemap"), 0, 0, 0).unwrap().is_some(), "sprite.json is cached under variant index 0");
+        assert!(
+            st.cache
+                .get(&crate::style::sprite_cache_source("basemap"), 0, 0, 0)
+                .unwrap()
+                .is_some(),
+            "sprite.json is cached under variant index 0"
+        );
     }
 
     #[tokio::test]
@@ -623,10 +954,22 @@ mod tests {
         let router = app(dev_state(&db));
         router
             .clone()
-            .oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr, "not-allowed.example"))).unwrap())
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr, "not-allowed.example")))
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        let resp = router.oneshot(Request::get("/style/basemap").body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY, "the style host is not in allowedHosts");
+        let resp = router
+            .oneshot(Request::get("/style/basemap").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_GATEWAY,
+            "the style host is not in allowedHosts"
+        );
     }
 }

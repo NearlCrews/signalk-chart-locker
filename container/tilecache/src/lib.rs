@@ -11,7 +11,7 @@ pub mod routes;
 pub mod source;
 pub mod ssrf;
 pub mod state;
-pub mod sweep;
 pub mod style;
+pub mod sweep;
 pub mod upstream;
 pub mod warm;

@@ -46,9 +46,13 @@ pub fn is_forbidden_ip_literal_url(url: &str) -> bool {
         .ok()
         .and_then(|u| {
             u.host_str().map(|h| {
-                let bare =
-                    h.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(h);
-                bare.parse::<std::net::IpAddr>().map(is_forbidden_ip).unwrap_or(false)
+                let bare = h
+                    .strip_prefix('[')
+                    .and_then(|s| s.strip_suffix(']'))
+                    .unwrap_or(h);
+                bare.parse::<std::net::IpAddr>()
+                    .map(is_forbidden_ip)
+                    .unwrap_or(false)
             })
         })
         .unwrap_or(false)
@@ -60,11 +64,21 @@ fn embedded_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     let s = ip.segments();
     // 2002:AABB:CCDD::/48 6to4: the v4 is segments 1 and 2.
     if s[0] == 0x2002 {
-        return Some(Ipv4Addr::new((s[1] >> 8) as u8, s[1] as u8, (s[2] >> 8) as u8, s[2] as u8));
+        return Some(Ipv4Addr::new(
+            (s[1] >> 8) as u8,
+            s[1] as u8,
+            (s[2] >> 8) as u8,
+            s[2] as u8,
+        ));
     }
     // 64:ff9b::/96 well-known NAT64: the v4 is the last 32 bits.
     if s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0 {
-        return Some(Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8));
+        return Some(Ipv4Addr::new(
+            (s[6] >> 8) as u8,
+            s[6] as u8,
+            (s[7] >> 8) as u8,
+            s[7] as u8,
+        ));
     }
     None
 }
@@ -86,22 +100,39 @@ mod tests {
 
     #[test]
     fn rejects_private_loopback_linklocal_and_metadata() {
-        for s in ["127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "224.0.0.1"] {
+        for s in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "192.168.1.1",
+            "172.16.0.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "224.0.0.1",
+        ] {
             let ip: IpAddr = s.parse().unwrap();
             assert!(is_forbidden_ip(ip), "{s} should be forbidden");
         }
         assert!(is_forbidden_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
         assert!(is_forbidden_ip(IpAddr::V6("fc00::1".parse().unwrap())));
         assert!(is_forbidden_ip(IpAddr::V6("fe80::1".parse().unwrap())));
-        assert!(is_forbidden_ip(IpAddr::V6("::ffff:127.0.0.1".parse().unwrap())));
+        assert!(is_forbidden_ip(IpAddr::V6(
+            "::ffff:127.0.0.1".parse().unwrap()
+        )));
         // 6to4 wrapping 10.0.0.1 (2002:0a00:0001::) and NAT64 wrapping 192.168.1.1 (64:ff9b::c0a8:0101).
-        assert!(is_forbidden_ip(IpAddr::V6("2002:0a00:0001::".parse().unwrap())));
-        assert!(is_forbidden_ip(IpAddr::V6("64:ff9b::c0a8:0101".parse().unwrap())));
+        assert!(is_forbidden_ip(IpAddr::V6(
+            "2002:0a00:0001::".parse().unwrap()
+        )));
+        assert!(is_forbidden_ip(IpAddr::V6(
+            "64:ff9b::c0a8:0101".parse().unwrap()
+        )));
     }
 
     #[test]
     fn allows_a_public_address() {
         assert!(!is_forbidden_ip(IpAddr::V4(Ipv4Addr::new(140, 90, 1, 1)))); // a NOAA-range public IP
-        assert!(!is_forbidden_ip(IpAddr::V6("2606:4700::1".parse().unwrap()))); // a public IPv6
+        assert!(!is_forbidden_ip(IpAddr::V6(
+            "2606:4700::1".parse().unwrap()
+        ))); // a public IPv6
     }
 }

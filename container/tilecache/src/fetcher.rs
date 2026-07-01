@@ -30,9 +30,13 @@ pub struct TileResponse {
 /// The outcome of a tile request, mapped to HTTP by the route layer.
 pub enum FetchOutcome {
     Hit(TileResponse),
-    NotModified { etag: String },
+    NotModified {
+        etag: String,
+    },
     /// A negatively cached or upstream sparse-coverage response (status without a body).
-    Empty { status: u16 },
+    Empty {
+        status: u16,
+    },
     /// Unknown source, or a style source asked for as a tile.
     NotAllowed,
     BadRequest(String),
@@ -101,13 +105,30 @@ pub(crate) async fn fetch_upstream(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
     let body = state.read_capped(resp).await.ok_or(())?;
-    Ok((status, Fetched { content_type, validator, body }))
+    Ok((
+        status,
+        Fetched {
+            content_type,
+            validator,
+            body,
+        },
+    ))
 }
 
 /// Store a fetched 200 and return it, or negative-cache a 404 or 204. Rejects an oversize body or a
 /// non-image content type (a WMS XML ServiceException returned with a 200) without storing.
-async fn store_200(state: &AppState, source_id: &str, z: u32, x: u32, y: u32, fetched: Fetched, if_none_match: Option<&str>) -> FetchOutcome {
-    if fetched.body.len() > state.knobs.max_blob_bytes || !acceptable_content_type(&fetched.content_type) {
+async fn store_200(
+    state: &AppState,
+    source_id: &str,
+    z: u32,
+    x: u32,
+    y: u32,
+    fetched: Fetched,
+    if_none_match: Option<&str>,
+) -> FetchOutcome {
+    if fetched.body.len() > state.knobs.max_blob_bytes
+        || !acceptable_content_type(&fetched.content_type)
+    {
         return FetchOutcome::Unavailable;
     }
     let now = now_secs();
@@ -141,10 +162,23 @@ async fn store_200(state: &AppState, source_id: &str, z: u32, x: u32, y: u32, fe
     if if_none_match == Some(etag.as_str()) {
         return FetchOutcome::NotModified { etag };
     }
-    FetchOutcome::Hit(TileResponse { status: 200, content_type: fetched.content_type, etag, stale: false, body: fetched.body })
+    FetchOutcome::Hit(TileResponse {
+        status: 200,
+        content_type: fetched.content_type,
+        etag,
+        stale: false,
+        body: fetched.body,
+    })
 }
 
-fn negative_cache(state: &AppState, source_id: &str, z: u32, x: u32, y: u32, status: u16) -> FetchOutcome {
+fn negative_cache(
+    state: &AppState,
+    source_id: &str,
+    z: u32,
+    x: u32,
+    y: u32,
+    status: u16,
+) -> FetchOutcome {
     let now = now_secs();
     let tile = CachedTile {
         content_type: String::new(),
@@ -189,7 +223,9 @@ pub async fn get_tile(
     if let Ok(Some(tile)) = state.cache.get(source_id, z, x, y) {
         if tile.status != 200 {
             if now - tile.fetched_at < state.knobs.negative_ttl_secs {
-                return FetchOutcome::Empty { status: tile.status as u16 };
+                return FetchOutcome::Empty {
+                    status: tile.status as u16,
+                };
             }
         } else if now - tile.fetched_at < state.knobs.fresh_secs {
             // Throttle the LRU write so a pan does not write to the microSD on every warm-tile read.
@@ -197,7 +233,9 @@ pub async fn get_tile(
                 log_cache_err(state.cache.touch(source_id, z, x, y, now));
             }
             if if_none_match.as_deref() == Some(&tile.strong_etag) {
-                return FetchOutcome::NotModified { etag: tile.strong_etag };
+                return FetchOutcome::NotModified {
+                    etag: tile.strong_etag,
+                };
             }
             return FetchOutcome::Hit(to_response(&tile, false));
         } else {
@@ -209,12 +247,15 @@ pub async fn get_tile(
                     refreshed.last_access = now;
                     log_cache_err(state.cache.put(source_id, z, x, y, &refreshed, false, now));
                     if if_none_match.as_deref() == Some(&tile.strong_etag) {
-                        return FetchOutcome::NotModified { etag: tile.strong_etag };
+                        return FetchOutcome::NotModified {
+                            etag: tile.strong_etag,
+                        };
                     }
                     return FetchOutcome::Hit(to_response(&tile, false));
                 }
                 Ok((200, fetched)) => {
-                    return store_200(state, source_id, z, x, y, fetched, if_none_match.as_deref()).await;
+                    return store_200(state, source_id, z, x, y, fetched, if_none_match.as_deref())
+                        .await;
                 }
                 _ => {
                     if now - tile.fetched_at < state.knobs.max_stale_secs {
@@ -234,7 +275,9 @@ pub async fn get_tile(
         if tile.status == 200 && now_secs() - tile.fetched_at < state.knobs.fresh_secs {
             state.inflight_finish(&key, &lock).await;
             if if_none_match.as_deref() == Some(&tile.strong_etag) {
-                return FetchOutcome::NotModified { etag: tile.strong_etag };
+                return FetchOutcome::NotModified {
+                    etag: tile.strong_etag,
+                };
             }
             return FetchOutcome::Hit(to_response(&tile, false));
         }
@@ -242,17 +285,24 @@ pub async fn get_tile(
         // each refetch the same 404 or 204.
         if tile.status != 200 && now_secs() - tile.fetched_at < state.knobs.negative_ttl_secs {
             state.inflight_finish(&key, &lock).await;
-            return FetchOutcome::Empty { status: tile.status as u16 };
+            return FetchOutcome::Empty {
+                status: tile.status as u16,
+            };
         }
     }
     let outcome = match fetch_upstream(state, &url, None).await {
-        Ok((200, fetched)) => store_200(state, source_id, z, x, y, fetched, if_none_match.as_deref()).await,
+        Ok((200, fetched)) => {
+            store_200(state, source_id, z, x, y, fetched, if_none_match.as_deref()).await
+        }
         Ok((status @ (404 | 204), _)) => negative_cache(state, source_id, z, x, y, status),
         Ok(_) => FetchOutcome::Unavailable,
         Err(()) => {
             // Offline: serve any cached 200 within the max-stale bound.
             match state.cache.get(source_id, z, x, y) {
-                Ok(Some(tile)) if tile.status == 200 && now_secs() - tile.fetched_at < state.knobs.max_stale_secs => {
+                Ok(Some(tile))
+                    if tile.status == 200
+                        && now_secs() - tile.fetched_at < state.knobs.max_stale_secs =>
+                {
                     FetchOutcome::Hit(to_response(&tile, true))
                 }
                 _ => FetchOutcome::Unavailable,
@@ -290,11 +340,16 @@ mod tests {
                     }
                 }),
             )
-            .route("/xml", get(|| async { ([(header::CONTENT_TYPE, "text/xml")], "<ServiceException/>") }))
+            .route(
+                "/xml",
+                get(|| async { ([(header::CONTENT_TYPE, "text/xml")], "<ServiceException/>") }),
+            )
             .route("/missing", get(|| async { StatusCode::NOT_FOUND }));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         addr
     }
@@ -321,7 +376,10 @@ mod tests {
     }
 
     fn dev_knobs() -> Knobs {
-        Knobs { allow_private_egress: true, ..Default::default() }
+        Knobs {
+            allow_private_egress: true,
+            ..Default::default()
+        }
     }
 
     #[tokio::test]
@@ -329,14 +387,26 @@ mod tests {
         let hits = Arc::new(AtomicUsize::new(0));
         let addr = spawn_stub(hits.clone()).await;
         let db = NamedTempFile::new().unwrap();
-        let st = state_with(&db, dev_knobs(), xyz_source(format!("http://{addr}/img/{{z}}/{{x}}/{{y}}"))).await;
+        let st = state_with(
+            &db,
+            dev_knobs(),
+            xyz_source(format!("http://{addr}/img/{{z}}/{{x}}/{{y}}")),
+        )
+        .await;
 
-        let (a, b) = tokio::join!(get_tile(&st, "s", 1, 0, 0, None), get_tile(&st, "s", 1, 0, 0, None));
+        let (a, b) = tokio::join!(
+            get_tile(&st, "s", 1, 0, 0, None),
+            get_tile(&st, "s", 1, 0, 0, None)
+        );
         assert!(matches!(a, FetchOutcome::Hit(_)));
         assert!(matches!(b, FetchOutcome::Hit(_)));
         let c = get_tile(&st, "s", 1, 0, 0, None).await;
         assert!(matches!(c, FetchOutcome::Hit(_)));
-        assert_eq!(hits.load(Ordering::SeqCst), 1, "single-flight and the cache mean one upstream fetch");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "single-flight and the cache mean one upstream fetch"
+        );
     }
 
     #[tokio::test]
@@ -345,7 +415,10 @@ mod tests {
         let addr = spawn_stub(hits).await;
         let db = NamedTempFile::new().unwrap();
         let st = state_with(&db, dev_knobs(), xyz_source(format!("http://{addr}/xml"))).await;
-        assert!(matches!(get_tile(&st, "s", 0, 0, 0, None).await, FetchOutcome::Unavailable));
+        assert!(matches!(
+            get_tile(&st, "s", 0, 0, 0, None).await,
+            FetchOutcome::Unavailable
+        ));
         assert!(st.cache.get("s", 0, 0, 0).unwrap().is_none());
     }
 
@@ -354,12 +427,23 @@ mod tests {
         let hits = Arc::new(AtomicUsize::new(0));
         let addr = spawn_stub(hits).await;
         let db = NamedTempFile::new().unwrap();
-        let st = state_with(&db, dev_knobs(), xyz_source(format!("http://{addr}/missing"))).await;
-        assert!(matches!(get_tile(&st, "s", 0, 0, 0, None).await, FetchOutcome::Empty { status: 404 }));
+        let st = state_with(
+            &db,
+            dev_knobs(),
+            xyz_source(format!("http://{addr}/missing")),
+        )
+        .await;
+        assert!(matches!(
+            get_tile(&st, "s", 0, 0, 0, None).await,
+            FetchOutcome::Empty { status: 404 }
+        ));
         let row = st.cache.get("s", 0, 0, 0).unwrap().unwrap();
         assert_eq!(row.status, 404);
         // A second request within the negative TTL serves from the negative cache.
-        assert!(matches!(get_tile(&st, "s", 0, 0, 0, None).await, FetchOutcome::Empty { status: 404 }));
+        assert!(matches!(
+            get_tile(&st, "s", 0, 0, 0, None).await,
+            FetchOutcome::Empty { status: 404 }
+        ));
     }
 
     #[tokio::test]
@@ -367,13 +451,21 @@ mod tests {
         let hits = Arc::new(AtomicUsize::new(0));
         let addr = spawn_stub(hits).await;
         let db = NamedTempFile::new().unwrap();
-        let st = state_with(&db, dev_knobs(), xyz_source(format!("http://{addr}/img/{{z}}/{{x}}/{{y}}"))).await;
+        let st = state_with(
+            &db,
+            dev_knobs(),
+            xyz_source(format!("http://{addr}/img/{{z}}/{{x}}/{{y}}")),
+        )
+        .await;
         let first = get_tile(&st, "s", 2, 1, 1, None).await;
         let etag = match first {
             FetchOutcome::Hit(r) => r.etag,
             _ => panic!("expected a hit"),
         };
-        assert!(matches!(get_tile(&st, "s", 2, 1, 1, Some(etag)).await, FetchOutcome::NotModified { .. }));
+        assert!(matches!(
+            get_tile(&st, "s", 2, 1, 1, Some(etag)).await,
+            FetchOutcome::NotModified { .. }
+        ));
     }
 
     #[tokio::test]
@@ -382,13 +474,30 @@ mod tests {
         let addr = spawn_stub(hits).await;
         let db = NamedTempFile::new().unwrap();
         // fresh_secs 0 forces revalidation on every read, so the second read takes the offline path.
-        let knobs = Knobs { allow_private_egress: true, fresh_secs: 0, ..Default::default() };
-        let st = state_with(&db, knobs, xyz_source(format!("http://{addr}/img/{{z}}/{{x}}/{{y}}"))).await;
-        assert!(matches!(get_tile(&st, "s", 1, 0, 0, None).await, FetchOutcome::Hit(_)));
+        let knobs = Knobs {
+            allow_private_egress: true,
+            fresh_secs: 0,
+            ..Default::default()
+        };
+        let st = state_with(
+            &db,
+            knobs,
+            xyz_source(format!("http://{addr}/img/{{z}}/{{x}}/{{y}}")),
+        )
+        .await;
+        assert!(matches!(
+            get_tile(&st, "s", 1, 0, 0, None).await,
+            FetchOutcome::Hit(_)
+        ));
         // Point the source at a dead port so the revalidation fetch fails (offline).
-        st.sources.write().await.insert("s".into(), xyz_source("http://127.0.0.1:1/img/{z}/{x}/{y}".into()));
+        st.sources.write().await.insert(
+            "s".into(),
+            xyz_source("http://127.0.0.1:1/img/{z}/{x}/{y}".into()),
+        );
         match get_tile(&st, "s", 1, 0, 0, None).await {
-            FetchOutcome::Hit(r) => assert!(r.stale, "the offline read serves the stale cached tile"),
+            FetchOutcome::Hit(r) => {
+                assert!(r.stale, "the offline read serves the stale cached tile")
+            }
             _ => panic!("expected a stale hit"),
         }
     }
@@ -397,6 +506,9 @@ mod tests {
     async fn an_unknown_source_is_not_allowed() {
         let db = NamedTempFile::new().unwrap();
         let st = state_with(&db, dev_knobs(), xyz_source("http://x/{z}/{x}/{y}".into())).await;
-        assert!(matches!(get_tile(&st, "nope", 0, 0, 0, None).await, FetchOutcome::NotAllowed));
+        assert!(matches!(
+            get_tile(&st, "nope", 0, 0, 0, None).await,
+            FetchOutcome::NotAllowed
+        ));
     }
 }

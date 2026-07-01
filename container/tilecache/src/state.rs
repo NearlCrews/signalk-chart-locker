@@ -41,7 +41,8 @@ impl Resolve for GuardedResolver {
         Box::pin(async move {
             let host = name.as_str().to_owned();
             let iter = tokio::net::lookup_host((host.as_str(), 0)).await?;
-            let addrs: Vec<SocketAddr> = iter.filter(|a| allow || !is_forbidden_ip(a.ip())).collect();
+            let addrs: Vec<SocketAddr> =
+                iter.filter(|a| allow || !is_forbidden_ip(a.ip())).collect();
             let boxed: Addrs = Box::new(addrs.into_iter());
             Ok(boxed)
         })
@@ -132,7 +133,9 @@ impl AppState {
             .redirect(reqwest::redirect::Policy::none())
             .user_agent("signalk-chart-locker-tilecache")
             .timeout(std::time::Duration::from_secs(20))
-            .dns_resolver(Arc::new(GuardedResolver { allow_private: knobs.allow_private_egress }))
+            .dns_resolver(Arc::new(GuardedResolver {
+                allow_private: knobs.allow_private_egress,
+            }))
             .build()
             .expect("the rustls HTTP client builds with static webpki roots");
         // Captured before the struct literal moves `knobs` into its field.
@@ -161,7 +164,11 @@ impl AppState {
     /// A GET that enforces egress safety: it rejects a URL whose host is a forbidden IP literal (the
     /// DNS resolver never sees a literal), then takes an egress permit and sends the request. Returns
     /// Err on a rejected host, a permit failure, or a transport error.
-    pub async fn guarded_get(&self, url: &str, if_none_match: Option<&str>) -> Result<reqwest::Response, ()> {
+    pub async fn guarded_get(
+        &self,
+        url: &str,
+        if_none_match: Option<&str>,
+    ) -> Result<reqwest::Response, ()> {
         if !self.knobs.allow_private_egress && crate::ssrf::is_forbidden_ip_literal_url(url) {
             return Err(());
         }
@@ -180,7 +187,10 @@ impl AppState {
     pub async fn read_capped(&self, mut resp: reqwest::Response) -> Option<Bytes> {
         // Pre-size from Content-Length when the upstream sent one, clamped to the cap so a lying length
         // cannot force a large up-front allocation. The streaming cap below is the real bound.
-        let hint = resp.content_length().unwrap_or(0).min(self.knobs.max_blob_bytes as u64) as usize;
+        let hint = resp
+            .content_length()
+            .unwrap_or(0)
+            .min(self.knobs.max_blob_bytes as u64) as usize;
         let mut buf: Vec<u8> = Vec::with_capacity(hint);
         while let Some(chunk) = resp.chunk().await.ok()? {
             if buf.len() + chunk.len() > self.knobs.max_blob_bytes {
@@ -194,7 +204,9 @@ impl AppState {
     /// Get (or create) the per-key single-flight lock, so duplicate concurrent misses coalesce.
     pub async fn inflight_lock(&self, key: &str) -> Arc<Mutex<()>> {
         let mut map = self.inflight.lock().await;
-        map.entry(key.to_string()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+        map.entry(key.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     /// Drop a single-flight entry once this caller is its only holder, so the map does not grow
@@ -210,5 +222,8 @@ impl AppState {
 
 /// Seconds since the Unix epoch.
 pub fn now_secs() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }

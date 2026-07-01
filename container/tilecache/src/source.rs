@@ -28,11 +28,21 @@ pub enum UpstreamTemplate {
     #[serde(rename_all = "camelCase")]
     Wmts { url_template: String },
     #[serde(rename_all = "camelCase")]
-    Wms { base: String, layers: String, styles: String, version: String, format: String, transparent: bool },
+    Wms {
+        base: String,
+        layers: String,
+        styles: String,
+        version: String,
+        format: String,
+        transparent: bool,
+    },
     #[serde(rename_all = "camelCase")]
     Arcgis { base: String },
     #[serde(rename_all = "camelCase")]
-    Style { style_url: String, allowed_hosts: Vec<String> },
+    Style {
+        style_url: String,
+        allowed_hosts: Vec<String>,
+    },
 }
 
 #[cfg(test)]
@@ -50,7 +60,11 @@ mod tests {
         assert_eq!(s.id, "depth-gebco");
         assert_eq!(s.tile_size, 256);
         match s.upstream {
-            UpstreamTemplate::Wms { ref base, ref layers, .. } => {
+            UpstreamTemplate::Wms {
+                ref base,
+                ref layers,
+                ..
+            } => {
                 assert_eq!(base, "https://w/wms");
                 assert_eq!(layers, "GEBCO_LATEST");
             }
@@ -68,7 +82,8 @@ mod tests {
         let without: ChartSource = serde_json::from_str(
             r#"{"id":"s","title":"S","tileSize":256,"minzoom":0,"maxzoom":18,"attribution":"",
                 "upstream":{"mode":"xyz","urlTemplate":"https://h/{z}/{x}/{y}.png"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(without.vector_maxzoom, None);
     }
 
@@ -86,7 +101,10 @@ mod tests {
         )
         .unwrap();
         match style.upstream {
-            UpstreamTemplate::Style { ref style_url, ref allowed_hosts } => {
+            UpstreamTemplate::Style {
+                ref style_url,
+                ref allowed_hosts,
+            } => {
                 assert_eq!(style_url, "https://t/styles/liberty");
                 assert_eq!(allowed_hosts, &["t".to_string()]);
             }

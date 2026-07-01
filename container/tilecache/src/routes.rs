@@ -28,7 +28,10 @@ pub fn app(state: AppState) -> Router {
         .route("/warm", post(warm_start))
         .route("/warm/:job_id", get(warm_status))
         .route("/warm/:job_id/cancel", post(warm_cancel))
-        .route("/cache/region/:region_id", axum::routing::get(region_bytes_route).delete(delete_region_route))
+        .route(
+            "/cache/region/:region_id",
+            axum::routing::get(region_bytes_route).delete(delete_region_route),
+        )
         .merge(crate::style::style_routes())
         .merge(crate::geocode::geocode_routes())
         .with_state(state)
@@ -47,20 +50,33 @@ async fn stats(State(st): State<AppState>) -> Json<serde_json::Value> {
     // stats call from wedging the single-worker reactor. Each cache read degrades to its zero value on an
     // error, matching the prior unwrap_or, and the whole tuple defaults to zeros on a task join failure.
     let cache = st.cache.clone();
-    let (rows, bytes, pinned_bytes, pw, real_pinned, avg_rows, by_source_rows) = tokio::task::spawn_blocking(move || {
-        let (rows, bytes, pinned_bytes) = cache.stats().unwrap_or((0, 0, 0));
-        // The position-warm pseudo-region's pinned bytes, reported as positionWarmBytes.
-        let pw = cache.region_bytes(crate::state::POSITION_WARM_REGION_ID).unwrap_or(0);
-        // The exact real-region pinned bytes: a tile shared between a real region and the position-warm
-        // pseudo-region counts once here, so the regions budget gate is not under-counted by subtracting
-        // a shared tile fully.
-        let real_pinned = cache.real_region_pinned_bytes(crate::state::POSITION_WARM_REGION_ID).unwrap_or(0);
-        let avg_rows = cache.per_source_avg().unwrap_or_default();
-        let by_source_rows = cache.per_source_totals().unwrap_or_default();
-        (rows, bytes, pinned_bytes, pw, real_pinned, avg_rows, by_source_rows)
-    })
-    .await
-    .unwrap_or_default();
+    let (rows, bytes, pinned_bytes, pw, real_pinned, avg_rows, by_source_rows) =
+        tokio::task::spawn_blocking(move || {
+            let (rows, bytes, pinned_bytes) = cache.stats().unwrap_or((0, 0, 0));
+            // The position-warm pseudo-region's pinned bytes, reported as positionWarmBytes.
+            let pw = cache
+                .region_bytes(crate::state::POSITION_WARM_REGION_ID)
+                .unwrap_or(0);
+            // The exact real-region pinned bytes: a tile shared between a real region and the position-warm
+            // pseudo-region counts once here, so the regions budget gate is not under-counted by subtracting
+            // a shared tile fully.
+            let real_pinned = cache
+                .real_region_pinned_bytes(crate::state::POSITION_WARM_REGION_ID)
+                .unwrap_or(0);
+            let avg_rows = cache.per_source_avg().unwrap_or_default();
+            let by_source_rows = cache.per_source_totals().unwrap_or_default();
+            (
+                rows,
+                bytes,
+                pinned_bytes,
+                pw,
+                real_pinned,
+                avg_rows,
+                by_source_rows,
+            )
+        })
+        .await
+        .unwrap_or_default();
     let avg: serde_json::Map<String, serde_json::Value> = avg_rows
         .into_iter()
         .map(|(source, mean)| (source, serde_json::json!(mean)))
@@ -153,7 +169,8 @@ struct ScrollTtlBody {
 /// POST /cache/scroll-ttl: set only the live scroll TTL. A dedicated route so a live TTL edit does
 /// not re-push the source allowlist or clear the learned style state, which POST /config does.
 async fn set_scroll_ttl(State(st): State<AppState>, Json(body): Json<ScrollTtlBody>) -> StatusCode {
-    st.live_scroll_ttl_secs.store(body.ttl_secs, Ordering::Relaxed);
+    st.live_scroll_ttl_secs
+        .store(body.ttl_secs, Ordering::Relaxed);
     StatusCode::NO_CONTENT
 }
 
@@ -162,7 +179,9 @@ async fn set_scroll_ttl(State(st): State<AppState>, Json(body): Json<ScrollTtlBo
 async fn clear_scroll(State(st): State<AppState>) -> Response {
     let cache = st.cache.clone();
     match tokio::task::spawn_blocking(move || cache.clear_unpinned()).await {
-        Ok(Ok((bytes, rows))) => Json(serde_json::json!({ "freedBytes": bytes, "freedRows": rows })).into_response(),
+        Ok(Ok((bytes, rows))) => {
+            Json(serde_json::json!({ "freedBytes": bytes, "freedRows": rows })).into_response()
+        }
         Ok(Err(e)) => {
             eprintln!("tilecache: clear_unpinned failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -191,7 +210,10 @@ async fn region_bytes_route(State(st): State<AppState>, Path(region_id): Path<St
 }
 
 /// DELETE /cache/region/:region_id: drop a region's pins, then bound the scroll cache at the cap.
-async fn delete_region_route(State(st): State<AppState>, Path(region_id): Path<String>) -> StatusCode {
+async fn delete_region_route(
+    State(st): State<AppState>,
+    Path(region_id): Path<String>,
+) -> StatusCode {
     let cache = st.cache.clone();
     let cap = st.live_cap_bytes.load(Ordering::Relaxed);
     // delete_region walks region_tiles and can demote many pinned rows, so run it and the follow-up
@@ -218,12 +240,25 @@ async fn delete_region_route(State(st): State<AppState>, Path(region_id): Path<S
     }
 }
 
-async fn tile(State(st): State<AppState>, Path((source, z, x, y)): Path<(String, u32, u32, u32)>, headers: HeaderMap) -> Response {
-    let if_none_match = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).map(str::to_string);
+async fn tile(
+    State(st): State<AppState>,
+    Path((source, z, x, y)): Path<(String, u32, u32, u32)>,
+    headers: HeaderMap,
+) -> Response {
+    let if_none_match = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     match get_tile(&st, &source, z, x, y, if_none_match).await {
-        FetchOutcome::Hit(t) => crate::response::tile_http_response(&t.content_type, &t.etag, t.stale, t.body, None),
-        FetchOutcome::NotModified { etag } => crate::response::tile_http_response("", &etag, false, bytes::Bytes::new(), Some(&etag)),
-        FetchOutcome::Empty { status } => StatusCode::from_u16(status).unwrap_or(StatusCode::NOT_FOUND).into_response(),
+        FetchOutcome::Hit(t) => {
+            crate::response::tile_http_response(&t.content_type, &t.etag, t.stale, t.body, None)
+        }
+        FetchOutcome::NotModified { etag } => {
+            crate::response::tile_http_response("", &etag, false, bytes::Bytes::new(), Some(&etag))
+        }
+        FetchOutcome::Empty { status } => StatusCode::from_u16(status)
+            .unwrap_or(StatusCode::NOT_FOUND)
+            .into_response(),
         FetchOutcome::NotAllowed => StatusCode::NOT_FOUND.into_response(),
         FetchOutcome::BadRequest(_) => StatusCode::BAD_REQUEST.into_response(),
         FetchOutcome::Unavailable => StatusCode::BAD_GATEWAY.into_response(),
@@ -251,7 +286,9 @@ async fn warm_start(State(st): State<AppState>, Json(body): Json<WarmBody>) -> R
         .map(|id| crate::source::ChartSource {
             id: id.clone(),
             title: String::new(),
-            upstream: crate::source::UpstreamTemplate::Xyz { url_template: String::new() },
+            upstream: crate::source::UpstreamTemplate::Xyz {
+                url_template: String::new(),
+            },
             tile_size: 256,
             minzoom: body.minzoom,
             maxzoom: body.maxzoom,
@@ -268,10 +305,16 @@ async fn warm_start(State(st): State<AppState>, Json(body): Json<WarmBody>) -> R
         region_id: body.region_id,
     };
     match crate::warm::start_warm(&st, req).await {
-        Ok(job_id) => (StatusCode::OK, Json(serde_json::json!({ "jobId": job_id }))).into_response(),
+        Ok(job_id) => {
+            (StatusCode::OK, Json(serde_json::json!({ "jobId": job_id }))).into_response()
+        }
         Err(crate::warm::StartError::UnknownSource(_)) => StatusCode::NOT_FOUND.into_response(),
-        Err(crate::warm::StartError::TooMany(n)) => (StatusCode::BAD_REQUEST, format!("too many tiles: {n}")).into_response(),
-        Err(crate::warm::StartError::BadBbox(m)) | Err(crate::warm::StartError::BadZoom(m)) => (StatusCode::BAD_REQUEST, m).into_response(),
+        Err(crate::warm::StartError::TooMany(n)) => {
+            (StatusCode::BAD_REQUEST, format!("too many tiles: {n}")).into_response()
+        }
+        Err(crate::warm::StartError::BadBbox(m)) | Err(crate::warm::StartError::BadZoom(m)) => {
+            (StatusCode::BAD_REQUEST, m).into_response()
+        }
         Err(crate::warm::StartError::TooManyJobs) => StatusCode::TOO_MANY_REQUESTS.into_response(),
     }
 }
@@ -320,14 +363,22 @@ mod tests {
         );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, stub).await.unwrap(); });
+        tokio::spawn(async move {
+            axum::serve(listener, stub).await.unwrap();
+        });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         addr
     }
 
     fn dev_state(db: &NamedTempFile) -> AppState {
         let cache = Arc::new(TileCache::open(db.path()).unwrap());
-        AppState::new(cache, Knobs { allow_private_egress: true, ..Default::default() })
+        AppState::new(
+            cache,
+            Knobs {
+                allow_private_egress: true,
+                ..Default::default()
+            },
+        )
     }
 
     fn config_json(addr: SocketAddr) -> String {
@@ -346,7 +397,10 @@ mod tests {
     #[tokio::test]
     async fn health_is_ok_with_an_empty_allowlist() {
         let db = NamedTempFile::new().unwrap();
-        let resp = app(dev_state(&db)).oneshot(Request::get("/health").body(Body::empty()).unwrap()).await.unwrap();
+        let resp = app(dev_state(&db))
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         let (status, body) = body_string(resp).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("\"status\":\"ok\""));
@@ -361,22 +415,45 @@ mod tests {
 
         let cfg = router
             .clone()
-            .oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr))).unwrap())
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr)))
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(cfg.status(), StatusCode::NO_CONTENT);
 
-        let resp = router.clone().oneshot(Request::get("/tile/s/1/0/0").body(Body::empty()).unwrap()).await.unwrap();
+        let resp = router
+            .clone()
+            .oneshot(Request::get("/tile/s/1/0/0").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(resp.headers().get(header::ETAG).is_some());
-        assert_eq!(resp.headers().get(header::CONTENT_TYPE).unwrap(), "image/png");
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/png"
+        );
 
         // Unknown source 404s.
-        let unknown = router.clone().oneshot(Request::get("/tile/nope/0/0/0").body(Body::empty()).unwrap()).await.unwrap();
+        let unknown = router
+            .clone()
+            .oneshot(
+                Request::get("/tile/nope/0/0/0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
 
         // Out-of-range tile 400s (x 2 at z 1).
-        let oob = router.oneshot(Request::get("/tile/s/1/2/0").body(Body::empty()).unwrap()).await.unwrap();
+        let oob = router
+            .oneshot(Request::get("/tile/s/1/2/0").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         assert_eq!(oob.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -386,10 +463,31 @@ mod tests {
         let addr = spawn_stub(hits).await;
         let db = NamedTempFile::new().unwrap();
         let router = app(dev_state(&db));
-        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr))).unwrap()).await.unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         // Re-push an empty allowlist.
-        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(r#"{"sources":[]}"#)).unwrap()).await.unwrap();
-        let resp = router.oneshot(Request::get("/tile/s/1/0/0").body(Body::empty()).unwrap()).await.unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"sources":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = router
+            .oneshot(Request::get("/tile/s/1/0/0").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
@@ -399,7 +497,16 @@ mod tests {
         let addr = spawn_stub(hits).await;
         let db = NamedTempFile::new().unwrap();
         let router = app(dev_state(&db));
-        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr))).unwrap()).await.unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         // Global bbox at maxzoom 12 projects far past the 2_000_000 tile hard cap, triggering TooMany.
         let warm = router.oneshot(
             Request::post("/warm").header("content-type", "application/json")
@@ -414,25 +521,52 @@ mod tests {
         let addr = spawn_stub(hits).await;
         let db = NamedTempFile::new().unwrap();
         let router = app(dev_state(&db));
-        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr))).unwrap()).await.unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         // Longitude-inverted bbox (west >= east) triggers BadBbox.
-        let bad_bbox = router.clone().oneshot(
-            Request::post("/warm").header("content-type", "application/json")
-                .body(Body::from(r#"{"sources":["s"],"bbox":[10.0,-1.0,-10.0,1.0],"minzoom":0,"maxzoom":0}"#)).unwrap()
-        ).await.unwrap();
+        let bad_bbox = router
+            .clone()
+            .oneshot(
+                Request::post("/warm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"sources":["s"],"bbox":[10.0,-1.0,-10.0,1.0],"minzoom":0,"maxzoom":0}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(bad_bbox.status(), StatusCode::BAD_REQUEST);
         // minzoom > maxzoom triggers BadZoom.
-        let bad_zoom = router.oneshot(
-            Request::post("/warm").header("content-type", "application/json")
-                .body(Body::from(r#"{"sources":["s"],"bbox":[-1.0,-1.0,1.0,1.0],"minzoom":5,"maxzoom":2}"#)).unwrap()
-        ).await.unwrap();
+        let bad_zoom = router
+            .oneshot(
+                Request::post("/warm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"sources":["s"],"bbox":[-1.0,-1.0,1.0,1.0],"minzoom":5,"maxzoom":2}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(bad_zoom.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
     async fn cache_stats_reports_counters() {
         let db = NamedTempFile::new().unwrap();
-        let resp = app(dev_state(&db)).oneshot(Request::get("/cache/stats").body(Body::empty()).unwrap()).await.unwrap();
+        let resp = app(dev_state(&db))
+            .oneshot(Request::get("/cache/stats").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         let (status, body) = body_string(resp).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("\"rows\":0"));
@@ -444,27 +578,77 @@ mod tests {
         let addr = spawn_stub(hits).await;
         let db = NamedTempFile::new().unwrap();
         let router = app(dev_state(&db));
-        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr))).unwrap()).await.unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-        let warm = router.clone().oneshot(
-            Request::post("/warm").header("content-type", "application/json")
-                .body(Body::from(r#"{"sources":["s"],"bbox":[-1.0,-1.0,1.0,1.0],"minzoom":0,"maxzoom":1}"#)).unwrap()
-        ).await.unwrap();
+        let warm = router
+            .clone()
+            .oneshot(
+                Request::post("/warm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"sources":["s"],"bbox":[-1.0,-1.0,1.0,1.0],"minzoom":0,"maxzoom":1}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let (status, body) = body_string(warm).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("\"jobId\""));
-        let job_id = body.split("\"jobId\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
+        let job_id = body
+            .split("\"jobId\":\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .to_string();
 
-        let status_resp = router.clone().oneshot(Request::get(format!("/warm/{job_id}")).body(Body::empty()).unwrap()).await.unwrap();
+        let status_resp = router
+            .clone()
+            .oneshot(
+                Request::get(format!("/warm/{job_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let (status_code, status_body) = body_string(status_resp).await;
         assert_eq!(status_code, StatusCode::OK);
-        assert!(status_body.contains("\"total\""), "status snapshot contains total field");
-        assert!(status_body.contains("\"state\""), "status snapshot contains state field");
+        assert!(
+            status_body.contains("\"total\""),
+            "status snapshot contains total field"
+        );
+        assert!(
+            status_body.contains("\"state\""),
+            "status snapshot contains state field"
+        );
 
-        let cancel = router.clone().oneshot(Request::post(format!("/warm/{job_id}/cancel")).body(Body::empty()).unwrap()).await.unwrap();
+        let cancel = router
+            .clone()
+            .oneshot(
+                Request::post(format!("/warm/{job_id}/cancel"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(cancel.status(), StatusCode::NO_CONTENT);
 
-        let unknown = router.clone().oneshot(Request::get("/warm/nope").body(Body::empty()).unwrap()).await.unwrap();
+        let unknown = router
+            .clone()
+            .oneshot(Request::get("/warm/nope").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
     }
 
@@ -481,7 +665,9 @@ mod tests {
         );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, slow).await.unwrap(); });
+        tokio::spawn(async move {
+            axum::serve(listener, slow).await.unwrap();
+        });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let db = NamedTempFile::new().unwrap();
@@ -490,9 +676,16 @@ mod tests {
                 "upstream":{{"mode":"xyz","urlTemplate":"http://{addr}/slow/{{z}}/{{x}}/{{y}}"}}}}],"publicBase":"/p"}}"#
         );
         let router = app(dev_state(&db));
-        router.clone().oneshot(
-            Request::post("/config").header("content-type","application/json").body(Body::from(slow_cfg)).unwrap()
-        ).await.unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(slow_cfg))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
         // Fill all MAX_ACTIVE_WARM_JOBS slots with large-bbox jobs that won't finish quickly.
         for _ in 0..crate::warm::MAX_ACTIVE_WARM_JOBS {
@@ -504,10 +697,18 @@ mod tests {
         }
 
         // The next start must return 429.
-        let extra = router.clone().oneshot(
-            Request::post("/warm").header("content-type","application/json")
-                .body(Body::from(r#"{"sources":["s"],"bbox":[-1.0,-1.0,1.0,1.0],"minzoom":0,"maxzoom":0}"#)).unwrap()
-        ).await.unwrap();
+        let extra = router
+            .clone()
+            .oneshot(
+                Request::post("/warm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"sources":["s"],"bbox":[-1.0,-1.0,1.0,1.0],"minzoom":0,"maxzoom":0}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(extra.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
@@ -517,7 +718,16 @@ mod tests {
         let addr = spawn_stub(hits).await;
         let db = NamedTempFile::new().unwrap();
         let router = app(dev_state(&db));
-        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr))).unwrap()).await.unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let warm = router.oneshot(
             Request::post("/warm").header("content-type", "application/json")
                 .body(Body::from(r#"{"sources":["nope"],"bbox":[-1.0,-1.0,1.0,1.0],"minzoom":0,"maxzoom":0}"#)).unwrap()
@@ -531,14 +741,33 @@ mod tests {
         let addr = spawn_stub(hits).await;
         let db = NamedTempFile::new().unwrap();
         let router = app(dev_state(&db));
-        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr))).unwrap()).await.unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         // Warm one tile through the live path so a real 200 row exists.
-        router.clone().oneshot(Request::get("/tile/s/1/0/0").body(Body::empty()).unwrap()).await.unwrap();
-        let resp = router.oneshot(Request::get("/cache/stats").body(Body::empty()).unwrap()).await.unwrap();
+        router
+            .clone()
+            .oneshot(Request::get("/tile/s/1/0/0").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let resp = router
+            .oneshot(Request::get("/cache/stats").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         let (status, body) = body_string(resp).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("\"cap\":"), "stats reports the byte cap");
-        assert!(body.contains("\"perSourceAvgBytes\""), "stats reports the per-source average");
+        assert!(
+            body.contains("\"perSourceAvgBytes\""),
+            "stats reports the per-source average"
+        );
         assert!(body.contains("\"s\":"), "the warmed source has an average");
     }
 
@@ -548,13 +777,35 @@ mod tests {
         let addr = spawn_stub(hits).await;
         let db = NamedTempFile::new().unwrap();
         let router = app(dev_state(&db));
-        router.clone().oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(config_json(addr))).unwrap()).await.unwrap();
-        router.clone().oneshot(Request::get("/tile/s/1/0/0").body(Body::empty()).unwrap()).await.unwrap();
-        let resp = router.oneshot(Request::get("/cache/stats").body(Body::empty()).unwrap()).await.unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(Request::get("/tile/s/1/0/0").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let resp = router
+            .oneshot(Request::get("/cache/stats").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         let (status, body) = body_string(resp).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("\"bySource\""), "stats reports the per-source totals array");
-        assert!(body.contains("\"source\":\"s\""), "the warmed source appears in the per-source totals");
+        assert!(
+            body.contains("\"bySource\""),
+            "stats reports the per-source totals array"
+        );
+        assert!(
+            body.contains("\"source\":\"s\""),
+            "the warmed source appears in the per-source totals"
+        );
     }
 
     #[tokio::test]
@@ -568,27 +819,68 @@ mod tests {
             r#"{{"sources":[{{"id":"s","title":"S","tileSize":256,"minzoom":0,"maxzoom":18,"attribution":"",
                 "upstream":{{"mode":"xyz","urlTemplate":"http://{addr}/img/{{z}}/{{x}}/{{y}}"}}}}],"publicBase":"/p","scrollTtlSecs":86400}}"#
         );
-        let resp = router.oneshot(Request::post("/config").header("content-type", "application/json").body(Body::from(cfg)).unwrap()).await.unwrap();
+        let resp = router
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(cfg))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        assert_eq!(state.live_scroll_ttl_secs.load(Ordering::Relaxed), 86_400, "the pushed TTL reaches the live field");
+        assert_eq!(
+            state.live_scroll_ttl_secs.load(Ordering::Relaxed),
+            86_400,
+            "the pushed TTL reaches the live field"
+        );
     }
 
     #[tokio::test]
     async fn scroll_ttl_route_sets_the_live_ttl_and_sweep_uses_it() {
         let db = NamedTempFile::new().unwrap();
         let state = dev_state(&db);
-        state.cache.put("s", 0, 0, 0, &crate::cache::CachedTile {
-            content_type: "image/png".into(), strong_etag: "e".into(), upstream_validator: None,
-            status: 200, fetched_at: 0, last_access: 0, bytes: 10, blob: Some(bytes::Bytes::from(vec![0u8; 10])),
-        }, false, 0).unwrap();
+        state
+            .cache
+            .put(
+                "s",
+                0,
+                0,
+                0,
+                &crate::cache::CachedTile {
+                    content_type: "image/png".into(),
+                    strong_etag: "e".into(),
+                    upstream_validator: None,
+                    status: 200,
+                    fetched_at: 0,
+                    last_access: 0,
+                    bytes: 10,
+                    blob: Some(bytes::Bytes::from(vec![0u8; 10])),
+                },
+                false,
+                0,
+            )
+            .unwrap();
         let router = app(state.clone());
-        let set = router.clone().oneshot(
-            Request::post("/cache/scroll-ttl").header("content-type", "application/json")
-                .body(Body::from(r#"{"ttlSecs":1}"#)).unwrap()
-        ).await.unwrap();
+        let set = router
+            .clone()
+            .oneshot(
+                Request::post("/cache/scroll-ttl")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"ttlSecs":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(set.status(), StatusCode::NO_CONTENT);
         assert_eq!(state.live_scroll_ttl_secs.load(Ordering::Relaxed), 1);
-        let (freed, rows) = state.cache.sweep_aged_unpinned(state.live_scroll_ttl_secs.load(Ordering::Relaxed), 1_000_000).unwrap();
+        let (freed, rows) = state
+            .cache
+            .sweep_aged_unpinned(
+                state.live_scroll_ttl_secs.load(Ordering::Relaxed),
+                1_000_000,
+            )
+            .unwrap();
         assert_eq!((freed, rows), (10, 1));
     }
 
@@ -596,15 +888,42 @@ mod tests {
     async fn clear_scroll_route_reports_freed_and_keeps_pinned() {
         let db = NamedTempFile::new().unwrap();
         let state = dev_state(&db);
-        state.cache.put("s", 0, 0, 0, &crate::cache::CachedTile {
-            content_type: "image/png".into(), strong_etag: "e".into(), upstream_validator: None,
-            status: 200, fetched_at: 0, last_access: 0, bytes: 25, blob: Some(bytes::Bytes::from(vec![0u8; 25])),
-        }, false, 0).unwrap();
+        state
+            .cache
+            .put(
+                "s",
+                0,
+                0,
+                0,
+                &crate::cache::CachedTile {
+                    content_type: "image/png".into(),
+                    strong_etag: "e".into(),
+                    upstream_validator: None,
+                    status: 200,
+                    fetched_at: 0,
+                    last_access: 0,
+                    bytes: 25,
+                    blob: Some(bytes::Bytes::from(vec![0u8; 25])),
+                },
+                false,
+                0,
+            )
+            .unwrap();
         let router = app(state.clone());
-        let resp = router.oneshot(Request::post("/cache/clear-scroll").body(Body::empty()).unwrap()).await.unwrap();
+        let resp = router
+            .oneshot(
+                Request::post("/cache/clear-scroll")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let (status, body) = body_string(resp).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("\"freedBytes\":25"), "reports the freed bytes");
+        assert!(
+            body.contains("\"freedBytes\":25"),
+            "reports the freed bytes"
+        );
         assert!(body.contains("\"freedRows\":1"), "reports the freed rows");
     }
 }

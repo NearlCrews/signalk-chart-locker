@@ -100,7 +100,13 @@ mod tests {
 
     fn dev_state(db: &NamedTempFile) -> AppState {
         let cache = Arc::new(TileCache::open(db.path()).unwrap());
-        AppState::new(cache, Knobs { allow_private_egress: true, ..Default::default() })
+        AppState::new(
+            cache,
+            Knobs {
+                allow_private_egress: true,
+                ..Default::default()
+            },
+        )
     }
 
     #[tokio::test]
@@ -108,23 +114,71 @@ mod tests {
         let db = NamedTempFile::new().unwrap();
         let router = app(dev_state(&db));
         // Missing lat.
-        let r = router.clone().oneshot(Request::get("/geocode?lon=-122.4").body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(r.status(), StatusCode::BAD_REQUEST, "missing lat must be 400");
+        let r = router
+            .clone()
+            .oneshot(
+                Request::get("/geocode?lon=-122.4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::BAD_REQUEST,
+            "missing lat must be 400"
+        );
         // Missing lon.
-        let r2 = router.clone().oneshot(Request::get("/geocode?lat=37.7").body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(r2.status(), StatusCode::BAD_REQUEST, "missing lon must be 400");
+        let r2 = router
+            .clone()
+            .oneshot(
+                Request::get("/geocode?lat=37.7")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            r2.status(),
+            StatusCode::BAD_REQUEST,
+            "missing lon must be 400"
+        );
         // Out-of-range lat (> 90).
-        let r3 = router.clone().oneshot(Request::get("/geocode?lat=91.0&lon=-122.4").body(Body::empty()).unwrap()).await.unwrap();
+        let r3 = router
+            .clone()
+            .oneshot(
+                Request::get("/geocode?lat=91.0&lon=-122.4")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(r3.status(), StatusCode::BAD_REQUEST, "lat > 90 must be 400");
         // Out-of-range lon (> 180).
-        let r4 = router.oneshot(Request::get("/geocode?lat=37.7&lon=181.0").body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(r4.status(), StatusCode::BAD_REQUEST, "lon > 180 must be 400");
+        let r4 = router
+            .oneshot(
+                Request::get("/geocode?lat=37.7&lon=181.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            r4.status(),
+            StatusCode::BAD_REQUEST,
+            "lon > 180 must be 400"
+        );
     }
 
     #[test]
     fn host_is_nominatim_accepts_only_the_allowlisted_host() {
-        assert!(host_is_nominatim(&format!("https://{}/reverse?format=jsonv2&lat=37.77&lon=-122.41", NOMINATIM_HOST)));
+        assert!(host_is_nominatim(&format!(
+            "https://{}/reverse?format=jsonv2&lat=37.77&lon=-122.41",
+            NOMINATIM_HOST
+        )));
         assert!(!host_is_nominatim("https://evil.example/reverse"));
-        assert!(!host_is_nominatim("https://nominatim.openstreetmap.org.evil.example/reverse"));
+        assert!(!host_is_nominatim(
+            "https://nominatim.openstreetmap.org.evil.example/reverse"
+        ));
     }
 }

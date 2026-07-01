@@ -74,7 +74,10 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
         return Err(StartError::UnknownSource("no sources".into()));
     }
     if req.minzoom > req.maxzoom {
-        return Err(StartError::BadZoom(format!("minzoom {} > maxzoom {}", req.minzoom, req.maxzoom)));
+        return Err(StartError::BadZoom(format!(
+            "minzoom {} > maxzoom {}",
+            req.minzoom, req.maxzoom
+        )));
     }
     let b = req.bbox;
     if !b.iter().all(|v| v.is_finite()) || b[0] >= b[2] || b[1] >= b[3] {
@@ -89,7 +92,10 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
                 Some(known) if matches!(known.upstream, UpstreamTemplate::Style { .. }) => {
                     // The style is not fetched yet, so count one sub-source's worth at the registry
                     // vector maxzoom for the hard-cap gate; run() enumerates each learned sub-source.
-                    let clamp = known.vector_maxzoom.unwrap_or(known.maxzoom).min(known.maxzoom);
+                    let clamp = known
+                        .vector_maxzoom
+                        .unwrap_or(known.maxzoom)
+                        .min(known.maxzoom);
                     let mut tmp = known.clone();
                     tmp.maxzoom = clamp;
                     total += tile_count_in_bbox(&tmp, b, req.minzoom, req.maxzoom);
@@ -108,7 +114,14 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
     let id = format!("warm-{}", state.warm_seq.fetch_add(1, Ordering::Relaxed));
     let cancel = Arc::new(AtomicBool::new(false));
     let job = Arc::new(tokio::sync::Mutex::new(WarmJob {
-        total, done: 0, skipped: 0, bytes: 0, errors: 0, state: WarmState::Running, cancel: cancel.clone(), finished_at: None,
+        total,
+        done: 0,
+        skipped: 0,
+        bytes: 0,
+        errors: 0,
+        state: WarmState::Running,
+        cancel: cancel.clone(),
+        finished_at: None,
         region_id: req.region_id.clone(),
     }));
     {
@@ -116,12 +129,15 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
         reap(&mut jobs);
         // Count and insert under the write lock so the cap check and the insert are atomic with
         // respect to other concurrent start_warm calls.
-        let active = jobs.values().filter(|j| {
-            match j.try_lock() {
-                Ok(g) => g.state == WarmState::Running,
-                Err(_) => true, // locked by the driver mid-run: treat as running
-            }
-        }).count();
+        let active = jobs
+            .values()
+            .filter(|j| {
+                match j.try_lock() {
+                    Ok(g) => g.state == WarmState::Running,
+                    Err(_) => true, // locked by the driver mid-run: treat as running
+                }
+            })
+            .count();
         if active >= MAX_ACTIVE_WARM_JOBS {
             return Err(StartError::TooManyJobs);
         }
@@ -130,10 +146,21 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
     // Resolve the allowlisted source definitions (not the client-sent ones) so the warm uses the trusted config.
     let resolved: Vec<ChartSource> = {
         let map = state.sources.read().await;
-        req.sources.iter().filter_map(|s| map.get(&s.id).cloned()).collect()
+        req.sources
+            .iter()
+            .filter_map(|s| map.get(&s.id).cloned())
+            .collect()
     };
     let st = state.clone();
-    tokio::spawn(run(st, job, resolved, b, req.minzoom, req.maxzoom, req.region_id));
+    tokio::spawn(run(
+        st,
+        job,
+        resolved,
+        b,
+        req.minzoom,
+        req.maxzoom,
+        req.region_id,
+    ));
     Ok(id)
 }
 
@@ -162,7 +189,10 @@ pub async fn cancel_warm(state: &AppState, job_id: &str) -> bool {
 fn reap(jobs: &mut std::collections::HashMap<String, Arc<tokio::sync::Mutex<WarmJob>>>) {
     let now = now_secs();
     jobs.retain(|_, j| match j.try_lock() {
-        Ok(g) => g.finished_at.map(|t| now - t < WARM_JOB_TTL_SECS).unwrap_or(true),
+        Ok(g) => g
+            .finished_at
+            .map(|t| now - t < WARM_JOB_TTL_SECS)
+            .unwrap_or(true),
         Err(_) => true,
     });
 }
@@ -182,7 +212,11 @@ fn effective_budget(st: &AppState, region_id: Option<&str>) -> i64 {
     let cap = st.live_cap_bytes.load(Ordering::Relaxed);
     let r = st.live_regions_budget.load(Ordering::Relaxed);
     let p = st.live_position_warm_budget.load(Ordering::Relaxed);
-    let raw = if region_id == Some(crate::state::POSITION_WARM_REGION_ID) { r } else { r - p };
+    let raw = if region_id == Some(crate::state::POSITION_WARM_REGION_ID) {
+        r
+    } else {
+        r - p
+    };
     raw.min(cap).max(0)
 }
 
@@ -205,12 +239,20 @@ async fn expand_warm_sources(st: &AppState, sources: Vec<ChartSource>) -> Vec<Ch
         let Some(learned) = learned else { continue };
         let registry_max = source.vector_maxzoom.unwrap_or(source.maxzoom);
         for (name, templates) in &learned.source_tiles {
-            let Some(template) = templates.first() else { continue };
-            let native = learned.source_maxzoom.get(name).copied().unwrap_or(registry_max);
+            let Some(template) = templates.first() else {
+                continue;
+            };
+            let native = learned
+                .source_maxzoom
+                .get(name)
+                .copied()
+                .unwrap_or(registry_max);
             out.push(ChartSource {
                 id: format!("style:{}:{}", source.id, name),
                 title: source.title.clone(),
-                upstream: UpstreamTemplate::Xyz { url_template: template.clone() },
+                upstream: UpstreamTemplate::Xyz {
+                    url_template: template.clone(),
+                },
                 tile_size: source.tile_size,
                 minzoom: source.minzoom,
                 maxzoom: registry_max.min(native),
@@ -248,7 +290,11 @@ async fn flush_pinned(st: &AppState, batch: &mut Vec<WarmRow>, region: &str) {
     let cache = st.cache.clone();
     let rows = std::mem::take(batch);
     let region_owned = region.to_string();
-    match tokio::task::spawn_blocking(move || cache.put_many_pinned(&rows, budget, cap, Some(&region_owned), now)).await {
+    match tokio::task::spawn_blocking(move || {
+        cache.put_many_pinned(&rows, budget, cap, Some(&region_owned), now)
+    })
+    .await
+    {
         Ok(r) => crate::fetcher::log_cache_err(r),
         Err(e) => eprintln!("tilecache: assets flush task failed: {e}"),
     }
@@ -258,7 +304,15 @@ async fn flush_pinned(st: &AppState, batch: &mut Vec<WarmRow>, region: &str) {
 // else fetch it (host-checked, status-returning) and push a WarmRow with the synthetic key. Builds the
 // WarmRow directly rather than through warm_one because the sprite JSON is rejected by the tile
 // content-type gate.
-async fn warm_one_asset(st: &AppState, cache_source: &str, x: u32, url: &str, allowed: &[String], region: &str, batch: &mut Vec<WarmRow>) {
+async fn warm_one_asset(
+    st: &AppState,
+    cache_source: &str,
+    x: u32,
+    url: &str,
+    allowed: &[String],
+    region: &str,
+    batch: &mut Vec<WarmRow>,
+) {
     let now = now_secs();
     // Skip-but-pin a fresh cached asset under one lock, on the blocking pool so the warm's SQLite does not
     // stall the reactor.
@@ -269,7 +323,17 @@ async fn warm_one_asset(st: &AppState, cache_source: &str, x: u32, url: &str, al
     let neg_ttl = st.knobs.negative_ttl_secs;
     let budget = effective_budget(st, Some(region));
     let pinned = tokio::task::spawn_blocking(move || {
-        cache.pin_if_fresh(&cache_source_owned, 0, x, 0, now, fresh_secs, neg_ttl, budget, Some(&region_owned))
+        cache.pin_if_fresh(
+            &cache_source_owned,
+            0,
+            x,
+            0,
+            now,
+            fresh_secs,
+            neg_ttl,
+            budget,
+            Some(&region_owned),
+        )
     })
     .await;
     match pinned {
@@ -281,16 +345,28 @@ async fn warm_one_asset(st: &AppState, cache_source: &str, x: u32, url: &str, al
     if !crate::style::host_allowed(url, allowed) {
         return;
     }
-    let _permit = match st.warm_semaphore.clone().acquire_owned().await { Ok(p) => p, Err(_) => return };
+    let _permit = match st.warm_semaphore.clone().acquire_owned().await {
+        Ok(p) => p,
+        Err(_) => return,
+    };
     // A missing asset (404 or 204) is not pinned: a pinned negative is never evicted, so it would
     // permanently mask a glyph range or sprite variant the upstream later begins serving. Leaving it
     // uncached lets the next basemap warm and the live route refetch it, so only a 200 is stored.
     if let Ok((200, f)) = crate::fetcher::fetch_upstream(st, url, None).await {
         batch.push(WarmRow {
-            source: cache_source.to_string(), z: 0, x, y: 0,
+            source: cache_source.to_string(),
+            z: 0,
+            x,
+            y: 0,
             tile: CachedTile {
-                content_type: f.content_type, strong_etag: crate::fetcher::strong_etag(&f.body), upstream_validator: None,
-                status: 200, fetched_at: now, last_access: now, bytes: f.body.len() as i64, blob: Some(f.body),
+                content_type: f.content_type,
+                strong_etag: crate::fetcher::strong_etag(&f.body),
+                upstream_validator: None,
+                status: 200,
+                fetched_at: now,
+                last_access: now,
+                bytes: f.body.len() as i64,
+                blob: Some(f.body),
             },
         });
     }
@@ -301,7 +377,11 @@ async fn warm_one_asset(st: &AppState, cache_source: &str, x: u32, url: &str, al
 // Each asset is skipped when already fresh-pinned, so this is idempotent and recovers a partial set.
 // It never touches the region job's counters and bounds its fan-out through the warm semaphore.
 async fn warm_basemap_assets(st: &AppState, style_source: &str) {
-    if st.assets_warming.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+    if st
+        .assets_warming
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
         return; // another basemap warm is already fetching the set
     }
     let _flag = AssetsFlag(&st.assets_warming);
@@ -310,12 +390,25 @@ async fn warm_basemap_assets(st: &AppState, style_source: &str) {
     // Snapshot the learned templates and the allowed hosts, then drop the read guards before fetching.
     let (glyph_template, fontstacks, sprite_base, allowed) = {
         let ss = st.style_state.read().await;
-        let Some(s) = ss.get(style_source) else { return };
-        let allowed = match st.sources.read().await.get(style_source).map(|c| c.upstream.clone()) {
+        let Some(s) = ss.get(style_source) else {
+            return;
+        };
+        let allowed = match st
+            .sources
+            .read()
+            .await
+            .get(style_source)
+            .map(|c| c.upstream.clone())
+        {
             Some(UpstreamTemplate::Style { allowed_hosts, .. }) => allowed_hosts,
             _ => return,
         };
-        (s.glyphs.clone(), s.fontstacks.clone(), s.sprite_base.clone(), allowed)
+        (
+            s.glyphs.clone(),
+            s.fontstacks.clone(),
+            s.sprite_base.clone(),
+            allowed,
+        )
     };
 
     let mut batch: Vec<WarmRow> = Vec::with_capacity(WARM_BATCH);
@@ -325,8 +418,19 @@ async fn warm_basemap_assets(st: &AppState, style_source: &str) {
             let encoded = crate::style::encode_fontstack(fontstack);
             for range_start in (0..GLYPH_RANGE_END).step_by(GLYPH_RANGE_STEP as usize) {
                 let range = format!("{range_start}-{}.pbf", range_start + GLYPH_RANGE_STEP - 1);
-                let url = template.replace("{fontstack}", &encoded).replace("{range}.pbf", &range);
-                warm_one_asset(st, &cache_source, range_start, &url, &allowed, region, &mut batch).await;
+                let url = template
+                    .replace("{fontstack}", &encoded)
+                    .replace("{range}.pbf", &range);
+                warm_one_asset(
+                    st,
+                    &cache_source,
+                    range_start,
+                    &url,
+                    &allowed,
+                    region,
+                    &mut batch,
+                )
+                .await;
                 if batch.len() >= WARM_BATCH {
                     flush_pinned(st, &mut batch, region).await;
                 }
@@ -335,7 +439,12 @@ async fn warm_basemap_assets(st: &AppState, style_source: &str) {
     }
     if let Some(base) = sprite_base {
         let cache_source = crate::style::sprite_cache_source(style_source);
-        for (idx, suffix) in [(0u32, ".json"), (1, ".png"), (2, "@2x.json"), (3, "@2x.png")] {
+        for (idx, suffix) in [
+            (0u32, ".json"),
+            (1, ".png"),
+            (2, "@2x.json"),
+            (3, "@2x.png"),
+        ] {
             let url = format!("{base}{suffix}");
             warm_one_asset(st, &cache_source, idx, &url, &allowed, region, &mut batch).await;
         }
@@ -347,7 +456,14 @@ async fn warm_basemap_assets(st: &AppState, style_source: &str) {
 
 // Fetch and classify one tile, reusing the guarded egress path. The caller holds the warm permit, so
 // this does not take it; guarded_get still takes an egress permit inside.
-async fn warm_one(st: &AppState, source: &ChartSource, z: u32, x: u32, y: u32, region_id: Option<&str>) -> Fetched {
+async fn warm_one(
+    st: &AppState,
+    source: &ChartSource,
+    z: u32,
+    x: u32,
+    y: u32,
+    region_id: Option<&str>,
+) -> Fetched {
     let now = now_secs();
     // pin_if_fresh does the freshness check, the budget gate, and the pin under one lock, closing the
     // race where a concurrent evict_to could delete the row between a separate get() and pin() call. It
@@ -359,7 +475,17 @@ async fn warm_one(st: &AppState, source: &ChartSource, z: u32, x: u32, y: u32, r
     let neg_ttl = st.knobs.negative_ttl_secs;
     let budget = effective_budget(st, region_id);
     let pinned = tokio::task::spawn_blocking(move || {
-        cache.pin_if_fresh(&source_id, z, x, y, now, fresh_secs, neg_ttl, budget, region_owned.as_deref())
+        cache.pin_if_fresh(
+            &source_id,
+            z,
+            x,
+            y,
+            now,
+            fresh_secs,
+            neg_ttl,
+            budget,
+            region_owned.as_deref(),
+        )
     })
     .await;
     match pinned {
@@ -378,18 +504,36 @@ async fn warm_one(st: &AppState, source: &ChartSource, z: u32, x: u32, y: u32, r
                 return Fetched::Error;
             }
             Fetched::Tile(WarmRow {
-                source: source.id.clone(), z, x, y,
+                source: source.id.clone(),
+                z,
+                x,
+                y,
                 tile: CachedTile {
-                    content_type: f.content_type, strong_etag: strong_etag(&f.body), upstream_validator: f.validator,
-                    status: 200, fetched_at: now, last_access: now, bytes: f.body.len() as i64, blob: Some(f.body),
+                    content_type: f.content_type,
+                    strong_etag: strong_etag(&f.body),
+                    upstream_validator: f.validator,
+                    status: 200,
+                    fetched_at: now,
+                    last_access: now,
+                    bytes: f.body.len() as i64,
+                    blob: Some(f.body),
                 },
             })
         }
         Ok((404, _)) | Ok((204, _)) => Fetched::Negative(WarmRow {
-            source: source.id.clone(), z, x, y,
+            source: source.id.clone(),
+            z,
+            x,
+            y,
             tile: CachedTile {
-                content_type: String::new(), strong_etag: String::new(), upstream_validator: None,
-                status: 404, fetched_at: now, last_access: now, bytes: 0, blob: None,
+                content_type: String::new(),
+                strong_etag: String::new(),
+                upstream_validator: None,
+                status: 404,
+                fetched_at: now,
+                last_access: now,
+                bytes: 0,
+                blob: None,
             },
         }),
         _ => Fetched::Error,
@@ -398,7 +542,15 @@ async fn warm_one(st: &AppState, source: &ChartSource, z: u32, x: u32, y: u32, r
 
 // The warm driver: enumerate lazily, bound in-flight fetches to WARM_CONCURRENCY via owned permits and a
 // JoinSet, drain results into a batch, and flush each batch pinned with the pre-store budget check.
-async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, sources: Vec<ChartSource>, bbox: [f64; 4], zmin: u32, zmax: u32, region_id: Option<String>) {
+async fn run(
+    st: AppState,
+    job: Arc<tokio::sync::Mutex<WarmJob>>,
+    sources: Vec<ChartSource>,
+    bbox: [f64; 4],
+    zmin: u32,
+    zmax: u32,
+    region_id: Option<String>,
+) {
     // Clear this region's prior pins so a re-download or a position-warm re-pin replaces the prior tile
     // set with no orphan join rows (a narrower box leaves nothing pinned outside the new set).
     if let Some(rid) = region_id.clone() {
@@ -410,7 +562,8 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, sources: Vec<C
     }
     // Capture the style source (if any) before expansion replaces it with synthetic XYZ sub-sources,
     // so the folded assets warm can look up the learned glyph template, fontstacks, and sprite base.
-    let style_source_id: Option<String> = sources.iter()
+    let style_source_id: Option<String> = sources
+        .iter()
         .find(|s| matches!(s.upstream, UpstreamTemplate::Style { .. }))
         .map(|s| s.id.clone());
     // Expand any style source into synthetic XYZ sub-sources keyed style:{source}:{name} (learning the
@@ -420,7 +573,10 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, sources: Vec<C
     // in-style source: the pre-spawn hard-cap check in start_warm counts a style as a single sub-source,
     // so a multi-source style could otherwise enumerate past WARM_TILE_HARD_CAP. Also correct the job
     // total to the real expanded count so progress is accurate.
-    let expanded_total: u64 = sources.iter().map(|s| tile_count_in_bbox(s, bbox, zmin, zmax)).sum();
+    let expanded_total: u64 = sources
+        .iter()
+        .map(|s| tile_count_in_bbox(s, bbox, zmin, zmax))
+        .sum();
     if expanded_total > WARM_TILE_HARD_CAP {
         eprintln!("tilecache: warm expanded to {expanded_total} tiles, over the {WARM_TILE_HARD_CAP} hard cap; aborting");
         let mut j = job.lock().await;
@@ -460,7 +616,16 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, sources: Vec<C
             // Drain any finished tasks without blocking, keeping memory flat.
             while let Some(done) = set.try_join_next() {
                 if let Ok(f) = done {
-                    if !accumulate(&st, &job, &mut batch, f, region_id.as_deref(), &mut final_state).await {
+                    if !accumulate(
+                        &st,
+                        &job,
+                        &mut batch,
+                        f,
+                        region_id.as_deref(),
+                        &mut final_state,
+                    )
+                    .await
+                    {
                         // capped: stop spawning and draining.
                         cancel.store(true, Ordering::Relaxed);
                         break 'outer;
@@ -472,14 +637,31 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, sources: Vec<C
     // Join remaining in-flight tasks.
     while let Some(done) = set.join_next().await {
         if let Ok(f) = done {
-            if final_state == WarmState::Done && !accumulate(&st, &job, &mut batch, f, region_id.as_deref(), &mut final_state).await {
+            if final_state == WarmState::Done
+                && !accumulate(
+                    &st,
+                    &job,
+                    &mut batch,
+                    f,
+                    region_id.as_deref(),
+                    &mut final_state,
+                )
+                .await
+            {
                 break;
             }
         }
     }
     // Flush the tail.
     if !batch.is_empty() {
-        flush(&st, &job, &mut batch, region_id.as_deref(), &mut final_state).await;
+        flush(
+            &st,
+            &job,
+            &mut batch,
+            region_id.as_deref(),
+            &mut final_state,
+        )
+        .await;
     }
     {
         let mut j = job.lock().await;
@@ -497,7 +679,14 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, sources: Vec<C
 }
 
 // Apply one fetch result to the batch and the counters. Returns false when a flush reports capped.
-async fn accumulate(st: &AppState, job: &Arc<tokio::sync::Mutex<WarmJob>>, batch: &mut Vec<WarmRow>, f: Fetched, region_id: Option<&str>, final_state: &mut WarmState) -> bool {
+async fn accumulate(
+    st: &AppState,
+    job: &Arc<tokio::sync::Mutex<WarmJob>>,
+    batch: &mut Vec<WarmRow>,
+    f: Fetched,
+    region_id: Option<&str>,
+    final_state: &mut WarmState,
+) -> bool {
     match f {
         Fetched::Tile(row) | Fetched::Negative(row) => {
             batch.push(row);
@@ -518,7 +707,13 @@ async fn accumulate(st: &AppState, job: &Arc<tokio::sync::Mutex<WarmJob>>, batch
 }
 
 // Store the current batch pinned, with the pre-store budget check. Returns false when capped.
-async fn flush(st: &AppState, job: &Arc<tokio::sync::Mutex<WarmJob>>, batch: &mut Vec<WarmRow>, region_id: Option<&str>, final_state: &mut WarmState) -> bool {
+async fn flush(
+    st: &AppState,
+    job: &Arc<tokio::sync::Mutex<WarmJob>>,
+    batch: &mut Vec<WarmRow>,
+    region_id: Option<&str>,
+    final_state: &mut WarmState,
+) -> bool {
     let now = now_secs();
     // The batched pinned write and its make-room eviction scan run on the blocking pool so the warm's
     // synchronous SQLite does not stall the single-worker reactor.
@@ -570,11 +765,19 @@ mod tests {
 
     async fn stub() -> SocketAddr {
         let app = Router::new()
-            .route("/img/:z/:x/:y", get(|| async { ([(header::CONTENT_TYPE, "image/png")], vec![1u8, 2, 3, 4]) }))
-            .route("/missing/:z/:x/:y", get(|| async { axum::http::StatusCode::NOT_FOUND }));
+            .route(
+                "/img/:z/:x/:y",
+                get(|| async { ([(header::CONTENT_TYPE, "image/png")], vec![1u8, 2, 3, 4]) }),
+            )
+            .route(
+                "/missing/:z/:x/:y",
+                get(|| async { axum::http::StatusCode::NOT_FOUND }),
+            );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         addr
     }
@@ -583,7 +786,9 @@ mod tests {
         ChartSource {
             id: "s".into(),
             title: "S".into(),
-            upstream: UpstreamTemplate::Xyz { url_template: format!("http://{addr}/{path}/{{z}}/{{x}}/{{y}}") },
+            upstream: UpstreamTemplate::Xyz {
+                url_template: format!("http://{addr}/{path}/{{z}}/{{x}}/{{y}}"),
+            },
             tile_size: 256,
             minzoom: 0,
             maxzoom: 4,
@@ -617,7 +822,10 @@ mod tests {
     }
 
     fn dev() -> Knobs {
-        Knobs { allow_private_egress: true, ..Default::default() }
+        Knobs {
+            allow_private_egress: true,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -630,7 +838,11 @@ mod tests {
         st.live_regions_budget.store(5000, Ordering::Relaxed);
         st.live_position_warm_budget.store(0, Ordering::Relaxed);
         // A real region's effective budget clamps to the cap, not to R - P.
-        assert_eq!(effective_budget(&st, Some("r1")), 1000, "R - P clamps to the cap");
+        assert_eq!(
+            effective_budget(&st, Some("r1")),
+            1000,
+            "R - P clamps to the cap"
+        );
         // The position-warm pseudo-region clamps to the cap too.
         assert_eq!(
             effective_budget(&st, Some(crate::state::POSITION_WARM_REGION_ID)),
@@ -658,13 +870,27 @@ mod tests {
         let addr = stub().await;
         let db = NamedTempFile::new().unwrap();
         let st = state(&db, dev(), xyz(addr, "img")).await;
-        let job = start_warm(&st, WarmRequest { sources: vec![st.sources.read().await["s"].clone()], bbox: [-10.0, -10.0, 10.0, 10.0], minzoom: 0, maxzoom: 1, region_id: None }).await.unwrap();
+        let job = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![st.sources.read().await["s"].clone()],
+                bbox: [-10.0, -10.0, 10.0, 10.0],
+                minzoom: 0,
+                maxzoom: 1,
+                region_id: None,
+            },
+        )
+        .await
+        .unwrap();
         let snap = wait_done(&st, &job).await;
         assert_eq!(snap["state"], "done");
         assert!(snap["done"].as_u64().unwrap() >= 1);
         // The stored tile is pinned: an evict_to far below the total leaves it.
         st.cache.evict_to(0).unwrap();
-        assert!(st.cache.get("s", 0, 0, 0).unwrap().is_some(), "the warmed box is pinned");
+        assert!(
+            st.cache.get("s", 0, 0, 0).unwrap().is_some(),
+            "the warmed box is pinned"
+        );
     }
 
     #[tokio::test]
@@ -676,15 +902,38 @@ mod tests {
         // still pin it so the box is fully eviction-exempt.
         let now = crate::state::now_secs();
         let seeded = CachedTile {
-            content_type: "image/png".into(), strong_etag: "x".into(), upstream_validator: None,
-            status: 200, fetched_at: now, last_access: now, bytes: 4, blob: Some(vec![1, 2, 3, 4].into()),
+            content_type: "image/png".into(),
+            strong_etag: "x".into(),
+            upstream_validator: None,
+            status: 200,
+            fetched_at: now,
+            last_access: now,
+            bytes: 4,
+            blob: Some(vec![1, 2, 3, 4].into()),
         };
         st.cache.put("s", 0, 0, 0, &seeded, false, now).unwrap();
-        let job = start_warm(&st, WarmRequest { sources: vec![st.sources.read().await["s"].clone()], bbox: [-10.0, -10.0, 10.0, 10.0], minzoom: 0, maxzoom: 0, region_id: None }).await.unwrap();
+        let job = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![st.sources.read().await["s"].clone()],
+                bbox: [-10.0, -10.0, 10.0, 10.0],
+                minzoom: 0,
+                maxzoom: 0,
+                region_id: None,
+            },
+        )
+        .await
+        .unwrap();
         let snap = wait_done(&st, &job).await;
-        assert!(snap["skipped"].as_u64().unwrap() >= 1, "the fresh tile is skipped, not refetched");
+        assert!(
+            snap["skipped"].as_u64().unwrap() >= 1,
+            "the fresh tile is skipped, not refetched"
+        );
         st.cache.evict_to(0).unwrap();
-        assert!(st.cache.get("s", 0, 0, 0).unwrap().is_some(), "the skipped tile was pinned by the warm");
+        assert!(
+            st.cache.get("s", 0, 0, 0).unwrap().is_some(),
+            "the skipped tile was pinned by the warm"
+        );
     }
 
     #[tokio::test]
@@ -692,11 +941,35 @@ mod tests {
         let addr = stub().await;
         let db = NamedTempFile::new().unwrap();
         // cap below one tile (4 bytes) so the first sized put trips the cap.
-        let st = state(&db, Knobs { cap_bytes: 2, allow_private_egress: true, ..Default::default() }, xyz(addr, "img")).await;
-        let job = start_warm(&st, WarmRequest { sources: vec![st.sources.read().await["s"].clone()], bbox: [-10.0, -10.0, 10.0, 10.0], minzoom: 0, maxzoom: 0, region_id: None }).await.unwrap();
+        let st = state(
+            &db,
+            Knobs {
+                cap_bytes: 2,
+                allow_private_egress: true,
+                ..Default::default()
+            },
+            xyz(addr, "img"),
+        )
+        .await;
+        let job = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![st.sources.read().await["s"].clone()],
+                bbox: [-10.0, -10.0, 10.0, 10.0],
+                minzoom: 0,
+                maxzoom: 0,
+                region_id: None,
+            },
+        )
+        .await
+        .unwrap();
         let snap = wait_done(&st, &job).await;
         assert_eq!(snap["state"], "capped");
-        assert_eq!(st.cache.stats().unwrap().1, 0, "nothing stored, nothing evicted");
+        assert_eq!(
+            st.cache.stats().unwrap().1,
+            0,
+            "nothing stored, nothing evicted"
+        );
     }
 
     #[tokio::test]
@@ -707,16 +980,55 @@ mod tests {
         let known = st.sources.read().await["s"].clone();
         let mut unknown = known.clone();
         unknown.id = "nope".into();
-        assert!(matches!(start_warm(&st, WarmRequest { sources: vec![unknown], bbox: [-1.0, -1.0, 1.0, 1.0], minzoom: 0, maxzoom: 0, region_id: None }).await, Err(StartError::UnknownSource(_))));
-        assert!(matches!(start_warm(&st, WarmRequest { sources: vec![known.clone()], bbox: [10.0, 10.0, 5.0, 5.0], minzoom: 0, maxzoom: 0, region_id: None }).await, Err(StartError::BadBbox(_))));
+        assert!(matches!(
+            start_warm(
+                &st,
+                WarmRequest {
+                    sources: vec![unknown],
+                    bbox: [-1.0, -1.0, 1.0, 1.0],
+                    minzoom: 0,
+                    maxzoom: 0,
+                    region_id: None
+                }
+            )
+            .await,
+            Err(StartError::UnknownSource(_))
+        ));
+        assert!(matches!(
+            start_warm(
+                &st,
+                WarmRequest {
+                    sources: vec![known.clone()],
+                    bbox: [10.0, 10.0, 5.0, 5.0],
+                    minzoom: 0,
+                    maxzoom: 0,
+                    region_id: None
+                }
+            )
+            .await,
+            Err(StartError::BadBbox(_))
+        ));
         // A source with a deep max zoom over the whole world projects past WARM_TILE_HARD_CAP (2_000_000):
         // zoom 11 alone is 4^11 = 4_194_304 tiles, so start_warm rejects it upfront with TooMany. Replace
         // the stored "s" with a deep-zoom copy so start_warm resolves the real (deep) source for the count.
         let mut deep = known.clone();
         deep.maxzoom = 12;
-        st.sources.write().await.insert(deep.id.clone(), deep.clone());
+        st.sources
+            .write()
+            .await
+            .insert(deep.id.clone(), deep.clone());
         assert!(matches!(
-            start_warm(&st, WarmRequest { sources: vec![deep], bbox: [-180.0, -85.0, 180.0, 85.0], minzoom: 0, maxzoom: 12, region_id: None }).await,
+            start_warm(
+                &st,
+                WarmRequest {
+                    sources: vec![deep],
+                    bbox: [-180.0, -85.0, 180.0, 85.0],
+                    minzoom: 0,
+                    maxzoom: 12,
+                    region_id: None
+                }
+            )
+            .await,
             Err(StartError::TooMany(_))
         ));
     }
@@ -733,16 +1045,30 @@ mod tests {
         // Poles: both latitudes exceed the Web Mercator limit in both directions.
         let result = start_warm(
             &st,
-            WarmRequest { sources: vec![src.clone()], bbox: [-180.0, -90.0, 180.0, 90.0], minzoom: 0, maxzoom: 0, region_id: None },
+            WarmRequest {
+                sources: vec![src.clone()],
+                bbox: [-180.0, -90.0, 180.0, 90.0],
+                minzoom: 0,
+                maxzoom: 0,
+                region_id: None,
+            },
         )
         .await;
-        assert!(result.is_ok(), "beyond-limit latitude must not produce BadBbox: {result:?}");
+        assert!(
+            result.is_ok(),
+            "beyond-limit latitude must not produce BadBbox: {result:?}"
+        );
         let job_id = result.unwrap();
         let snap = wait_done(&st, &job_id).await;
         assert_eq!(snap["state"], "done", "job must finish done");
         // total must match what tile_count_in_bbox reports for the same raw bbox (clip clamps both).
         let expected = crate::geom::tile_count_in_bbox(&src, [-180.0, -90.0, 180.0, 90.0], 0, 0);
-        assert_eq!(snap["total"].as_u64().unwrap(), expected, "total tiles mismatch: snap={} expected={expected}", snap["total"]);
+        assert_eq!(
+            snap["total"].as_u64().unwrap(),
+            expected,
+            "total tiles mismatch: snap={} expected={expected}",
+            snap["total"]
+        );
     }
 
     #[tokio::test]
@@ -757,7 +1083,9 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let db = NamedTempFile::new().unwrap();
@@ -775,24 +1103,33 @@ mod tests {
 
         let mut ids = Vec::new();
         for _ in 0..MAX_ACTIVE_WARM_JOBS {
-            let job = start_warm(&st, WarmRequest {
-                sources: vec![st.sources.read().await["s"].clone()],
-                bbox: [-180.0, -85.0, 180.0, 85.0],
-                minzoom: 0,
-                maxzoom: 4,
-                region_id: None,
-            }).await.unwrap();
+            let job = start_warm(
+                &st,
+                WarmRequest {
+                    sources: vec![st.sources.read().await["s"].clone()],
+                    bbox: [-180.0, -85.0, 180.0, 85.0],
+                    minzoom: 0,
+                    maxzoom: 4,
+                    region_id: None,
+                },
+            )
+            .await
+            .unwrap();
             ids.push(job);
         }
 
         // The (MAX_ACTIVE_WARM_JOBS + 1)th start must be rejected.
-        let result = start_warm(&st, WarmRequest {
-            sources: vec![st.sources.read().await["s"].clone()],
-            bbox: [-1.0, -1.0, 1.0, 1.0],
-            minzoom: 0,
-            maxzoom: 0,
-            region_id: None,
-        }).await;
+        let result = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![st.sources.read().await["s"].clone()],
+                bbox: [-1.0, -1.0, 1.0, 1.0],
+                minzoom: 0,
+                maxzoom: 0,
+                region_id: None,
+            },
+        )
+        .await;
         assert!(
             matches!(result, Err(StartError::TooManyJobs)),
             "expected TooManyJobs, got {result:?}"
@@ -809,7 +1146,18 @@ mod tests {
         let addr = stub().await;
         let db = NamedTempFile::new().unwrap();
         let st = state(&db, dev(), xyz(addr, "img")).await;
-        let job = start_warm(&st, WarmRequest { sources: vec![st.sources.read().await["s"].clone()], bbox: [-180.0, -85.0, 180.0, 85.0], minzoom: 0, maxzoom: 4, region_id: None }).await.unwrap();
+        let job = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![st.sources.read().await["s"].clone()],
+                bbox: [-180.0, -85.0, 180.0, 85.0],
+                minzoom: 0,
+                maxzoom: 4,
+                region_id: None,
+            },
+        )
+        .await
+        .unwrap();
         assert!(cancel_warm(&st, &job).await);
         let snap = wait_done(&st, &job).await;
         assert!(snap["state"] == "cancelled" || snap["state"] == "done");
@@ -828,16 +1176,27 @@ mod tests {
                 ([(header::CONTENT_TYPE, "application/json")], format!(r#"{{"tiles":["http://{a}/t/{{z}}/{{x}}/{{y}}.pbf"],"maxzoom":14}}"#))
             }))
             .route("/t/:z/:x/:y", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![8u8, 8, 8, 8]) }));
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         addr
     }
 
     fn style_source(addr: SocketAddr) -> ChartSource {
         ChartSource {
-            id: "basemap".into(), title: "B".into(),
-            upstream: UpstreamTemplate::Style { style_url: format!("http://{addr}/style"), allowed_hosts: vec!["127.0.0.1".into()] },
-            tile_size: 256, minzoom: 0, maxzoom: 20, vector_maxzoom: Some(14), bounds: None, attribution: String::new(),
+            id: "basemap".into(),
+            title: "B".into(),
+            upstream: UpstreamTemplate::Style {
+                style_url: format!("http://{addr}/style"),
+                allowed_hosts: vec!["127.0.0.1".into()],
+            },
+            tile_size: 256,
+            minzoom: 0,
+            maxzoom: 20,
+            vector_maxzoom: Some(14),
+            bounds: None,
+            attribution: String::new(),
         }
     }
 
@@ -847,12 +1206,32 @@ mod tests {
         let db = NamedTempFile::new().unwrap();
         let st = state(&db, dev(), style_source(addr)).await;
         let src = st.sources.read().await["basemap"].clone();
-        let job = start_warm(&st, WarmRequest { sources: vec![src], bbox: [-1.0, -1.0, 1.0, 1.0], minzoom: 0, maxzoom: 2, region_id: Some("r1".into()) }).await.unwrap();
+        let job = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![src],
+                bbox: [-1.0, -1.0, 1.0, 1.0],
+                minzoom: 0,
+                maxzoom: 2,
+                region_id: Some("r1".into()),
+            },
+        )
+        .await
+        .unwrap();
         let snap = wait_done(&st, &job).await;
         assert_eq!(snap["state"], "done");
-        assert!(snap["done"].as_u64().unwrap() >= 1, "at least one vector tile warmed");
+        assert!(
+            snap["done"].as_u64().unwrap() >= 1,
+            "at least one vector tile warmed"
+        );
         st.cache.evict_to(0).unwrap();
-        assert!(st.cache.get("style:basemap:openmaptiles", 0, 0, 0).unwrap().is_some(), "the basemap vector tile is pinned under the style cache key");
+        assert!(
+            st.cache
+                .get("style:basemap:openmaptiles", 0, 0, 0)
+                .unwrap()
+                .is_some(),
+            "the basemap vector tile is pinned under the style cache key"
+        );
     }
 
     #[tokio::test]
@@ -861,10 +1240,27 @@ mod tests {
         let db = NamedTempFile::new().unwrap();
         let st = state(&db, dev(), style_source(addr)).await;
         let src = st.sources.read().await["basemap"].clone();
-        let job = start_warm(&st, WarmRequest { sources: vec![src], bbox: [-0.01, -0.01, 0.01, 0.01], minzoom: 14, maxzoom: 16, region_id: Some("r1".into()) }).await.unwrap();
+        let job = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![src],
+                bbox: [-0.01, -0.01, 0.01, 0.01],
+                minzoom: 14,
+                maxzoom: 16,
+                region_id: Some("r1".into()),
+            },
+        )
+        .await
+        .unwrap();
         let snap = wait_done(&st, &job).await;
         assert_eq!(snap["state"], "done");
-        assert!(st.cache.get("style:basemap:openmaptiles", 15, 0, 0).unwrap().is_none(), "no tile above the native maxzoom");
+        assert!(
+            st.cache
+                .get("style:basemap:openmaptiles", 15, 0, 0)
+                .unwrap()
+                .is_none(),
+            "no tile above the native maxzoom"
+        );
     }
 
     async fn style_stub_with_assets() -> SocketAddr {
@@ -882,7 +1278,9 @@ mod tests {
             .route("/t/:z/:x/:y", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![8u8, 8, 8, 8]) }))
             .route("/fonts/:fontstack/:range", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![7u8, 7, 7]) }))
             .route("/sprites/:name", get(|| async { ([(header::CONTENT_TYPE, "application/json")], r#"{"ok":1}"#) }));
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         addr
     }
@@ -891,7 +1289,12 @@ mod tests {
     // pin; poll the assets region until it holds bytes.
     async fn wait_assets(st: &AppState) {
         for _ in 0..200 {
-            if st.cache.region_bytes(crate::state::BASEMAP_ASSETS_REGION_ID).unwrap() > 0 {
+            if st
+                .cache
+                .region_bytes(crate::state::BASEMAP_ASSETS_REGION_ID)
+                .unwrap()
+                > 0
+            {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -905,17 +1308,37 @@ mod tests {
         let db = NamedTempFile::new().unwrap();
         let st = state(&db, dev(), style_source(addr)).await;
         let src = st.sources.read().await["basemap"].clone();
-        let job = start_warm(&st, WarmRequest { sources: vec![src], bbox: [-0.5, -0.5, 0.5, 0.5], minzoom: 0, maxzoom: 0, region_id: Some("r1".into()) }).await.unwrap();
+        let job = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![src],
+                bbox: [-0.5, -0.5, 0.5, 0.5],
+                minzoom: 0,
+                maxzoom: 0,
+                region_id: Some("r1".into()),
+            },
+        )
+        .await
+        .unwrap();
         let snap = wait_done(&st, &job).await;
         assert_eq!(snap["state"], "done");
         wait_assets(&st).await;
         let gk = crate::style::glyph_cache_source("basemap", "Noto Sans Regular");
-        assert!(st.cache.get(&gk, 0, 0, 0).unwrap().is_some(), "a glyph range is pinned under the assets region");
+        assert!(
+            st.cache.get(&gk, 0, 0, 0).unwrap().is_some(),
+            "a glyph range is pinned under the assets region"
+        );
         let sk = crate::style::sprite_cache_source("basemap");
-        assert!(st.cache.get(&sk, 0, 0, 0).unwrap().is_some(), "the sprite json is pinned");
+        assert!(
+            st.cache.get(&sk, 0, 0, 0).unwrap().is_some(),
+            "the sprite json is pinned"
+        );
         // Pinned: a deep eviction keeps them.
         st.cache.evict_to(0).unwrap();
-        assert!(st.cache.get(&gk, 0, 0, 0).unwrap().is_some(), "the glyph is pinned, not evicted");
+        assert!(
+            st.cache.get(&gk, 0, 0, 0).unwrap().is_some(),
+            "the glyph is pinned, not evicted"
+        );
     }
 
     #[tokio::test]
@@ -924,15 +1347,46 @@ mod tests {
         let db = NamedTempFile::new().unwrap();
         let st = state(&db, dev(), style_source(addr)).await;
         let src = st.sources.read().await["basemap"].clone();
-        let j1 = start_warm(&st, WarmRequest { sources: vec![src.clone()], bbox: [-0.5, -0.5, 0.5, 0.5], minzoom: 0, maxzoom: 0, region_id: Some("r1".into()) }).await.unwrap();
+        let j1 = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![src.clone()],
+                bbox: [-0.5, -0.5, 0.5, 0.5],
+                minzoom: 0,
+                maxzoom: 0,
+                region_id: Some("r1".into()),
+            },
+        )
+        .await
+        .unwrap();
         wait_done(&st, &j1).await;
         wait_assets(&st).await;
-        let after_first = st.cache.region_bytes(crate::state::BASEMAP_ASSETS_REGION_ID).unwrap();
-        let j2 = start_warm(&st, WarmRequest { sources: vec![src], bbox: [-0.5, -0.5, 0.5, 0.5], minzoom: 0, maxzoom: 0, region_id: Some("r1".into()) }).await.unwrap();
+        let after_first = st
+            .cache
+            .region_bytes(crate::state::BASEMAP_ASSETS_REGION_ID)
+            .unwrap();
+        let j2 = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![src],
+                bbox: [-0.5, -0.5, 0.5, 0.5],
+                minzoom: 0,
+                maxzoom: 0,
+                region_id: Some("r1".into()),
+            },
+        )
+        .await
+        .unwrap();
         wait_done(&st, &j2).await;
         // The second run is cache-first per key: no new fetch, no duplicate pinned bytes.
-        let after_second = st.cache.region_bytes(crate::state::BASEMAP_ASSETS_REGION_ID).unwrap();
-        assert_eq!(after_first, after_second, "the second basemap warm adds no duplicate asset bytes");
+        let after_second = st
+            .cache
+            .region_bytes(crate::state::BASEMAP_ASSETS_REGION_ID)
+            .unwrap();
+        assert_eq!(
+            after_first, after_second,
+            "the second basemap warm adds no duplicate asset bytes"
+        );
         assert!(after_first > 0);
     }
 
@@ -941,9 +1395,26 @@ mod tests {
         let addr = stub().await;
         let db = NamedTempFile::new().unwrap();
         let st = state(&db, dev(), xyz(addr, "img")).await;
-        let job = start_warm(&st, WarmRequest { sources: vec![st.sources.read().await["s"].clone()], bbox: [-1.0, -1.0, 1.0, 1.0], minzoom: 0, maxzoom: 0, region_id: Some("r1".into()) }).await.unwrap();
+        let job = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![st.sources.read().await["s"].clone()],
+                bbox: [-1.0, -1.0, 1.0, 1.0],
+                minzoom: 0,
+                maxzoom: 0,
+                region_id: Some("r1".into()),
+            },
+        )
+        .await
+        .unwrap();
         wait_done(&st, &job).await;
-        assert_eq!(st.cache.region_bytes(crate::state::BASEMAP_ASSETS_REGION_ID).unwrap(), 0, "a raster warm pins no basemap assets");
+        assert_eq!(
+            st.cache
+                .region_bytes(crate::state::BASEMAP_ASSETS_REGION_ID)
+                .unwrap(),
+            0,
+            "a raster warm pins no basemap assets"
+        );
     }
 
     #[tokio::test]
@@ -955,21 +1426,57 @@ mod tests {
         // must skip it (cache-first) and fill the rest.
         let gk = crate::style::glyph_cache_source("basemap", "Noto Sans Regular");
         let now = crate::state::now_secs();
-        let seeded = CachedTile { content_type: "application/x-protobuf".into(), strong_etag: "s".into(), upstream_validator: None, status: 200, fetched_at: now, last_access: now, bytes: 3, blob: Some(vec![1u8, 2, 3].into()) };
+        let seeded = CachedTile {
+            content_type: "application/x-protobuf".into(),
+            strong_etag: "s".into(),
+            upstream_validator: None,
+            status: 200,
+            fetched_at: now,
+            last_access: now,
+            bytes: 3,
+            blob: Some(vec![1u8, 2, 3].into()),
+        };
         st.cache.put(&gk, 0, 0, 0, &seeded, false, now).unwrap();
-        st.cache.pin_for_region(&gk, 0, 0, 0, 2_000_000_000, Some(crate::state::BASEMAP_ASSETS_REGION_ID)).unwrap();
+        st.cache
+            .pin_for_region(
+                &gk,
+                0,
+                0,
+                0,
+                2_000_000_000,
+                Some(crate::state::BASEMAP_ASSETS_REGION_ID),
+            )
+            .unwrap();
         let src = st.sources.read().await["basemap"].clone();
-        let job = start_warm(&st, WarmRequest { sources: vec![src], bbox: [-0.5, -0.5, 0.5, 0.5], minzoom: 0, maxzoom: 0, region_id: Some("r1".into()) }).await.unwrap();
+        let job = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![src],
+                bbox: [-0.5, -0.5, 0.5, 0.5],
+                minzoom: 0,
+                maxzoom: 0,
+                region_id: Some("r1".into()),
+            },
+        )
+        .await
+        .unwrap();
         wait_done(&st, &job).await;
         // The seed already makes region_bytes non-zero, so poll the LATER range, not wait_assets, to
         // know the warm filled the rest.
         let mut filled = false;
         for _ in 0..200 {
-            if st.cache.get(&gk, 0, 256, 0).unwrap().is_some() { filled = true; break; }
+            if st.cache.get(&gk, 0, 256, 0).unwrap().is_some() {
+                filled = true;
+                break;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert!(filled, "a later glyph range was filled");
         // The seeded range keeps its seeded bytes (not refetched).
-        assert_eq!(st.cache.get(&gk, 0, 0, 0).unwrap().unwrap().blob, Some(vec![1u8, 2, 3].into()), "the seeded glyph was not refetched");
+        assert_eq!(
+            st.cache.get(&gk, 0, 0, 0).unwrap().unwrap().blob,
+            Some(vec![1u8, 2, 3].into()),
+            "the seeded glyph was not refetched"
+        );
     }
 }
