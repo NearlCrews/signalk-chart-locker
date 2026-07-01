@@ -5,7 +5,7 @@
 import { join } from 'node:path'
 import { readJsonState } from '../runtime/json-state.js'
 
-export const THIRD_PARTY_PLUGIN_ID = 'pmtiles-chart-provider'
+const THIRD_PARTY_PLUGIN_ID = 'pmtiles-chart-provider'
 
 export function isThirdPartyPmtilesEnabled (configPath: string): boolean {
   const file = join(configPath, 'plugin-config-data', `${THIRD_PARTY_PLUGIN_ID}.json`)

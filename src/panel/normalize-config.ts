@@ -35,7 +35,7 @@ function group (raw: Record<string, unknown>, key: string): RawGroup {
  * `fallback` when it is not a finite number. A fractional value is truncated,
  * matching the plugin's integer schema fields.
  */
-export function clampIntGiB (
+function clampIntGiB (
   value: unknown, min: number, max: number, fallback: number
 ): number {
   const parsed = typeof value === 'number' ? value : Number(value)

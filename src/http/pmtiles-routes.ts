@@ -9,14 +9,14 @@ import { type Writable } from 'node:stream'
 import { nameToId } from '../charts/chart-id.js'
 import type { ChartRegistry } from '../charts/chart-registry.js'
 
-export const PMTILES_SERVE_PATH = '/pmtiles/:file'
+const PMTILES_SERVE_PATH = '/pmtiles/:file'
 
 export interface ServeRequest {
   params: { file: string }
   headers: Record<string, string | string[] | undefined>
 }
 
-export interface ServeResponse {
+interface ServeResponse {
   status (code: number): ServeResponse
   setHeader (name: string, value: string): void
   end (body?: string): void

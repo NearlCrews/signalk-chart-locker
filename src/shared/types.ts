@@ -16,7 +16,7 @@ export interface ContainerRuntimeInfo {
   version?: string
 }
 
-export interface ContainerHealthcheck {
+interface ContainerHealthcheck {
   test: string[]
   interval?: string
   timeout?: string
@@ -24,7 +24,7 @@ export interface ContainerHealthcheck {
   retries?: number
 }
 
-export interface ContainerResourceLimits {
+interface ContainerResourceLimits {
   memory?: string
   memorySwap?: string
   cpus?: number
@@ -33,7 +33,7 @@ export interface ContainerResourceLimits {
 }
 
 /** A bind or named volume with an optional missing-source policy, mirroring signalk-container's VolumeSpec. */
-export interface ContainerVolumeSpec {
+interface ContainerVolumeSpec {
   source: string
   ifMissing?: 'create' | 'skip' | 'abort'
 }
@@ -55,7 +55,7 @@ export interface ContainerConfig {
 }
 
 /** Options forwarded to the manager's ensureRunning, so the container is attributed to this plugin in the signalk-container manifest and UI. */
-export interface EnsureRunningOptions {
+interface EnsureRunningOptions {
   pluginId?: string
   pluginVersion?: string
 }

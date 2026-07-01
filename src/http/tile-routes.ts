@@ -15,7 +15,7 @@ export interface ProxyRequest {
 }
 
 /** The response surface the proxy uses, a structural subset of an express Response (a Writable plus a few methods). */
-export interface ProxyResponse {
+interface ProxyResponse {
   status(code: number): ProxyResponse
   setHeader(name: string, value: string): void
   /** A body argument is used by the style route, which buffers and rewrites instead of streaming. */

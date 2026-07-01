@@ -6,7 +6,7 @@ import { open } from 'node:fs/promises'
 import { type Header, PMTiles, TileType } from 'pmtiles'
 import { PmtilesFileSource } from './pmtiles-file-source.js'
 
-export type PmtilesFormat = 'mvt' | 'png' | 'jpg' | 'webp' | 'avif'
+type PmtilesFormat = 'mvt' | 'png' | 'jpg' | 'webp' | 'avif'
 
 export interface DecodedPmtiles {
   minzoom: number

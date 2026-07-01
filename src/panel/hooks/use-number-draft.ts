@@ -29,7 +29,7 @@ export interface NumberDraftOptions {
 }
 
 /** The state surface the controlled input consumes. */
-export interface NumberDraft {
+interface NumberDraft {
   /** The text the input should render: the live draft if any, otherwise the committed value. */
   display: string
   /** Track a keystroke and commit a clamped numeric value through `onChange`. */
