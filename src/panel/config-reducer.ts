@@ -57,5 +57,11 @@ export function configReducer (state: ChartLockerConfig, action: ConfigAction): 
       return setGroupField<'advanced', keyof AdvancedConfig>(state, 'advanced', 'imageTag', action.tag)
     case 'setCacheVolumeSource':
       return setGroupField<'advanced', keyof AdvancedConfig>(state, 'advanced', 'cacheVolumeSource', action.path)
+    default: {
+      // Exhaustiveness guard: the switch already covers every ConfigAction, so this is unreachable.
+      // Adding a new action without a case fails to compile here rather than silently returning undefined.
+      const exhaustive: never = action
+      throw new RangeError(`unhandled config action: ${String(exhaustive)}`)
+    }
   }
 }
