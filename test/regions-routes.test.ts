@@ -56,3 +56,26 @@ test('routes report 503 when the container address is unset', async () => {
   await routes.get('GET /api/cache/stats')!({ params: {}, body: undefined }, res)
   assert.equal(out.code, 503)
 })
+
+test('a container fetch is bounded with an abort signal so a hung endpoint cannot hang the request', async () => {
+  const { router, routes } = collector()
+  let seenSignal: unknown
+  const fetchImpl = async (_url: string, init?: { signal?: AbortSignal }): Promise<Response> => {
+    seenSignal = init?.signal
+    return new Response(JSON.stringify({ regionsFreeBytes: 0, perSourceAvgBytes: {} }), { status: 200 })
+  }
+  registerRegionsRoutes(router, securedApp(), () => 'addr:8080', { dataDir: mkdtempSync(join(tmpdir(), 'pw-')), fetchImpl })
+  const { res, out } = fakeRes()
+  await routes.get('GET /api/cache/stats')!({ params: {}, body: undefined }, res)
+  assert.equal(out.code, 200)
+  assert.ok(seenSignal instanceof AbortSignal, 'the container fetch must carry an abort signal')
+})
+
+test('GET /api/cache/stats returns 502 when the container fetch fails (for example a timeout abort)', async () => {
+  const { router, routes } = collector()
+  const fetchImpl = async (): Promise<Response> => { throw new DOMException('The operation timed out.', 'TimeoutError') }
+  registerRegionsRoutes(router, securedApp(), () => 'addr:8080', { dataDir: mkdtempSync(join(tmpdir(), 'pw-')), fetchImpl })
+  const { res, out } = fakeRes()
+  await routes.get('GET /api/cache/stats')!({ params: {}, body: undefined }, res)
+  assert.equal(out.code, 502)
+})

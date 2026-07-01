@@ -39,27 +39,33 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 async fn stats(State(st): State<AppState>) -> Json<serde_json::Value> {
-    let (rows, bytes, pinned_bytes) = st.cache.stats().unwrap_or((0, 0, 0));
     let cap = st.live_cap_bytes.load(Ordering::Relaxed);
     let r = st.live_regions_budget.load(Ordering::Relaxed);
     let p = st.live_position_warm_budget.load(Ordering::Relaxed);
-    // The position-warm pseudo-region's pinned bytes, reported as positionWarmBytes.
-    let pw = st.cache.region_bytes(crate::state::POSITION_WARM_REGION_ID).unwrap_or(0);
-    // The exact real-region pinned bytes: a tile shared between a real region and the position-warm
-    // pseudo-region counts once here, so the regions budget gate is not under-counted by subtracting a
-    // shared tile fully.
-    let real_pinned = st.cache.real_region_pinned_bytes(crate::state::POSITION_WARM_REGION_ID).unwrap_or(0);
-    let avg: serde_json::Map<String, serde_json::Value> = st
-        .cache
-        .per_source_avg()
-        .unwrap_or_default()
+    // Run the SQLite reads on a blocking thread. real_region_pinned_bytes probes region_tiles per pinned
+    // tile, so on a large cache it can scan for many seconds; keeping it off the async runtime stops one
+    // stats call from wedging the single-worker reactor. Each cache read degrades to its zero value on an
+    // error, matching the prior unwrap_or, and the whole tuple defaults to zeros on a task join failure.
+    let cache = st.cache.clone();
+    let (rows, bytes, pinned_bytes, pw, real_pinned, avg_rows, by_source_rows) = tokio::task::spawn_blocking(move || {
+        let (rows, bytes, pinned_bytes) = cache.stats().unwrap_or((0, 0, 0));
+        // The position-warm pseudo-region's pinned bytes, reported as positionWarmBytes.
+        let pw = cache.region_bytes(crate::state::POSITION_WARM_REGION_ID).unwrap_or(0);
+        // The exact real-region pinned bytes: a tile shared between a real region and the position-warm
+        // pseudo-region counts once here, so the regions budget gate is not under-counted by subtracting
+        // a shared tile fully.
+        let real_pinned = cache.real_region_pinned_bytes(crate::state::POSITION_WARM_REGION_ID).unwrap_or(0);
+        let avg_rows = cache.per_source_avg().unwrap_or_default();
+        let by_source_rows = cache.per_source_totals().unwrap_or_default();
+        (rows, bytes, pinned_bytes, pw, real_pinned, avg_rows, by_source_rows)
+    })
+    .await
+    .unwrap_or_default();
+    let avg: serde_json::Map<String, serde_json::Value> = avg_rows
         .into_iter()
         .map(|(source, mean)| (source, serde_json::json!(mean)))
         .collect();
-    let by_source: Vec<serde_json::Value> = st
-        .cache
-        .per_source_totals()
-        .unwrap_or_default()
+    let by_source: Vec<serde_json::Value> = by_source_rows
         .into_iter()
         .map(|(source, bytes, rows)| serde_json::json!({ "source": source, "bytes": bytes, "rows": rows }))
         .collect();
@@ -170,10 +176,15 @@ async fn clear_scroll(State(st): State<AppState>) -> Response {
 
 /// GET /cache/region/:region_id: the total bytes a region currently pins.
 async fn region_bytes_route(State(st): State<AppState>, Path(region_id): Path<String>) -> Response {
-    match st.cache.region_bytes(&region_id) {
-        Ok(bytes) => Json(serde_json::json!({ "bytes": bytes })).into_response(),
-        Err(e) => {
+    let cache = st.cache.clone();
+    match tokio::task::spawn_blocking(move || cache.region_bytes(&region_id)).await {
+        Ok(Ok(bytes)) => Json(serde_json::json!({ "bytes": bytes })).into_response(),
+        Ok(Err(e)) => {
             eprintln!("tilecache: region_bytes failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Err(e) => {
+            eprintln!("tilecache: region_bytes task failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
@@ -181,16 +192,27 @@ async fn region_bytes_route(State(st): State<AppState>, Path(region_id): Path<St
 
 /// DELETE /cache/region/:region_id: drop a region's pins, then bound the scroll cache at the cap.
 async fn delete_region_route(State(st): State<AppState>, Path(region_id): Path<String>) -> StatusCode {
-    match st.cache.delete_region(&region_id) {
-        Ok(()) => {
-            // delete_region demotes refcount-zero tiles from pinned to unpinned without changing
-            // total_bytes, so the total is already at or below the cap and this evict_to is effectively a
-            // no-op. Kept for safety: it cannot exceed the cap and trims nothing it should keep.
-            crate::fetcher::log_cache_err(st.cache.evict_to(st.live_cap_bytes.load(Ordering::Relaxed)));
-            StatusCode::NO_CONTENT
+    let cache = st.cache.clone();
+    let cap = st.live_cap_bytes.load(Ordering::Relaxed);
+    // delete_region walks region_tiles and can demote many pinned rows, so run it and the follow-up
+    // evict_to on a blocking thread rather than on the async runtime.
+    let result = tokio::task::spawn_blocking(move || {
+        cache.delete_region(&region_id)?;
+        // delete_region demotes refcount-zero tiles from pinned to unpinned without changing
+        // total_bytes, so the total is already at or below the cap and this evict_to is effectively a
+        // no-op. Kept for safety: it cannot exceed the cap and trims nothing it should keep.
+        crate::fetcher::log_cache_err(cache.evict_to(cap));
+        Ok::<(), rusqlite::Error>(())
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => StatusCode::NO_CONTENT,
+        Ok(Err(e)) => {
+            eprintln!("tilecache: delete_region failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
         }
         Err(e) => {
-            eprintln!("tilecache: delete_region failed: {e}");
+            eprintln!("tilecache: delete_region task failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }

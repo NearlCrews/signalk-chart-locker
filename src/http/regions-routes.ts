@@ -46,7 +46,7 @@ interface ContainerStats {
   perSourceAvgBytes?: Record<string, number>
 }
 
-type FetchImpl = (url: string, init?: { method?: string, headers?: Record<string, string>, body?: string }) => Promise<Response>
+type FetchImpl = (url: string, init?: { method?: string, headers?: Record<string, string>, body?: string, signal?: AbortSignal }) => Promise<Response>
 
 interface Deps {
   dataDir?: string
@@ -55,6 +55,10 @@ interface Deps {
 
 /** The floor for the position-warm interval, enforced server-side as well as in the panel. */
 const MIN_WARM_INTERVAL_SECS = 60
+
+/** The bound on every container fetch, so a slow or hung container endpoint fails fast with a 502 or
+ *  503 instead of hanging the request and the panel indefinitely. */
+const CONTAINER_FETCH_TIMEOUT_MS = 8000
 
 /** A finite, correctly ordered lon/lat bbox: [minLng, minLat, maxLng, maxLat]. */
 function isValidBbox (value: unknown): value is [number, number, number, number] {
@@ -67,7 +71,14 @@ function isValidBbox (value: unknown): value is [number, number, number, number]
 export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, getAddress: () => string | null, deps: Deps = {}): boolean {
   if (!ensureApiAdminGate(app)) return false
   const dataDir = deps.dataDir ?? (app as unknown as { getDataDirPath(): string }).getDataDirPath()
-  const fetchImpl: FetchImpl = deps.fetchImpl ?? ((url, init) => fetch(url, init))
+  const rawFetch: FetchImpl = deps.fetchImpl ?? ((url, init) => fetch(url, init))
+  // Wrap every container fetch with a bounded timeout, so a hung container endpoint (for example a
+  // deadlocked /cache/stats) surfaces as a caught failure and a 502 or 503, never an open request that
+  // hangs the panel. A caller that supplies its own signal keeps it.
+  const fetchImpl: FetchImpl = (url, init) => rawFetch(url, {
+    ...init,
+    signal: init?.signal ?? AbortSignal.timeout(CONTAINER_FETCH_TIMEOUT_MS)
+  })
 
   const withAddress = (res: RegionsResponse): string | null => {
     const address = getAddress()

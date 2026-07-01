@@ -133,6 +133,13 @@ impl TileCache {
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_tiles_scroll_lru ON tiles(last_access) WHERE pinned = 0;",
         )?;
+        // Speeds the (source, z, x, y) probes that real_region_pinned_bytes and delete_region run per
+        // pinned tile: the region_tiles primary key leads with region_id, so a lookup that filters only
+        // source, z, x, and y cannot use that key and falls back to a full scan of region_tiles per tile.
+        // Created on every open so an existing cache gains it, with no schema-version wipe.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_region_tiles_key ON region_tiles(source, z, x, y);",
+        )?;
         Ok(())
     }
 
