@@ -39,18 +39,17 @@ export interface ChartLockerConfig {
   advanced: AdvancedConfig
 }
 
-/** Smallest cache cap the plugin accepts, in GiB. Mirrors the schema minimum. */
-export const CACHE_CAP_MIN_GIB = 1
-/** Largest cache cap the plugin accepts, in GiB. Mirrors the schema maximum. */
-export const CACHE_CAP_MAX_GIB = 1024
-/**
- * The panel's fallback cache cap, in GiB, when the plugin has never been
- * configured. The plugin's own schema seeds a larger default from the free
- * space it detects at load time, but the panel cannot read the data-directory
- * filesystem, so it falls back to the plugin's static default (8 GiB). Mirrors
- * DEFAULT_CACHE_CAP_GIB in src/runtime/tilecache-container.ts.
- */
-export const CACHE_CAP_DEFAULT_GIB = 8
+// The cache-cap bounds and step come from the shared cache-cap module, so the panel field, the
+// plugin schema, and the cache-info route never drift. The static default (used when the plugin has
+// never been configured and before the cache-info route responds) is the same fallback the runtime
+// uses when free-space detection is unavailable; the panel seeds a free-space-aware value over it
+// once the route responds.
+export {
+  CACHE_CAP_MAX_GIB,
+  CACHE_CAP_MIN_GIB,
+  CACHE_CAP_STEP_GIB,
+  CACHE_CAP_STATIC_DEFAULT_GIB as CACHE_CAP_DEFAULT_GIB
+} from '../shared/cache-cap.js'
 
 /** Smallest saved-regions budget the plugin accepts, in GiB. 0 means reserve half the cap. */
 export const REGIONS_BUDGET_MIN_GIB = 0

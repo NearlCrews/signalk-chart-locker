@@ -10,7 +10,8 @@
   },
   "include": [
     "src/panel/**/*",
-    "src/shared/plugin-id.ts"
+    "src/shared/plugin-id.ts",
+    "src/shared/cache-cap.ts"
   ],
   "exclude": []
 }

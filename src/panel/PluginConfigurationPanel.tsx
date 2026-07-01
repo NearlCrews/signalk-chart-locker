@@ -22,10 +22,13 @@ import FooterBar from './components/FooterBar.js'
 import ThemeToggle from './components/ThemeToggle.js'
 import { useConfig } from './hooks/use-config.js'
 import { useStatus } from './hooks/use-status.js'
+import { useCacheInfo } from './hooks/use-cache-info.js'
 import { useTheme } from './hooks/use-theme.js'
 import {
+  CACHE_CAP_DEFAULT_GIB,
   CACHE_CAP_MAX_GIB,
   CACHE_CAP_MIN_GIB,
+  CACHE_CAP_STEP_GIB,
   REGIONS_BUDGET_DEFAULT_GIB,
   REGIONS_BUDGET_MIN_GIB
 } from './config-types.js'
@@ -44,7 +47,8 @@ interface Props {
 /** The configuration panel rendered inside the Signal K admin UI. */
 export default function PluginConfigurationPanel ({ configuration, save }: Props): React.ReactElement {
   const { status, error, lastUpdatedMs } = useStatus()
-  const { state, savedState, dispatch, markSaved } = useConfig(configuration)
+  const { freeGiB, recommendedCapGiB } = useCacheInfo()
+  const { state, savedState, dispatch, markSaved, reseed } = useConfig(configuration)
   const [theme, setTheme] = useTheme()
   const [justSavedAt, setJustSavedAt] = useState<number | null>(null)
 
@@ -77,6 +81,20 @@ export default function PluginConfigurationPanel ({ configuration, save }: Props
     window.addEventListener('beforeunload', onBeforeUnload)
     return () => window.removeEventListener('beforeunload', onBeforeUnload)
   }, [dirty])
+
+  // Seed the cache cap from detected free space, once, for a never-configured plugin. It runs only
+  // while the field still holds the static default and nothing is dirty, so it never clobbers a
+  // stored value or an edit the user made while the cache-info fetch was in flight. reseed sets the
+  // saved snapshot too, so the seeded default is not counted as an unsaved change.
+  const seededRef = useRef(false)
+  useEffect(() => {
+    if (seededRef.current) return
+    if (!unconfigured || dirty) return
+    if (recommendedCapGiB === null) return
+    if (state.tileCache.cacheCapGiB !== CACHE_CAP_DEFAULT_GIB) return
+    seededRef.current = true
+    reseed({ ...state, tileCache: { ...state.tileCache, cacheCapGiB: recommendedCapGiB } })
+  }, [unconfigured, dirty, recommendedCapGiB, state, reseed])
 
   // handleSave reads the latest state through a ref so its identity does not
   // change per keystroke; that keeps the memoized FooterBar from re-rendering
@@ -122,6 +140,7 @@ export default function PluginConfigurationPanel ({ configuration, save }: Props
           unit='GiB'
           min={CACHE_CAP_MIN_GIB}
           max={CACHE_CAP_MAX_GIB}
+          step={CACHE_CAP_STEP_GIB}
           value={state.tileCache.cacheCapGiB}
           onChange={(giB) => dispatch({ type: 'setCacheCapGiB', giB })}
           hint={
@@ -134,6 +153,17 @@ export default function PluginConfigurationPanel ({ configuration, save }: Props
             </>
           }
         />
+        {freeGiB !== null
+          ? <p style={S.hintBelow}>{freeGiB} GiB free on the Signal K data directory.</p>
+          : null}
+        {freeGiB !== null && state.tileCache.cacheCapGiB > freeGiB
+          ? (
+            <div role='alert' style={S.warnBanner}>
+              Cache cap exceeds free space. Reduce it, or move the cache to an external drive under
+              Advanced.
+            </div>
+            )
+          : null}
         <NumberField
           id='cl-regions-budget'
           label='Saved-regions reserved budget (GiB)'

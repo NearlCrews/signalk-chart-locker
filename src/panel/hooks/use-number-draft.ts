@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
+import { snapToStep } from '../../shared/cache-cap.js'
 
 /** Options that shape how a draft string is parsed and clamped on commit. */
 export interface NumberDraftOptions {
@@ -21,6 +22,8 @@ export interface NumberDraftOptions {
   max?: number
   /** Truncate any fractional part on commit. */
   integer?: boolean
+  /** Snap the committed value to the nearest multiple of this step. Omit to leave it unsnapped. */
+  step?: number
   /** Value to commit for empty or unparsable input. Defaults to `min`. */
   fallback?: number
 }
@@ -53,6 +56,9 @@ export function commitNumberDraft (raw: string, options: NumberDraftOptions): nu
   }
   let next = parsed
   if (options.integer === true) next = Math.trunc(next)
+  // Snap before the final clamp so a snapped value cannot escape the bounds (for example a max that
+  // is not itself a multiple of the step).
+  if (options.step !== undefined && options.step > 0) next = snapToStep(next, options.step)
   if (options.max !== undefined && next > options.max) next = options.max
   if (next < options.min) next = options.min
   return next

@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ContainerConfig } from '../shared/types.js'
 import { makeContainerHealthcheck, probeContainerHealth, type FetchLike } from './container-health.js'
+import { CACHE_CAP_STATIC_DEFAULT_GIB } from '../shared/cache-cap.js'
 
 export type { FetchLike }
 
@@ -33,8 +34,10 @@ const SIGNALK_DATA_MOUNT = '/signalk-data'
 /** The cache subdirectory under the data mount, and the DB file in it. A user-managed external volume can mount here. */
 const CACHE_DIR = `${SIGNALK_DATA_MOUNT}/chart-locker-tilecache`
 const TILECACHE_DB_PATH = `${CACHE_DIR}/cache.sqlite`
-/** Conservative default cap (GiB). Used as the fallback when free-space detection is unavailable. */
-export const DEFAULT_CACHE_CAP_GIB = 8
+/** Conservative default cap (GiB). Used as the fallback when free-space detection is unavailable.
+ *  Sourced from the shared cache-cap module so the runtime byte math, the schema default, and the
+ *  panel agree on the same fallback (a multiple of the 5 GiB step). */
+export const DEFAULT_CACHE_CAP_GIB = CACHE_CAP_STATIC_DEFAULT_GIB
 
 const TILECACHE_HEALTHCHECK = makeContainerHealthcheck('/tilecache')
 
@@ -50,7 +53,7 @@ const TILECACHE_RESOURCES = {
 export interface TilecacheContainerOptions {
   image?: string
   tag?: string
-  /** Cache byte cap; defaults to 8 GiB. */
+  /** Cache byte cap; defaults to DEFAULT_CACHE_CAP_GIB when absent. */
   capBytes?: number
   /** Scroll-tile TTL in seconds, seeded into the container env so the startup sweep has a value. */
   scrollTtlSecs?: number

@@ -12,10 +12,12 @@ import {
   CACHE_CAP_DEFAULT_GIB,
   CACHE_CAP_MAX_GIB,
   CACHE_CAP_MIN_GIB,
+  CACHE_CAP_STEP_GIB,
   REGIONS_BUDGET_DEFAULT_GIB,
   REGIONS_BUDGET_MIN_GIB,
   type ChartLockerConfig
 } from './config-types.js'
+import { snapToStep } from '../shared/cache-cap.js'
 
 /** The raw object shape read out of the untyped configuration prop. */
 type RawGroup = Record<string, unknown> | undefined
@@ -64,11 +66,23 @@ export function normalizeConfig (configuration: unknown): ChartLockerConfig {
   const charts = group(raw, 'charts')
   const advanced = group(raw, 'advanced')
 
+  // Snap the cap to the 5 GiB step so the slider and the number box agree and the value matches the
+  // increment the panel offers. A legacy value stored off the grid (for example 8) shows as the
+  // nearest multiple (10); clamping to the bounds afterward keeps the top of the range in range.
+  const cacheCapGiB = Math.min(
+    CACHE_CAP_MAX_GIB,
+    Math.max(
+      CACHE_CAP_MIN_GIB,
+      snapToStep(
+        clampIntGiB(tileCache?.cacheCapGiB, CACHE_CAP_MIN_GIB, CACHE_CAP_MAX_GIB, CACHE_CAP_DEFAULT_GIB),
+        CACHE_CAP_STEP_GIB
+      )
+    )
+  )
+
   return {
     tileCache: {
-      cacheCapGiB: clampIntGiB(
-        tileCache?.cacheCapGiB, CACHE_CAP_MIN_GIB, CACHE_CAP_MAX_GIB, CACHE_CAP_DEFAULT_GIB
-      ),
+      cacheCapGiB,
       // No upper bound: the plugin clamps a budget above the cache cap down to
       // the cap at start, so the panel accepts any non-negative whole number.
       regionsBudgetGiB: clampIntGiB(

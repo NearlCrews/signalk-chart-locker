@@ -19,7 +19,8 @@ and local PMTiles chart serving.
 The first public release. Chart Locker hosts a boat-wide tile cache and local PMTiles chart serving
 in an egress-isolated Rust container managed by signalk-container: shared overlay and basemap
 caching, saved region downloads that work fully offline, around-the-boat auto-cache, scroll-cache
-management, and a local PMTiles chart provider.
+management, a local PMTiles chart provider, and a custom configuration panel with free-space-aware
+cache sizing.
 
 See the [changelog](CHANGELOG.md#v010) for the full list.
 
@@ -87,9 +88,10 @@ After installation, enable the plugin in the Signal K plugin configuration panel
 starts the tilecache container automatically when Signal K restarts. No further configuration is
 required for the tile cache or the PMTiles provider.
 
-**Tile cache capacity.** The plugin settings expose a GiB slider for the cache size cap. The
-default is set to about 80 percent of the free space on the Signal K data directory at the time
-the settings form loads, leaving roughly 20 percent headroom. A second GiB control sets the
+**Tile cache capacity.** The plugin settings expose a slider for the cache size cap that moves in
+5 GiB steps. The default is set to about 80 percent of the free space on the Signal K data
+directory at the time the settings load, floored to the nearest 5 GiB to leave headroom, and the
+panel warns when the cap exceeds the detected free space. A second GiB control sets the
 saved-regions budget, a ceiling on how much the pinned region tiles may total; leave it at 0 to
 reserve half the cap. That budget is not space taken from the scroll cache until a region is
 actually saved: the on-demand scroll cache uses the whole cap until then. A region download pins

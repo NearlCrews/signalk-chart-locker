@@ -20,6 +20,12 @@ export interface UseConfigResult {
   dispatch: Dispatch<ConfigAction>
   /** Records the current state as saved, clearing the dirty flag. */
   markSaved: () => void
+  /**
+   * Replace both the working state and the saved snapshot with `config`, so the panel adopts a value
+   * (for example a free-space-seeded default) without counting it as an unsaved edit. Both point at
+   * the same object, so the identity dirty check reads clean.
+   */
+  reseed: (config: ChartLockerConfig) => void
 }
 
 /**
@@ -41,5 +47,12 @@ export function useConfig (configuration: unknown): UseConfigResult {
     setSavedState(stateRef.current)
   }, [])
 
-  return { state, savedState, dispatch, markSaved }
+  // Point the working state and the saved snapshot at the same object, so state === savedState holds
+  // and the panel does not read as dirty after adopting the seeded config.
+  const reseed = useCallback((config: ChartLockerConfig): void => {
+    dispatch({ type: 'discard', config })
+    setSavedState(config)
+  }, [])
+
+  return { state, savedState, dispatch, markSaved, reseed }
 }

@@ -45,7 +45,7 @@ test('stop with no prior start and a manager present is a clean no-op', async ()
   assert.deepEqual(record.stopped, [])
 })
 
-test('schema() cap field is integer with fixed maximum 1024, minimum 1, and default >= 1', () => {
+test('schema() cap field is integer with fixed maximum 1024, minimum 5, and default >= 5', () => {
   const plugin = createPlugin(fakeApp() as never)
   const schema = typeof plugin.schema === 'function' ? plugin.schema() : plugin.schema
   const props = (schema as { properties: Record<string, { properties: Record<string, unknown> }> }).properties
@@ -58,8 +58,9 @@ test('schema() cap field is integer with fixed maximum 1024, minimum 1, and defa
   }
   assert.equal(cap.type, 'integer')
   assert.equal(cap.maximum, 1024)
-  assert.equal(cap.minimum, 1)
-  assert.ok(cap.default >= 1, 'default must be at least 1')
+  assert.equal(cap.minimum, 5)
+  assert.ok(cap.default >= 5, 'default must be at least 5')
+  assert.equal(cap.default % 5, 0, 'default must be a multiple of 5')
   assert.equal(cap.multipleOf, 1)
 })
 

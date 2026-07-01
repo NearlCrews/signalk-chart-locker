@@ -579,5 +579,17 @@ export const S = {
     padding: '8px 12px',
     fontSize: 'var(--cl-font-body)',
     margin: '0 0 var(--cl-space-3)'
+  },
+
+  // Advisory warning banner (for example the cache cap exceeding free space). Uses the warn tokens,
+  // never the red danger tokens, so a warning does not read as an error.
+  warnBanner: {
+    color: 'var(--cl-warn-fg)',
+    background: 'var(--cl-warn-bg)',
+    border: '1px solid var(--cl-warn-border)',
+    borderRadius: 'var(--cl-radius)',
+    padding: '8px 12px',
+    fontSize: 'var(--cl-font-body)',
+    margin: '0 0 var(--cl-space-3)'
   }
 } satisfies Record<string, CSSProperties>

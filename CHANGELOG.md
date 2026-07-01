@@ -37,12 +37,17 @@ All tile-cache compute lives in the container.
   pinned coverage. It ships enabled with no charts picked, so the panel surfaces it as on and prompts
   the navigator to choose which charts to cache rather than starting a silent download.
 - **Cache size cap and scroll-cache management.** The plugin settings size the on-disk cache cap to
-  about 80 percent of the free space on the Signal K data directory, presented as a GiB slider,
-  with a second GiB control for the saved-regions budget. A storage view shows the cache total
+  about 80 percent of the free space on the Signal K data directory, presented as a slider that
+  moves in 5 GiB steps and warns when the cap exceeds the detected free space, with a second GiB
+  control for the saved-regions budget. A storage view shows the cache total
   against the cap and a per-source breakdown, sets an age limit in days for the on-demand scroll
   cache, and clears the scroll cache on demand. The age sweep and the clear run in bounded chunks
   and never touch pinned region or position-warm tiles, and writes are bounded for microSD
   longevity.
+- **Configuration panel.** The plugin settings render as a custom panel matching the companion
+  plugins, with the same design tokens, light, dark, and night themes, a live status line, and a
+  sticky save bar. It reads the free space on the data directory to seed the cache cap and to warn
+  when the cap exceeds it, and falls back to the generated settings form when the panel cannot load.
 - **Local PMTiles chart provider.** Drop `.pmtiles` archives in the server's charts folder and the
   plugin discovers, validates, and registers them without a restart. Each archive is served with a
   strong file-identity ETag and HTTP Range support so the browser cache works. A chart-management

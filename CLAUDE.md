@@ -55,7 +55,9 @@ delegated to the installed `signalk-container` plugin.
 ## Layout and status
 
 - `src/`, `test/`: the Node plugin. Lifecycle, the `signalk-container` consumer, the tile proxy
-  and streaming, the PMTiles chart provider, and the regions and chart-management route handlers.
+  and streaming, the PMTiles chart provider, the regions, chart-management, and cache-info route
+  handlers, and the Module Federation configuration panel under `src/panel/` (a React remote the
+  admin UI loads in place of the generated schema form).
 - `container/`: one Cargo workspace (`container/Cargo.toml`) with one member: `tilecache`.
 - `container/tilecache/`: the egress-isolated reverse proxy and disk cache for allowlisted raster
   overlays and the vector basemap. Reads and writes a microSD-aware SQLite tile cache. Includes

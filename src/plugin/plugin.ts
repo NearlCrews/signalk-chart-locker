@@ -8,6 +8,7 @@ import { TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT, DEFAULT_TILECACHE_TA
 import { buildSourcePayload, pushTilecacheConfig } from '../runtime/tilecache-config-push.js'
 import { registerTileRoutes, type TileRouter } from '../http/tile-routes.js'
 import { registerRegionsRoutes, type RegionsRouter } from '../http/regions-routes.js'
+import { registerCacheInfoRoute, type CacheInfoRouter } from '../http/cache-info-route.js'
 import { ChartRegistry, registerChartProvider, type ChartRouteApp } from '../charts/chart-registry.js'
 import { type DiscoveryHandle, startDiscovery } from '../charts/discovery.js'
 import { isThirdPartyPmtilesEnabled } from '../charts/mutual-exclusion.js'
@@ -16,7 +17,8 @@ import { registerChartManagementRoutes, type ManagementRouter } from '../http/ch
 import { OverrideStore } from '../charts/overrides.js'
 import { ensureApiAdminGate } from '../shared/admin-gate.js'
 import { join, resolve } from 'node:path'
-import { statfsSync } from 'node:fs'
+import { readFreeGiB } from '../runtime/free-space.js'
+import { CACHE_CAP_MAX_GIB, CACHE_CAP_MIN_GIB, deriveDefaultCapGiB } from '../shared/cache-cap.js'
 import { createPositionWarmer, type PositionWarmer } from '../runtime/position-warmer.js'
 import { loadRegionsStore, listRegions, updateRegion, POSITION_WARM_REGION_ID, positionWarmBudgetBytes } from '../runtime/regions-store.js'
 import { warmRegion } from '../runtime/tilecache-client.js'
@@ -212,9 +214,7 @@ export function createPlugin (app: ServerAPI): Plugin {
       let capDefaultGiB = DEFAULT_CACHE_CAP_GIB
       try {
         const dataDir = (app as unknown as { getDataDirPath: () => string }).getDataDirPath()
-        const { bsize, bavail } = statfsSync(dataDir)
-        const freeGiB = Math.floor((bsize * bavail) / (1024 ** 3))
-        capDefaultGiB = Math.max(1, Math.floor(freeGiB * 0.8))
+        capDefaultGiB = deriveDefaultCapGiB(readFreeGiB(dataDir))
       } catch {
         // Detection failed (early call or a platform without statfs): keep the conservative default.
       }
@@ -232,8 +232,8 @@ export function createPlugin (app: ServerAPI): Plugin {
               cacheCapGiB: {
                 type: 'integer',
                 multipleOf: 1,
-                minimum: 1,
-                maximum: 1024,
+                minimum: CACHE_CAP_MIN_GIB,
+                maximum: CACHE_CAP_MAX_GIB,
                 title: 'Cache size cap (GiB)',
                 description: 'The most disk space the tile cache may use. When it reaches this size it evicts the least recently used unpinned tiles to stay under the cap.',
                 default: capDefaultGiB
@@ -289,7 +289,7 @@ export function createPlugin (app: ServerAPI): Plugin {
         'ui:order': ['cacheCapGiB', 'regionsBudgetGiB'],
         cacheCapGiB: {
           'ui:widget': 'range',
-          'ui:help': 'Defaults to about 80 percent of the free space detected on the Signal K data directory when this form loaded, leaving roughly 20 percent headroom. Do not set this to all of your free space: the cache grows to fill the cap, and a full disk can stop the server from writing. If you move the cache to an external drive under Advanced, this value reflects the data directory filesystem, not the drive, so set the cap to suit the drive.'
+          'ui:help': 'Defaults to about 80 percent of the free space detected on the Signal K data directory when this form loaded, floored to the nearest 5 GiB to leave headroom. The Chart Locker settings panel moves this in 5 GiB steps. Do not set this to all of your free space: the cache grows to fill the cap, and a full disk can stop the server from writing. If you move the cache to an external drive under Advanced, this value reflects the data directory filesystem, not the drive, so set the cap to suit the drive.'
         },
         regionsBudgetGiB: {
           'ui:widget': 'updown',
@@ -328,6 +328,7 @@ export function createPlugin (app: ServerAPI): Plugin {
     registerWithRouter (router) {
       registerTileRoutes(router as unknown as TileRouter, () => tilecacheAddress, undefined, `/plugins/${PLUGIN_ID}`)
       registerRegionsRoutes(router as unknown as RegionsRouter, app, () => tilecacheAddress)
+      registerCacheInfoRoute(router as unknown as CacheInfoRouter, app)
       registerPmtilesServeRoute(router as unknown as ServeRouter, registry)
       if (ensureApiAdminGate(app)) {
         registerChartManagementRoutes(
