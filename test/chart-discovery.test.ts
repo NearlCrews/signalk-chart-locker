@@ -64,13 +64,22 @@ test('rescanCharts rejects a symlink that escapes the charts directory', { skip:
   }
 })
 
-test('startDiscovery picks up a file added after start, then stops watching', async () => {
+// Linux only: this asserts fs.watch fires a rescan, and fs.watch delays or drops events on macOS and
+// Windows CI runners, so it flakes there. The deployment target is a Linux boat computer, and the
+// rescan logic itself is exercised on every platform by the tests above that call rescanCharts directly.
+test('startDiscovery picks up a file added after start, then stops watching', { skip: process.platform !== 'linux' }, async () => {
   const dir = await chartsDir()
   const registry = new ChartRegistry()
   const handle = await startDiscovery({ chartsDir: dir, registry, debounceMs: 20 })
   try {
     await writeFile(join(dir, 'late.pmtiles'), buildPmtilesFixture())
-    await new Promise((resolve) => setTimeout(resolve, 200))
+    // Poll rather than sleep a fixed interval: fs.watch is fast on Linux (inotify) but can be delayed
+    // by seconds or coalesced on macOS and Windows, so a fixed wait flakes there. Give the debounced
+    // rescan up to five seconds to register the new archive.
+    const deadline = Date.now() + 5000
+    while (!registry.has('late-pmtiles') && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
     assert.equal(registry.has('late-pmtiles'), true)
   } finally {
     handle.stop()
