@@ -2,8 +2,10 @@
  * validation status, and set a per-chart name, description, and scale override. These mount under
  * /api so the admin gate covers them; the serve route stays open read-only. */
 
+import type { ServerAPI } from '@signalk/server-api'
 import { type ChartRegistry, chartResource } from '../charts/chart-registry.js'
 import type { ChartOverride, OverrideStore } from '../charts/overrides.js'
+import { ensureApiAdminGate } from '../shared/admin-gate.js'
 
 export interface ManagementRequest {
   params: Record<string, string>
@@ -33,12 +35,17 @@ function readOverride (body: unknown): ChartOverride | undefined {
   return override
 }
 
+/** Mount the chart-management routes behind the admin gate. Returns whether they were mounted, so the
+ *  registrar self-gates and fails closed like the regions and cache-info registrars, rather than relying
+ *  on the caller to gate it. */
 export function registerChartManagementRoutes (
   router: ManagementRouter,
+  app: ServerAPI,
   registry: ChartRegistry,
   overrides: OverrideStore,
   onOverride: () => void
-): void {
+): boolean {
+  if (!ensureApiAdminGate(app)) return false
   router.get('/api/charts', (_req, res) => {
     res.json({
       charts: registry.records().map((record) => ({
@@ -64,4 +71,5 @@ export function registerChartManagementRoutes (
     onOverride()
     res.json({ identifier: req.params.id, override })
   })
+  return true
 }

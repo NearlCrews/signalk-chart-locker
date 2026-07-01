@@ -25,7 +25,7 @@ export function floorToStep (value: number, step: number): number {
 }
 
 /**
- * Round a value to the nearest multiple of `step`. Used to align a stored or typed cap to the 5 GiB
+ * Round a value to the nearest multiple of `step`. Used to align a stored or typed cap to the 4 GiB
  * grid so the slider and the number box agree. A non-finite value or a non-positive step yields 0.
  */
 export function snapToStep (value: number, step: number): number {

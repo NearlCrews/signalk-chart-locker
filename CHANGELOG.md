@@ -53,3 +53,10 @@ All tile-cache compute lives in the container.
   strong file-identity ETag and HTTP Range support so the browser cache works. A chart-management
   panel in the Binnacle chartplotter lists the detected archives with a per-chart name and
   description. Defers gracefully to `signalk-pmtiles-plugin` when that plugin is enabled.
+- **Resilience and hardening.** Every request from the plugin to the container is bounded by a
+  timeout, so a slow or unreachable container fails fast instead of hanging a request, the
+  position-warm loop, a health probe, or plugin startup. Inside the container, the cache-write and
+  eviction and the region delete run off the request path, so a large warm or eviction cannot stall
+  live tile reads; a warm is gated on its true tile total; a corrupt cache file self-heals by
+  recreating rather than crash-looping; and the egress SSRF guard also rejects the IPv6 6to4 and
+  NAT64 transition ranges.

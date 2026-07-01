@@ -1,6 +1,7 @@
 /** Streams browser tile and style requests to the tilecache container, the only path browsers reach it by. */
 
 import { Readable, type Writable } from 'node:stream'
+import { CONTAINER_FETCH_TIMEOUT_MS } from '../runtime/container-fetch.js'
 
 type HeaderValue = string | string[] | undefined
 
@@ -77,7 +78,7 @@ async function rewriteStyleSprite (req: ProxyRequest, res: ProxyResponse, addres
 
   let upstream: Response
   try {
-    upstream = await fetchImpl(`http://${address}${req.url}`, { headers: {}, signal: controller.signal })
+    upstream = await fetchImpl(`http://${address}${req.url}`, { headers: {}, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(CONTAINER_FETCH_TIMEOUT_MS)]) })
   } catch {
     if (!res.headersSent) res.status(502)
     res.end()
@@ -140,7 +141,7 @@ async function streamToContainer (req: ProxyRequest, res: ProxyResponse, address
   if (typeof inm === 'string') forward['if-none-match'] = inm
 
   try {
-    const upstream = await fetchImpl(`http://${address}${req.url}`, { headers: forward, signal: controller.signal })
+    const upstream = await fetchImpl(`http://${address}${req.url}`, { headers: forward, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(CONTAINER_FETCH_TIMEOUT_MS)]) })
     res.status(upstream.status)
     for (const name of RELAYED_HEADERS) {
       const value = upstream.headers.get(name)

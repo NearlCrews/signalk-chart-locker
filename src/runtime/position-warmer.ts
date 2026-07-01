@@ -45,17 +45,15 @@ export function createPositionWarmer (deps: Deps): PositionWarmer {
       // Single async IIFE so the backoff update and the inFlight reset land in one microtask
       // continuation, which flushes before the test's `await Promise.resolve()` resumes.
       // The inner try/catch handles every error; the outer .catch satisfies no-floating-promises.
+      const backOff = (): void => { trigger.backoffUntilMs = now() + backoffSecs * 1000 }
       ;(async () => {
         try {
           const result = await deps.warm(bbox, settings.sources, minzoom, maxzoom)
-          // All-errors (and a non-zero attempt) means offline: back off so we do not hammer the egress timeout.
-          if (result !== null && result.total > 0 && result.errors >= result.total) {
-            trigger.backoffUntilMs = now() + backoffSecs * 1000
-          } else if (result === null) {
-            trigger.backoffUntilMs = now() + backoffSecs * 1000
-          }
+          // A null result (unreachable) or all-errors on a non-zero attempt means offline: back off so we
+          // do not hammer the egress timeout.
+          if (result === null || (result.total > 0 && result.errors >= result.total)) backOff()
         } catch {
-          trigger.backoffUntilMs = now() + backoffSecs * 1000
+          backOff()
         } finally {
           inFlight = false
         }

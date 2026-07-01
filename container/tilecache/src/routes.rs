@@ -74,7 +74,7 @@ async fn stats(State(st): State<AppState>) -> Json<serde_json::Value> {
         "bytes": bytes,
         "cap": cap,
         "pinnedBytes": pinned_bytes,
-        "scrollBytes": bytes - pinned_bytes,
+        "scrollBytes": (bytes - pinned_bytes).max(0),
         "regionsBudgetBytes": r,
         "positionWarmBudgetBytes": p,
         "positionWarmBytes": pw,

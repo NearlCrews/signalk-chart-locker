@@ -4,6 +4,7 @@
  * name and the defaults. */
 
 import { type ChartNamer, defaultNamer } from './discovery.js'
+import { nameToId } from './chart-id.js'
 import type { DecodedPmtiles } from './pmtiles-metadata.js'
 import { readJsonState, writeJsonState } from '../runtime/json-state.js'
 
@@ -37,7 +38,7 @@ export class OverrideStore {
   namer (): ChartNamer {
     return (fileName: string, decoded: DecodedPmtiles) => {
       const base = defaultNamer(fileName, decoded)
-      const override = this.#map[fileName.replace('.pmtiles', '-pmtiles')]
+      const override = this.#map[nameToId(fileName)]
       return {
         name: override?.name ?? base.name,
         description: override?.description ?? base.description,

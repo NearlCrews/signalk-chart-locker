@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { ServerAPI } from '@signalk/server-api'
 import { ChartRegistry, type ChartRecord } from '../src/charts/chart-registry.js'
 import { OverrideStore } from '../src/charts/overrides.js'
 import {
@@ -11,6 +12,9 @@ import {
   type ManagementRequest,
   type ManagementResponse
 } from '../src/http/chart-management-routes.js'
+import { fakeApp } from './helpers.js'
+
+const securedApp = (): ServerAPI => fakeApp() as unknown as ServerAPI
 
 function record (): ChartRecord {
   return {
@@ -49,6 +53,7 @@ function collect (): { get: Record<string, (req: ManagementRequest, res: FakeRes
       get (p, h) { get[p] = h as (req: ManagementRequest, res: FakeRes) => void },
       post (p, h) { post[p] = h as (req: ManagementRequest, res: FakeRes) => void }
     },
+    securedApp(),
     registry,
     overrides,
     () => { state.applied++ }
@@ -81,7 +86,7 @@ test('POST /api/charts/:id/override persists the override and triggers a re-appl
     let applied = 0
     registerChartManagementRoutes(
       { get (p, h) { get[p] = h as never }, post (p, h) { post[p] = h as never } },
-      registry, overrides, () => { applied++ }
+      securedApp(), registry, overrides, () => { applied++ }
     )
     const res = new FakeRes()
     post['/api/charts/:id/override']({ params: { id: 'sf-pmtiles' }, body: { name: 'Renamed' } }, res)
@@ -99,4 +104,20 @@ test('POST with a non-object body returns 400', () => {
   const res = new FakeRes()
   ctx.post['/api/charts/:id/override']({ params: { id: 'sf-pmtiles' }, body: 'nope' }, res)
   assert.equal(res.statusCode, 400)
+})
+
+test('routes are not mounted without a security strategy (fail closed)', () => {
+  const get: Record<string, unknown> = {}
+  const post: Record<string, unknown> = {}
+  const app = { error: () => {} } as unknown as ServerAPI
+  const mounted = registerChartManagementRoutes(
+    { get (p, h) { get[p] = h as never }, post (p, h) { post[p] = h as never } },
+    app,
+    new ChartRegistry(),
+    new OverrideStore('/dev/null'),
+    () => {}
+  )
+  assert.equal(mounted, false)
+  assert.equal(Object.keys(get).length, 0)
+  assert.equal(Object.keys(post).length, 0)
 })

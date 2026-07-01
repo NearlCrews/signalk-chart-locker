@@ -30,7 +30,7 @@ async fn main() {
             eprintln!("tilecache: could not create cache directory {}: {e}", parent.display());
         }
     }
-    let cache = Arc::new(TileCache::open(Path::new(&db)).expect("open the tile cache DB"));
+    let cache = Arc::new(open_or_recreate(Path::new(&db)));
     let knobs = Knobs { cap_bytes: cap, scroll_ttl_secs, allow_private_egress: allow_private, ..Default::default() };
     let state = AppState::new(cache, knobs);
 
@@ -41,6 +41,27 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("serve");
+}
+
+/// Open the disposable cache DB, and on a failure that is not a stale schema (open() rebuilds the table
+/// for that) delete the DB and its WAL and shm sidecars once and reopen, so a corrupt cache self-heals
+/// instead of crash-looping the container. A second failure is fatal.
+fn open_or_recreate(path: &Path) -> TileCache {
+    match TileCache::open(path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("tilecache: opening the cache DB {} failed: {e}; recreating it", path.display());
+            for suffix in ["", "-wal", "-shm"] {
+                let p = if suffix.is_empty() {
+                    path.to_path_buf()
+                } else {
+                    std::path::PathBuf::from(format!("{}{}", path.display(), suffix))
+                };
+                let _ = std::fs::remove_file(&p);
+            }
+            TileCache::open(path).expect("recreate the tile cache DB after removing the corrupt one")
+        }
+    }
 }
 
 fn tilecache_port() -> u16 {

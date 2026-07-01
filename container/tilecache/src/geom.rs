@@ -96,6 +96,7 @@ pub fn tiles_iter(
 }
 
 /// Call `f(z, x, y)` for every tile a warm over this bbox and zoom range would touch, allocating nothing.
+#[cfg(test)]
 pub fn for_tiles_in_bbox(source: &ChartSource, bbox: [f64; 4], zmin: u32, zmax: u32, mut f: impl FnMut(u32, u32, u32)) {
     let Some(c) = clip(source, bbox) else { return };
     let (zmin, zmax) = zoom_bounds(source, zmin, zmax);

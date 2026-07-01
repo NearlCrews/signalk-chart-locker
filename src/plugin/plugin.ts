@@ -15,7 +15,6 @@ import { isThirdPartyPmtilesEnabled } from '../charts/mutual-exclusion.js'
 import { registerPmtilesServeRoute, type ServeRouter } from '../http/pmtiles-routes.js'
 import { registerChartManagementRoutes, type ManagementRouter } from '../http/chart-management-routes.js'
 import { OverrideStore } from '../charts/overrides.js'
-import { ensureApiAdminGate } from '../shared/admin-gate.js'
 import { join, resolve } from 'node:path'
 import { readFreeGiB } from '../runtime/free-space.js'
 import { CACHE_CAP_MAX_GIB, CACHE_CAP_MIN_GIB, deriveDefaultCapGiB } from '../shared/cache-cap.js'
@@ -330,23 +329,22 @@ export function createPlugin (app: ServerAPI): Plugin {
       registerRegionsRoutes(router as unknown as RegionsRouter, app, () => tilecacheAddress)
       registerCacheInfoRoute(router as unknown as CacheInfoRouter, app)
       registerPmtilesServeRoute(router as unknown as ServeRouter, registry)
-      if (ensureApiAdminGate(app)) {
-        registerChartManagementRoutes(
-          router as unknown as ManagementRouter,
-          registry,
-          getOverrides(),
-          () => {
-            if (rescanInProgress) return
-            rescanInProgress = true
-            ;(async () => {
-              const { rescanCharts } = await import('../charts/discovery.js')
-              await rescanCharts({ chartsDir: activeChartsDir ?? chartsDirFor({}), registry, namer: getOverrides().namer() })
-            })()
-              .catch((err: unknown) => app.debug(`chart rescan after override failed: ${String(err)}`))
-              .finally(() => { rescanInProgress = false })
-          }
-        )
-      }
+      registerChartManagementRoutes(
+        router as unknown as ManagementRouter,
+        app,
+        registry,
+        getOverrides(),
+        () => {
+          if (rescanInProgress) return
+          rescanInProgress = true
+          ;(async () => {
+            const { rescanCharts } = await import('../charts/discovery.js')
+            await rescanCharts({ chartsDir: activeChartsDir ?? chartsDirFor({}), registry, namer: getOverrides().namer() })
+          })()
+            .catch((err: unknown) => app.debug(`chart rescan after override failed: ${String(err)}`))
+            .finally(() => { rescanInProgress = false })
+        }
+      )
     }
   }
 }

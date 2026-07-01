@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto'
 import type { ServerAPI } from '@signalk/server-api'
 import { estimateBytes } from 'signalk-chart-sources'
 import { ensureApiAdminGate } from '../shared/admin-gate.js'
+import { CONTAINER_FETCH_TIMEOUT_MS } from '../runtime/container-fetch.js'
 import {
   loadRegionsStore, saveRegionsStore, type PositionWarmSettings,
   addRegion, updateRegion, removeRegion, listRegions,
@@ -56,9 +57,11 @@ interface Deps {
 /** The floor for the position-warm interval, enforced server-side as well as in the panel. */
 const MIN_WARM_INTERVAL_SECS = 60
 
-/** The bound on every container fetch, so a slow or hung container endpoint fails fast with a 502 or
- *  503 instead of hanging the request and the panel indefinitely. */
-const CONTAINER_FETCH_TIMEOUT_MS = 8000
+// Container route bases reached from more than one handler, named so each path lives once. Single-use
+// routes (scroll-ttl, clear-scroll, and geocode) stay inline at their one call site.
+const CONTAINER_STATS_PATH = '/cache/stats'
+const CONTAINER_REGION_PATH = '/cache/region'
+const CONTAINER_WARM_PATH = '/warm'
 
 /** A finite, correctly ordered lon/lat bbox: [minLng, minLat, maxLng, maxLat]. */
 function isValidBbox (value: unknown): value is [number, number, number, number] {
@@ -113,7 +116,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
   // Best-effort container region_bytes; falls back to the supplied default when unreachable.
   const regionBytes = async (address: string, regionId: string, fallback: number): Promise<number> => {
     try {
-      const r = await fetchImpl(`http://${address}/cache/region/${encodeURIComponent(regionId)}`)
+      const r = await fetchImpl(`http://${address}${CONTAINER_REGION_PATH}/${encodeURIComponent(regionId)}`)
       if (!r.ok) return fallback
       const data = (await r.json()) as { bytes?: number }
       return typeof data.bytes === 'number' ? data.bytes : fallback
@@ -195,7 +198,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     // Not a pure relay: the container stats are merged with ttlDays from the store (the plugin owns the
     // TTL persistence), so the panel reads the TTL and the cache breakdown in one round-trip.
     try {
-      const r = await fetchImpl(`http://${address}/cache/stats`)
+      const r = await fetchImpl(`http://${address}${CONTAINER_STATS_PATH}`)
       const body = (await r.json().catch(() => ({}))) as Record<string, unknown>
       const ttlDays = loadRegionsStore(dataDir).cacheScrollTtlDays
       res.status(r.status).json({ ...body, ttlDays })
@@ -239,7 +242,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     // (so the panel and the plugin agree), and refuse over-budget BEFORE persisting or starting the job.
     let stats: ContainerStats
     try {
-      stats = (await (await fetchImpl(`http://${address}/cache/stats`)).json()) as ContainerStats
+      stats = (await (await fetchImpl(`http://${address}${CONTAINER_STATS_PATH}`)).json()) as ContainerStats
     } catch {
       res.status(502).json({ error: 'tilecache unreachable' }); return
     }
@@ -261,7 +264,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     }
     addRegion(dataDir, region)
     try {
-      const warmResp = await fetchImpl(`http://${address}/warm`, warmInit({ sources: sourceIds, bbox, minzoom, maxzoom, regionId: region.id }))
+      const warmResp = await fetchImpl(`http://${address}${CONTAINER_WARM_PATH}`, warmInit({ sources: sourceIds, bbox, minzoom, maxzoom, regionId: region.id }))
       if (!warmResp.ok) throw new Error('warm start rejected')
       const { jobId } = (await warmResp.json()) as { jobId: string }
       regionJobs.set(region.id, jobId)
@@ -284,7 +287,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     const address = withAddress(res); if (address === null) return
     let ok: boolean
     try {
-      const r = await fetchImpl(`http://${address}/cache/region/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      const r = await fetchImpl(`http://${address}${CONTAINER_REGION_PATH}/${encodeURIComponent(id)}`, { method: 'DELETE' })
       ok = r.ok
     } catch {
       ok = false
@@ -304,7 +307,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
       res.status(404).json({ error: 'no job for region' }); return
     }
     try {
-      const r = await fetchImpl(`http://${address}/warm/${encodeURIComponent(jobId)}`)
+      const r = await fetchImpl(`http://${address}${CONTAINER_WARM_PATH}/${encodeURIComponent(jobId)}`)
       if (r.status === 404) {
         reconcileLostJob(id)
         res.status(404).json({ error: 'job gone' }); return
@@ -325,7 +328,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     try {
       // Same region.id: the container clears that region's prior pins at warm start, so the re-warm
       // replaces tiles and creates no duplicate region.
-      const warmResp = await fetchImpl(`http://${address}/warm`, warmInit({
+      const warmResp = await fetchImpl(`http://${address}${CONTAINER_WARM_PATH}`, warmInit({
         sources: region.sourceIds, bbox: region.bbox, minzoom: region.minzoom, maxzoom: region.maxzoom, regionId: region.id
       }))
       const { jobId } = (await warmResp.json()) as { jobId: string }

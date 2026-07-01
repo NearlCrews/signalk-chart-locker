@@ -2,6 +2,7 @@
 
 import { CHART_SOURCES, type ChartSource } from 'signalk-chart-sources'
 import type { FetchResponse } from '../shared/types.js'
+import { CONTAINER_FETCH_TIMEOUT_MS } from './container-fetch.js'
 
 /** The Signal K server route base the browser reaches the proxy through (for the container style rewrite). */
 export const PLUGIN_PUBLIC_BASE = '/plugins/signalk-chart-locker'
@@ -41,7 +42,7 @@ export type PostJson = (url: string, body: string) => Promise<FetchResponse>
 export async function pushTilecacheConfig (
   address: string,
   payload: TilecacheConfigPayload,
-  postJson: PostJson = (url, body) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+  postJson: PostJson = (url, body) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(CONTAINER_FETCH_TIMEOUT_MS) })
 ): Promise<boolean> {
   try {
     const response = await postJson(`http://${address}/config`, JSON.stringify(payload))

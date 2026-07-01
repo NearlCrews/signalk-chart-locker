@@ -178,7 +178,10 @@ impl AppState {
     /// body exceeds `max_blob_bytes` (the pre-read Content-Length check is None after decompression, so
     /// this is the real bound).
     pub async fn read_capped(&self, mut resp: reqwest::Response) -> Option<Bytes> {
-        let mut buf: Vec<u8> = Vec::new();
+        // Pre-size from Content-Length when the upstream sent one, clamped to the cap so a lying length
+        // cannot force a large up-front allocation. The streaming cap below is the real bound.
+        let hint = resp.content_length().unwrap_or(0).min(self.knobs.max_blob_bytes as u64) as usize;
+        let mut buf: Vec<u8> = Vec::with_capacity(hint);
         while let Some(chunk) = resp.chunk().await.ok()? {
             if buf.len() + chunk.len() > self.knobs.max_blob_bytes {
                 return None;

@@ -217,17 +217,24 @@ impl TileCache {
             return Ok(0);
         }
         let to_free = current_total - target;
-        tx.execute(
+        // Delete the oldest unpinned rows whose running prior is under the deficit, and sum the bytes of
+        // exactly those deleted rows through RETURNING. One window pass over the unpinned rows yields both
+        // the deletion and the freed total, so no second full-table SUM (which also passes over every
+        // pinned row) is needed; the caller decrements its authoritative `total_bytes` by this exact freed.
+        let mut stmt = tx.prepare(
             "DELETE FROM tiles WHERE rowid IN (
                 SELECT rowid FROM (
                     SELECT rowid, SUM(bytes) OVER (ORDER BY last_access ASC, rowid ASC) - bytes AS prior
                     FROM tiles WHERE pinned = 0
                 ) WHERE prior < ?1
-            )",
-            params![to_free],
+            ) RETURNING bytes",
         )?;
-        let new_total: i64 = tx.query_row("SELECT COALESCE(SUM(bytes), 0) FROM tiles", [], |r| r.get(0))?;
-        Ok(current_total - new_total)
+        let mut freed = 0i64;
+        let mut rows = stmt.query(params![to_free])?;
+        while let Some(row) = rows.next()? {
+            freed += row.get::<_, i64>(0)?;
+        }
+        Ok(freed)
     }
 
     /// Evict the least-recently-accessed UNPINNED rows until the total is at or below `cap_bytes`. Runs
@@ -404,6 +411,7 @@ impl TileCache {
     /// bytes, keeping `pinned_bytes` in sync (the bytes are added only when the row was previously
     /// unpinned). Test-only: the warm path uses `pin_if_fresh` so the budget gate and the join-table
     /// insert run under the same lock. A no-op when the row is absent.
+    #[cfg(test)]
     pub fn pin(&self, source: &str, z: u32, x: u32, y: u32) -> rusqlite::Result<()> {
         let mut inner = self.lock();
         let prev: Option<(i64, i64)> = inner.conn.query_row(

@@ -3,7 +3,7 @@
 //! allowlisted hostname that resolves (or rebinds) to a private, loopback, link-local, multicast, or
 //! unspecified address cannot turn the tokenless container into an SSRF pivot.
 
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// True when a target IP must not be connected to from the egress proxy.
 pub fn is_forbidden_ip(ip: IpAddr) -> bool {
@@ -31,6 +31,9 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
                 || is_link_local_v6(v6)
                 // An IPv4-mapped address (::ffff:a.b.c.d) is checked against the v4 rules.
                 || v6.to_ipv4_mapped().map(|m| is_forbidden_ip(IpAddr::V4(m))).unwrap_or(false)
+                // 6to4 (2002::/16) and the well-known NAT64 prefix (64:ff9b::/96) embed a v4; decode it
+                // and apply the v4 rules so a transition-range address cannot reach a private v4.
+                || embedded_v4(v6).map(|m| is_forbidden_ip(IpAddr::V4(m))).unwrap_or(false)
         }
     }
 }
@@ -49,6 +52,21 @@ pub fn is_forbidden_ip_literal_url(url: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+/// The v4 embedded in a 6to4 (2002::/16) or well-known NAT64 (64:ff9b::/96) IPv6 address, if either
+/// prefix matches, so the v4 forbidden-range rules can run over a transition-range target.
+fn embedded_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+    let s = ip.segments();
+    // 2002:AABB:CCDD::/48 6to4: the v4 is segments 1 and 2.
+    if s[0] == 0x2002 {
+        return Some(Ipv4Addr::new((s[1] >> 8) as u8, s[1] as u8, (s[2] >> 8) as u8, s[2] as u8));
+    }
+    // 64:ff9b::/96 well-known NAT64: the v4 is the last 32 bits.
+    if s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0 {
+        return Some(Ipv4Addr::new((s[6] >> 8) as u8, s[6] as u8, (s[7] >> 8) as u8, s[7] as u8));
+    }
+    None
 }
 
 /// fc00::/7 unique-local addresses (the IPv6 analog of RFC1918).
@@ -76,6 +94,9 @@ mod tests {
         assert!(is_forbidden_ip(IpAddr::V6("fc00::1".parse().unwrap())));
         assert!(is_forbidden_ip(IpAddr::V6("fe80::1".parse().unwrap())));
         assert!(is_forbidden_ip(IpAddr::V6("::ffff:127.0.0.1".parse().unwrap())));
+        // 6to4 wrapping 10.0.0.1 (2002:0a00:0001::) and NAT64 wrapping 192.168.1.1 (64:ff9b::c0a8:0101).
+        assert!(is_forbidden_ip(IpAddr::V6("2002:0a00:0001::".parse().unwrap())));
+        assert!(is_forbidden_ip(IpAddr::V6("64:ff9b::c0a8:0101".parse().unwrap())));
     }
 
     #[test]

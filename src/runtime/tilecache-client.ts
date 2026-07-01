@@ -2,6 +2,8 @@
  * position-warm loop uses it so the warm POST and the status poll are spelled once, not re-rolled inline.
  * Returns the terminal { errors, total }, or null on any failure or a job the container no longer has. */
 
+import { CONTAINER_FETCH_TIMEOUT_MS } from './container-fetch.js'
+
 export interface WarmResult {
   errors: number
   total: number
@@ -19,13 +21,16 @@ export async function warmRegion (
     const start = await fetchImpl(`http://${address}/warm`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(req)
+      body: JSON.stringify(req),
+      signal: AbortSignal.timeout(CONTAINER_FETCH_TIMEOUT_MS)
     })
     if (!start.ok) return null
     const { jobId } = (await start.json()) as { jobId: string }
     // Poll briefly so the caller learns whether the warm was all-errors (offline) for its backoff decision.
     for (let i = 0; i < POLL_ATTEMPTS; i++) {
-      const status = await fetchImpl(`http://${address}/warm/${encodeURIComponent(jobId)}`)
+      const status = await fetchImpl(`http://${address}/warm/${encodeURIComponent(jobId)}`, {
+        signal: AbortSignal.timeout(CONTAINER_FETCH_TIMEOUT_MS)
+      })
       if (status.status === 404) return null
       const snap = (await status.json()) as { errors: number, total: number, state: string }
       if (snap.state !== 'running') return { errors: snap.errors, total: snap.total }

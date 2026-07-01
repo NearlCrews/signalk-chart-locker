@@ -243,9 +243,15 @@ async fn flush_pinned(st: &AppState, batch: &mut Vec<WarmRow>, region: &str) {
     let budget = effective_budget(st, Some(region));
     let cap = st.live_cap_bytes.load(Ordering::Relaxed);
     // A capped outcome (the assets did not all fit under the budget) is dropped here; the next basemap
-    // warm completes the set cache-first.
-    crate::fetcher::log_cache_err(st.cache.put_many_pinned(batch, budget, cap, Some(region), now));
-    batch.clear();
+    // warm completes the set cache-first. Runs on the blocking pool so the batched write and its eviction
+    // scan do not stall the reactor.
+    let cache = st.cache.clone();
+    let rows = std::mem::take(batch);
+    let region_owned = region.to_string();
+    match tokio::task::spawn_blocking(move || cache.put_many_pinned(&rows, budget, cap, Some(&region_owned), now)).await {
+        Ok(r) => crate::fetcher::log_cache_err(r),
+        Err(e) => eprintln!("tilecache: assets flush task failed: {e}"),
+    }
 }
 
 // Warm one asset (a glyph range or a sprite variant) cache-first: skip it when already fresh-pinned,
@@ -254,32 +260,39 @@ async fn flush_pinned(st: &AppState, batch: &mut Vec<WarmRow>, region: &str) {
 // content-type gate.
 async fn warm_one_asset(st: &AppState, cache_source: &str, x: u32, url: &str, allowed: &[String], region: &str, batch: &mut Vec<WarmRow>) {
     let now = now_secs();
-    match st.cache.pin_if_fresh(cache_source, 0, x, 0, now, st.knobs.fresh_secs, st.knobs.negative_ttl_secs, effective_budget(st, Some(region)), Some(region)) {
-        Ok(true) => return,
-        Ok(false) => {}
-        Err(e) => eprintln!("tilecache: assets pin_if_fresh failed: {e}"),
+    // Skip-but-pin a fresh cached asset under one lock, on the blocking pool so the warm's SQLite does not
+    // stall the reactor.
+    let cache = st.cache.clone();
+    let cache_source_owned = cache_source.to_string();
+    let region_owned = region.to_string();
+    let fresh_secs = st.knobs.fresh_secs;
+    let neg_ttl = st.knobs.negative_ttl_secs;
+    let budget = effective_budget(st, Some(region));
+    let pinned = tokio::task::spawn_blocking(move || {
+        cache.pin_if_fresh(&cache_source_owned, 0, x, 0, now, fresh_secs, neg_ttl, budget, Some(&region_owned))
+    })
+    .await;
+    match pinned {
+        Ok(Ok(true)) => return,
+        Ok(Ok(false)) => {}
+        Ok(Err(e)) => eprintln!("tilecache: assets pin_if_fresh failed: {e}"),
+        Err(e) => eprintln!("tilecache: assets pin_if_fresh task failed: {e}"),
     }
     if !crate::style::host_allowed(url, allowed) {
         return;
     }
     let _permit = match st.warm_semaphore.clone().acquire_owned().await { Ok(p) => p, Err(_) => return };
-    match crate::fetcher::fetch_upstream(st, url, None).await {
-        Ok((200, f)) => {
-            batch.push(WarmRow {
-                source: cache_source.to_string(), z: 0, x, y: 0,
-                tile: CachedTile {
-                    content_type: f.content_type, strong_etag: crate::fetcher::strong_etag(&f.body), upstream_validator: None,
-                    status: 200, fetched_at: now, last_access: now, bytes: f.body.len() as i64, blob: Some(f.body),
-                },
-            });
-        }
-        Ok((404, _)) | Ok((204, _)) => {
-            batch.push(WarmRow {
-                source: cache_source.to_string(), z: 0, x, y: 0,
-                tile: CachedTile { content_type: String::new(), strong_etag: String::new(), upstream_validator: None, status: 404, fetched_at: now, last_access: now, bytes: 0, blob: None },
-            });
-        }
-        _ => {}
+    // A missing asset (404 or 204) is not pinned: a pinned negative is never evicted, so it would
+    // permanently mask a glyph range or sprite variant the upstream later begins serving. Leaving it
+    // uncached lets the next basemap warm and the live route refetch it, so only a 200 is stored.
+    if let Ok((200, f)) = crate::fetcher::fetch_upstream(st, url, None).await {
+        batch.push(WarmRow {
+            source: cache_source.to_string(), z: 0, x, y: 0,
+            tile: CachedTile {
+                content_type: f.content_type, strong_etag: crate::fetcher::strong_etag(&f.body), upstream_validator: None,
+                status: 200, fetched_at: now, last_access: now, bytes: f.body.len() as i64, blob: Some(f.body),
+            },
+        });
     }
 }
 
@@ -337,11 +350,23 @@ async fn warm_basemap_assets(st: &AppState, style_source: &str) {
 async fn warm_one(st: &AppState, source: &ChartSource, z: u32, x: u32, y: u32, region_id: Option<&str>) -> Fetched {
     let now = now_secs();
     // pin_if_fresh does the freshness check, the budget gate, and the pin under one lock, closing the
-    // race where a concurrent evict_to could delete the row between a separate get() and pin() call.
-    match st.cache.pin_if_fresh(&source.id, z, x, y, now, st.knobs.fresh_secs, st.knobs.negative_ttl_secs, effective_budget(st, region_id), region_id) {
-        Ok(true) => return Fetched::Skipped,
-        Ok(false) => {} // absent, stale, or over budget: fall through to fetch (the flush gate decides)
-        Err(e) => eprintln!("tilecache: warm pin_if_fresh failed: {e}"),
+    // race where a concurrent evict_to could delete the row between a separate get() and pin() call. It
+    // runs on the blocking pool so the warm's synchronous SQLite does not stall the single-worker reactor.
+    let cache = st.cache.clone();
+    let source_id = source.id.clone();
+    let region_owned = region_id.map(str::to_string);
+    let fresh_secs = st.knobs.fresh_secs;
+    let neg_ttl = st.knobs.negative_ttl_secs;
+    let budget = effective_budget(st, region_id);
+    let pinned = tokio::task::spawn_blocking(move || {
+        cache.pin_if_fresh(&source_id, z, x, y, now, fresh_secs, neg_ttl, budget, region_owned.as_deref())
+    })
+    .await;
+    match pinned {
+        Ok(Ok(true)) => return Fetched::Skipped,
+        Ok(Ok(false)) => {} // absent, stale, or over budget: fall through to fetch (the flush gate decides)
+        Ok(Err(e)) => eprintln!("tilecache: warm pin_if_fresh failed: {e}"),
+        Err(e) => eprintln!("tilecache: warm pin_if_fresh task failed: {e}"),
     }
     let url = match expand_upstream(source, z, x, y) {
         Ok(u) => u,
@@ -376,8 +401,12 @@ async fn warm_one(st: &AppState, source: &ChartSource, z: u32, x: u32, y: u32, r
 async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, sources: Vec<ChartSource>, bbox: [f64; 4], zmin: u32, zmax: u32, region_id: Option<String>) {
     // Clear this region's prior pins so a re-download or a position-warm re-pin replaces the prior tile
     // set with no orphan join rows (a narrower box leaves nothing pinned outside the new set).
-    if let Some(rid) = region_id.as_deref() {
-        crate::fetcher::log_cache_err(st.cache.delete_region(rid));
+    if let Some(rid) = region_id.clone() {
+        let cache = st.cache.clone();
+        match tokio::task::spawn_blocking(move || cache.delete_region(&rid)).await {
+            Ok(r) => crate::fetcher::log_cache_err(r),
+            Err(e) => eprintln!("tilecache: warm delete_region task failed: {e}"),
+        }
     }
     // Capture the style source (if any) before expansion replaces it with synthetic XYZ sub-sources,
     // so the folded assets warm can look up the learned glyph template, fontstacks, and sprite base.
@@ -387,6 +416,20 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, sources: Vec<C
     // Expand any style source into synthetic XYZ sub-sources keyed style:{source}:{name} (learning the
     // style once), so the enumeration and the pin path below run unchanged for the basemap.
     let sources = expand_warm_sources(&st, sources).await;
+    // Re-gate on the true enumerated total now that a style source has expanded into one sub-source per
+    // in-style source: the pre-spawn hard-cap check in start_warm counts a style as a single sub-source,
+    // so a multi-source style could otherwise enumerate past WARM_TILE_HARD_CAP. Also correct the job
+    // total to the real expanded count so progress is accurate.
+    let expanded_total: u64 = sources.iter().map(|s| tile_count_in_bbox(s, bbox, zmin, zmax)).sum();
+    if expanded_total > WARM_TILE_HARD_CAP {
+        eprintln!("tilecache: warm expanded to {expanded_total} tiles, over the {WARM_TILE_HARD_CAP} hard cap; aborting");
+        let mut j = job.lock().await;
+        j.total = expanded_total;
+        j.state = WarmState::Error;
+        j.finished_at = Some(now_secs());
+        return;
+    }
+    job.lock().await.total = expanded_total;
     let cancel = { job.lock().await.cancel.clone() };
     let mut set: tokio::task::JoinSet<Fetched> = tokio::task::JoinSet::new();
     let mut batch: Vec<WarmRow> = Vec::with_capacity(WARM_BATCH);
@@ -477,21 +520,35 @@ async fn accumulate(st: &AppState, job: &Arc<tokio::sync::Mutex<WarmJob>>, batch
 // Store the current batch pinned, with the pre-store budget check. Returns false when capped.
 async fn flush(st: &AppState, job: &Arc<tokio::sync::Mutex<WarmJob>>, batch: &mut Vec<WarmRow>, region_id: Option<&str>, final_state: &mut WarmState) -> bool {
     let now = now_secs();
-    match st.cache.put_many_pinned(batch, effective_budget(st, region_id), st.live_cap_bytes.load(Ordering::Relaxed), region_id, now) {
-        Ok(outcome) => {
+    // The batched pinned write and its make-room eviction scan run on the blocking pool so the warm's
+    // synchronous SQLite does not stall the single-worker reactor.
+    let cache = st.cache.clone();
+    let rows = std::mem::take(batch);
+    let budget = effective_budget(st, region_id);
+    let cap = st.live_cap_bytes.load(Ordering::Relaxed);
+    let region_owned = region_id.map(str::to_string);
+    let result = tokio::task::spawn_blocking(move || {
+        cache.put_many_pinned(&rows, budget, cap, region_owned.as_deref(), now)
+    })
+    .await;
+    match result {
+        Ok(Ok(outcome)) => {
             let mut j = job.lock().await;
             j.done += outcome.stored as u64;
             j.bytes += outcome.bytes_added;
-            batch.clear();
             if outcome.capped {
                 *final_state = WarmState::Capped;
                 return false;
             }
             true
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             eprintln!("tilecache: warm flush failed: {e}");
-            batch.clear();
+            job.lock().await.errors += 1;
+            true
+        }
+        Err(e) => {
+            eprintln!("tilecache: warm flush task failed: {e}");
             job.lock().await.errors += 1;
             true
         }

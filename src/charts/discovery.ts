@@ -31,7 +31,11 @@ const PMTILES_RE = /\.pmtiles$/i
 async function containedRealPath (dirReal: string, fileName: string, chartsDir: string): Promise<string | undefined> {
   try {
     const fileReal = await realpath(join(chartsDir, fileName))
-    return fileReal.startsWith(dirReal + sep) ? fileReal : undefined
+    // Contain the resolved file to the charts directory. Append the separator only when the directory
+    // does not already end with one, so a root directory (dirReal is the separator itself) still matches
+    // its children instead of demanding a doubled separator.
+    const prefix = dirReal.endsWith(sep) ? dirReal : dirReal + sep
+    return fileReal.startsWith(prefix) ? fileReal : undefined
   } catch {
     return undefined
   }

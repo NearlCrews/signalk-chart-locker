@@ -106,7 +106,7 @@ pub(crate) async fn fetch_upstream(
 
 /// Store a fetched 200 and return it, or negative-cache a 404 or 204. Rejects an oversize body or a
 /// non-image content type (a WMS XML ServiceException returned with a 200) without storing.
-fn store_200(state: &AppState, source_id: &str, z: u32, x: u32, y: u32, fetched: Fetched, if_none_match: Option<&str>) -> FetchOutcome {
+async fn store_200(state: &AppState, source_id: &str, z: u32, x: u32, y: u32, fetched: Fetched, if_none_match: Option<&str>) -> FetchOutcome {
     if fetched.body.len() > state.knobs.max_blob_bytes || !acceptable_content_type(&fetched.content_type) {
         return FetchOutcome::Unavailable;
     }
@@ -122,11 +122,22 @@ fn store_200(state: &AppState, source_id: &str, z: u32, x: u32, y: u32, fetched:
         bytes: fetched.body.len() as i64,
         blob: Some(fetched.body.clone()),
     };
-    log_cache_err(state.cache.put(source_id, z, x, y, &tile, false, now));
-    // Soft reserve: the scroll cache uses the whole cap. evict_to(cap) drops only unpinned rows, so the
-    // scroll cache fills the cap minus the bytes actually pinned by saved regions (the full cap when
-    // nothing is pinned).
-    log_cache_err(state.cache.evict_to(state.live_cap_bytes.load(Ordering::Relaxed)));
+    // Store and evict on the blocking pool: once the cache sits at the cap, evict_to runs a window-function
+    // scan over the unpinned rows, so keeping it off the single-worker reactor stops a steady-state
+    // miss-store from stalling live tile reads. Soft reserve: evict_to(cap) drops only unpinned rows, so the
+    // scroll cache fills the cap minus the bytes actually pinned by saved regions (the full cap when nothing
+    // is pinned).
+    let cache = state.cache.clone();
+    let cap = state.live_cap_bytes.load(Ordering::Relaxed);
+    let source_owned = source_id.to_string();
+    if let Err(e) = tokio::task::spawn_blocking(move || {
+        log_cache_err(cache.put(&source_owned, z, x, y, &tile, false, now));
+        log_cache_err(cache.evict_to(cap));
+    })
+    .await
+    {
+        eprintln!("tilecache: tile store task failed: {e}");
+    }
     if if_none_match == Some(etag.as_str()) {
         return FetchOutcome::NotModified { etag };
     }
@@ -203,7 +214,7 @@ pub async fn get_tile(
                     return FetchOutcome::Hit(to_response(&tile, false));
                 }
                 Ok((200, fetched)) => {
-                    return store_200(state, source_id, z, x, y, fetched, if_none_match.as_deref());
+                    return store_200(state, source_id, z, x, y, fetched, if_none_match.as_deref()).await;
                 }
                 _ => {
                     if now - tile.fetched_at < state.knobs.max_stale_secs {
@@ -227,9 +238,15 @@ pub async fn get_tile(
             }
             return FetchOutcome::Hit(to_response(&tile, false));
         }
+        // A fresh negative filled by the winning flight: coalesce it too, so concurrent waiters do not
+        // each refetch the same 404 or 204.
+        if tile.status != 200 && now_secs() - tile.fetched_at < state.knobs.negative_ttl_secs {
+            state.inflight_finish(&key, &lock).await;
+            return FetchOutcome::Empty { status: tile.status as u16 };
+        }
     }
     let outcome = match fetch_upstream(state, &url, None).await {
-        Ok((200, fetched)) => store_200(state, source_id, z, x, y, fetched, if_none_match.as_deref()),
+        Ok((200, fetched)) => store_200(state, source_id, z, x, y, fetched, if_none_match.as_deref()).await,
         Ok((status @ (404 | 204), _)) => negative_cache(state, source_id, z, x, y, status),
         Ok(_) => FetchOutcome::Unavailable,
         Err(()) => {

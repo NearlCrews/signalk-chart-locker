@@ -41,7 +41,7 @@ export default function NumberField ({
   integer,
   fallback
 }: Props): React.ReactElement {
-  const draft = useNumberDraft(value, onChange, { min, max, integer, fallback })
+  const draft = useNumberDraft(value, onChange, { min, max, integer, fallback, step })
 
   return (
     <LabeledField id={id} label={label} hint={hint}>
