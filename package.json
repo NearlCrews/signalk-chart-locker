@@ -6,12 +6,16 @@
   "types": "dist/index.d.ts",
   "files": [
     "dist",
+    "public",
     "assets",
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "tsc",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "build": "npm run build:plugin && npm run build:panel",
+    "build:plugin": "tsc",
+    "build:panel": "webpack --config webpack.config.cjs",
+    "watch:panel": "webpack --watch --mode development --config webpack.config.cjs",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.panel.json && tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "test": "node --import tsx --test test/*.test.ts",
@@ -19,6 +23,7 @@
   },
   "keywords": [
     "signalk-node-server-plugin",
+    "signalk-plugin-configurator",
     "signalk-category-chart-plotters",
     "signalk-category-utility",
     "container",
@@ -58,12 +63,23 @@
     "url": "https://github.com/NearlCrews/signalk-chart-locker/issues"
   },
   "devDependencies": {
+    "@babel/core": "^7.29.7",
+    "@babel/preset-react": "^7.29.7",
+    "@babel/preset-typescript": "^7.29.7",
     "@signalk/server-api": "^2.28.0",
     "@types/node": "^25.9.4",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "babel-loader": "^10.1.1",
     "eslint": "^9.39.4",
+    "eslint-plugin-react": "^7.37.5",
     "neostandard": "^0.13.0",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
     "tsx": "^4.22.3",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "webpack": "^5.108.0",
+    "webpack-cli": "^7.0.3"
   },
   "dependencies": {
     "pmtiles": "^4.4.1",

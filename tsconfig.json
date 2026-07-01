@@ -12,5 +12,9 @@
     "types": ["node"],
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  // The React panel under src/panel is built by webpack (babel) and
+  // type-checked by tsconfig.panel.json, so it is excluded from the Node
+  // plugin build here.
+  "exclude": ["node_modules", "dist", "src/panel"]
 }
