@@ -1,0 +1,61 @@
+name: Publish plugin to npm
+
+# Publishes the signalk-chart-locker plugin to npm with a provenance attestation
+# when a GitHub release is created. The container image is published separately by
+# container-image.yml on the v* tag push; per the publish runbook the image must
+# be live on ghcr before the plugin reaches installs, so cut the release only
+# after the image build has finished.
+on:
+  release:
+    types: [created]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      # Fail fast when the release tag and the package.json version disagree, so a
+      # release can never publish a version that does not match its tag (and the
+      # tilecache image tag the plugin pulls). The tag is read from an env var, not
+      # interpolated into the shell, so a crafted tag name cannot inject commands.
+      - name: Verify the release tag matches the package.json version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          TAG="${RELEASE_TAG#v}"
+          if [ "$PKG_VERSION" != "$TAG" ]; then
+            echo "Release tag ($TAG) does not match package.json version ($PKG_VERSION)" >&2
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  publish-npm:
+    needs: build
+    runs-on: ubuntu-latest
+    # id-token: write lets npm attach a provenance attestation to the published
+    # package; contents: read is the least privilege the checkout needs.
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org/
+      - run: npm ci
+      # prepublishOnly rebuilds dist/ and public/ before publish, so the tarball
+      # always ships fresh artifacts. --access public is required for the first
+      # provenance publish of a new package.
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
