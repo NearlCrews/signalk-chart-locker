@@ -4,6 +4,7 @@
  * so teardown clears the map: the provider then serves an empty set. */
 
 import type { ResourceProvider } from '@signalk/server-api'
+import type { Bbox } from 'signalk-chart-sources'
 import type { DecodedPmtiles } from './pmtiles-metadata.js'
 import { PLUGIN_MOUNT_PATH } from '../shared/plugin-id.js'
 
@@ -35,7 +36,7 @@ export interface ChartResource {
   description: string
   type: 'tilelayer'
   scale: number
-  bounds?: [number, number, number, number]
+  bounds?: Bbox
   minzoom: number
   maxzoom: number
   format: string

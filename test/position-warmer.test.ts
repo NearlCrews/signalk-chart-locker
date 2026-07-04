@@ -1,10 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import type { Bbox } from 'signalk-chart-sources'
 import { createPositionWarmer } from '../src/runtime/position-warmer.js'
 import { DEFAULT_REGIONS_STORE } from '../src/runtime/regions-store.js'
 import type { RegionsStore, SavedRegion } from '../src/runtime/regions-store.js'
 
-function region (bbox: [number, number, number, number]): SavedRegion {
+function region (bbox: Bbox): SavedRegion {
   return { id: 'r1', name: 'Test', bbox, sourceIds: [], minzoom: 6, maxzoom: 12, createdAt: 0, lastDownloadedAt: null, bytes: 0, status: 'ready' }
 }
 
@@ -18,7 +19,7 @@ function store (over: Partial<typeof DEFAULT_REGIONS_STORE.positionWarm> = {}): 
 
 test('warms once outside the box, then respects the interval', async () => {
   let clock = 1_000_000
-  const warmed: Array<[number, number, number, number]> = []
+  const warmed: Array<Bbox> = []
   const warmer = createPositionWarmer({
     getStore: () => store(),
     warm: async (bbox) => { warmed.push(bbox); return { errors: 0, total: 4 } },

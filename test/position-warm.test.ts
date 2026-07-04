@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import type { Bbox } from 'signalk-chart-sources'
 import { insideBox, haversineMeters, bboxAround, shouldWarm, insideAnyRegion, type WarmTrigger } from '../src/runtime/position-warm.js'
 import { DEFAULT_REGIONS_STORE } from '../src/runtime/regions-store.js'
 import type { SavedRegion } from '../src/runtime/regions-store.js'
@@ -8,7 +9,7 @@ const here = { latitude: 37.8, longitude: -122.4 }
 const settings = { ...DEFAULT_REGIONS_STORE.positionWarm, enabled: true, sources: ['seamark'] }
 const fresh: WarmTrigger = { lastPos: null, lastWarmMs: 0, backoffUntilMs: 0 }
 
-function region (bbox: [number, number, number, number]): SavedRegion {
+function region (bbox: Bbox): SavedRegion {
   return { id: 'r1', name: 'Test', bbox, sourceIds: [], minzoom: 6, maxzoom: 12, createdAt: 0, lastDownloadedAt: null, bytes: 0, status: 'ready' }
 }
 

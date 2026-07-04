@@ -2,6 +2,7 @@
  * position-warm loop uses it so the warm POST and the status poll are spelled once, not re-rolled inline.
  * Returns the terminal { errors, total }, or null on any failure or a job the container no longer has. */
 
+import type { Bbox } from 'signalk-chart-sources'
 import { CONTAINER_FETCH_TIMEOUT_MS } from './container-fetch.js'
 
 export interface WarmResult {
@@ -14,7 +15,7 @@ const POLL_INTERVAL_MS = 500
 
 export async function warmRegion (
   address: string,
-  req: { bbox: [number, number, number, number], sources: string[], minzoom: number, maxzoom: number, regionId?: string },
+  req: { bbox: Bbox, sources: string[], minzoom: number, maxzoom: number, regionId?: string },
   fetchImpl: typeof fetch = fetch
 ): Promise<WarmResult | null> {
   try {

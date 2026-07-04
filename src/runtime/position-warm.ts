@@ -2,6 +2,7 @@
  * keep a small radius around it warm, throttled and offline-aware. The Signal K read stays in the plugin;
  * this module decides, the caller performs the warm. */
 
+import type { Bbox } from 'signalk-chart-sources'
 import type { Position } from '../shared/types.js'
 import type { PositionWarmSettings, SavedRegion } from './regions-store.js'
 
@@ -12,7 +13,7 @@ export interface WarmTrigger {
 }
 
 /** Whether the position is within the box (a null box is never inside). */
-export function insideBox (pos: Position, bbox: [number, number, number, number] | null): boolean {
+export function insideBox (pos: Position, bbox: Bbox | null): boolean {
   if (!Number.isFinite(pos.latitude) || !Number.isFinite(pos.longitude)) return false
   if (bbox === null) return false
   return pos.longitude >= bbox[0] && pos.longitude <= bbox[2] && pos.latitude >= bbox[1] && pos.latitude <= bbox[3]
@@ -37,7 +38,7 @@ export function haversineMeters (a: Position, b: Position): number {
 }
 
 /** A small bbox of `radiusMeters` around the position. Longitude degrees shrink with latitude. */
-export function bboxAround (pos: Position, radiusMeters: number): [number, number, number, number] {
+export function bboxAround (pos: Position, radiusMeters: number): Bbox {
   const dLat = radiusMeters / 111_320
   const dLng = radiusMeters / (111_320 * Math.max(0.01, Math.cos((pos.latitude * Math.PI) / 180)))
   return [pos.longitude - dLng, pos.latitude - dLat, pos.longitude + dLng, pos.latitude + dLat]

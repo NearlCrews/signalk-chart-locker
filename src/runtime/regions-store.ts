@@ -7,6 +7,7 @@
 import { join } from 'node:path'
 import { statSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
+import type { Bbox } from 'signalk-chart-sources'
 import { readJsonState, writeJsonState } from './json-state.js'
 import { nowUnixSecs } from '../shared/time.js'
 
@@ -24,7 +25,7 @@ export type RegionStatus = 'downloading' | 'ready' | 'capped' | 'error' | 'needs
 export interface SavedRegion {
   id: string
   name: string
-  bbox: [number, number, number, number]
+  bbox: Bbox
   sourceIds: string[]
   minzoom: number
   maxzoom: number
@@ -97,7 +98,7 @@ function migrateV2 (raw: Record<string, unknown>, dataDir: string): RegionsStore
     regions.push({
       id: randomUUID(),
       name: 'Downloaded region',
-      bbox: rawBbox as [number, number, number, number],
+      bbox: rawBbox as Bbox,
       sourceIds: rawSources,
       minzoom: rawMinzoom,
       maxzoom: rawMaxzoom,

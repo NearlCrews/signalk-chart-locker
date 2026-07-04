@@ -88,6 +88,6 @@
   },
   "dependencies": {
     "pmtiles": "^4.4.1",
-    "signalk-chart-sources": "^0.1.0"
+    "signalk-chart-sources": "^0.2.0"
   }
 }

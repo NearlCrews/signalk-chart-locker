@@ -4,7 +4,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { ServerAPI } from '@signalk/server-api'
-import { estimateBytes } from 'signalk-chart-sources'
+import { estimateBytes, type Bbox } from 'signalk-chart-sources'
 import { ensureApiAdminGate } from '../shared/admin-gate.js'
 import { CONTAINER_FETCH_TIMEOUT_MS } from '../runtime/container-fetch.js'
 import {
@@ -65,7 +65,7 @@ const CONTAINER_REGION_PATH = '/cache/region'
 const CONTAINER_WARM_PATH = '/warm'
 
 /** A finite, correctly ordered lon/lat bbox: [minLng, minLat, maxLng, maxLat]. */
-function isValidBbox (value: unknown): value is [number, number, number, number] {
+function isValidBbox (value: unknown): value is Bbox {
   return Array.isArray(value) && value.length === 4 &&
     value.every((n) => typeof n === 'number' && Number.isFinite(n)) &&
     value[0] < value[2] && value[1] < value[3]

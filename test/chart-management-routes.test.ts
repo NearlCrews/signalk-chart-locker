@@ -5,6 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ServerAPI } from '@signalk/server-api'
+import type { Bbox } from 'signalk-chart-sources'
 import { ChartRegistry, type ChartRecord } from '../src/charts/chart-registry.js'
 import { OverrideStore } from '../src/charts/overrides.js'
 import {
@@ -28,7 +29,7 @@ function record (): ChartRecord {
     decoded: {
       minzoom: 0,
       maxzoom: 14,
-      bounds: [-122, 37, -121, 38] as [number, number, number, number],
+      bounds: [-122, 37, -121, 38] as Bbox,
       format: 'mvt' as const,
       vectorLayers: ['water']
     }
