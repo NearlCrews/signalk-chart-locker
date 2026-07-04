@@ -850,10 +850,7 @@ mod tests {
         state
             .cache
             .put(
-                "s",
-                0,
-                0,
-                0,
+                crate::cache::TileKey::new("s", 0, 0, 0),
                 &crate::cache::CachedTile {
                     content_type: "image/png".into(),
                     strong_etag: "e".into(),
@@ -898,10 +895,7 @@ mod tests {
         state
             .cache
             .put(
-                "s",
-                0,
-                0,
-                0,
+                crate::cache::TileKey::new("s", 0, 0, 0),
                 &crate::cache::CachedTile {
                     content_type: "image/png".into(),
                     strong_etag: "e".into(),

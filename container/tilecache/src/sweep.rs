@@ -39,7 +39,7 @@ pub async fn run_sweeper(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::{CachedTile, TileCache};
+    use crate::cache::{CachedTile, TileCache, TileKey};
     use crate::state::Knobs;
     use std::sync::Arc;
     use tempfile::NamedTempFile;
@@ -62,7 +62,7 @@ mod tests {
         let db = NamedTempFile::new().unwrap();
         let cache = Arc::new(TileCache::open(db.path()).unwrap());
         cache
-            .put("s", 0, 0, 0, &scroll_tile(10, 0), false, 0)
+            .put(TileKey::new("s", 0, 0, 0), &scroll_tile(10, 0), false, 0)
             .unwrap();
         let knobs = Knobs {
             scroll_ttl_secs: 1,
@@ -71,7 +71,7 @@ mod tests {
         let state = AppState::new(cache.clone(), knobs);
         run_sweep_once(&state).await;
         assert!(
-            cache.get("s", 0, 0, 0).unwrap().is_none(),
+            cache.get(TileKey::new("s", 0, 0, 0)).unwrap().is_none(),
             "the aged unpinned tile is swept"
         );
     }
@@ -81,12 +81,12 @@ mod tests {
         let db = NamedTempFile::new().unwrap();
         let cache = Arc::new(TileCache::open(db.path()).unwrap());
         cache
-            .put("s", 0, 0, 0, &scroll_tile(10, 0), false, 0)
+            .put(TileKey::new("s", 0, 0, 0), &scroll_tile(10, 0), false, 0)
             .unwrap();
         let state = AppState::new(cache.clone(), Knobs::default());
         run_sweep_once(&state).await;
         assert!(
-            cache.get("s", 0, 0, 0).unwrap().is_some(),
+            cache.get(TileKey::new("s", 0, 0, 0)).unwrap().is_some(),
             "ttl 0 leaves the tile in place"
         );
     }

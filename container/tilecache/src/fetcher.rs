@@ -3,7 +3,7 @@
 //! The egress is allowlist-keyed by source id, redirects are off (the client), and every upstream IP
 //! is checked before connecting.
 
-use crate::cache::CachedTile;
+use crate::cache::{CachedTile, TileKey};
 use crate::source::UpstreamTemplate;
 use crate::state::{now_secs, AppState};
 use crate::upstream::expand_upstream;
@@ -166,7 +166,7 @@ async fn store_200(
     let cap = state.live_cap_bytes.load(Ordering::Relaxed);
     let source_owned = source_id.to_string();
     run_cache_write("tile store", false, move || {
-        log_cache_err(cache.put(&source_owned, z, x, y, &tile, false, now));
+        log_cache_err(cache.put(TileKey::new(&source_owned, z, x, y), &tile, false, now));
         log_cache_err(cache.evict_to(cap));
     })
     .await;
@@ -195,7 +195,7 @@ async fn negative_cache(
     let cache = state.cache.clone();
     let source_owned = source_id.to_string();
     run_cache_write("negative-cache store", false, move || {
-        log_cache_err(cache.put(&source_owned, z, x, y, &tile, false, now))
+        log_cache_err(cache.put(TileKey::new(&source_owned, z, x, y), &tile, false, now))
     })
     .await;
     FetchOutcome::Empty { status }
@@ -227,7 +227,7 @@ pub async fn get_tile(
     let now = now_secs();
 
     // Cache-first.
-    if let Ok(Some(tile)) = state.cache.get(source_id, z, x, y) {
+    if let Ok(Some(tile)) = state.cache.get(TileKey::new(source_id, z, x, y)) {
         if tile.status != 200 {
             if now - tile.fetched_at < state.knobs.negative_ttl_secs {
                 return FetchOutcome::Empty {
@@ -242,7 +242,7 @@ pub async fn get_tile(
                 let cache = state.cache.clone();
                 let source_owned = source_id.to_string();
                 run_cache_write("touch", true, move || {
-                    log_cache_err(cache.touch(&source_owned, z, x, y, now))
+                    log_cache_err(cache.touch(TileKey::new(&source_owned, z, x, y), now))
                 })
                 .await;
             }
@@ -263,7 +263,12 @@ pub async fn get_tile(
                     let cache = state.cache.clone();
                     let source_owned = source_id.to_string();
                     run_cache_write("revalidation refresh", false, move || {
-                        log_cache_err(cache.put(&source_owned, z, x, y, &refreshed, false, now))
+                        log_cache_err(cache.put(
+                            TileKey::new(&source_owned, z, x, y),
+                            &refreshed,
+                            false,
+                            now,
+                        ))
                     })
                     .await;
                     if if_none_match.as_deref() == Some(&tile.strong_etag) {
@@ -291,7 +296,7 @@ pub async fn get_tile(
     let lock = state.inflight_lock(&key).await;
     let _guard = lock.lock().await;
     // Re-check: another flight may have filled the cache while we waited.
-    if let Ok(Some(tile)) = state.cache.get(source_id, z, x, y) {
+    if let Ok(Some(tile)) = state.cache.get(TileKey::new(source_id, z, x, y)) {
         if tile.status == 200 && now_secs() - tile.fetched_at < state.knobs.fresh_secs {
             state.inflight_finish(&key, &lock).await;
             if if_none_match.as_deref() == Some(&tile.strong_etag) {
@@ -318,7 +323,7 @@ pub async fn get_tile(
         Ok(_) => FetchOutcome::Unavailable,
         Err(()) => {
             // Offline: serve any cached 200 within the max-stale bound.
-            match state.cache.get(source_id, z, x, y) {
+            match state.cache.get(TileKey::new(source_id, z, x, y)) {
                 Ok(Some(tile))
                     if tile.status == 200
                         && now_secs() - tile.fetched_at < state.knobs.max_stale_secs =>
@@ -439,7 +444,7 @@ mod tests {
             get_tile(&st, "s", 0, 0, 0, None).await,
             FetchOutcome::Unavailable
         ));
-        assert!(st.cache.get("s", 0, 0, 0).unwrap().is_none());
+        assert!(st.cache.get(TileKey::new("s", 0, 0, 0)).unwrap().is_none());
     }
 
     #[tokio::test]
@@ -457,7 +462,7 @@ mod tests {
             get_tile(&st, "s", 0, 0, 0, None).await,
             FetchOutcome::Empty { status: 404 }
         ));
-        let row = st.cache.get("s", 0, 0, 0).unwrap().unwrap();
+        let row = st.cache.get(TileKey::new("s", 0, 0, 0)).unwrap().unwrap();
         assert_eq!(row.status, 404);
         // A second request within the negative TTL serves from the negative cache.
         assert!(matches!(

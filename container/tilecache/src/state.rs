@@ -6,7 +6,7 @@ use crate::source::ChartSource;
 use crate::ssrf::is_forbidden_ip;
 use bytes::Bytes;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
 use std::sync::Arc;
@@ -89,6 +89,9 @@ pub struct StyleState {
     pub source_maxzoom: HashMap<String, u32>,
     pub fontstacks: Vec<String>,
     pub sprite_base: Option<String>,
+    /// Source names whose inline tiles or TileJSON url reference a host off the allowlist, decided once
+    /// at learn time so the serve path strips them from the style instead of re-deriving the check.
+    pub host_rejected_sources: HashSet<String>,
 }
 
 #[derive(Clone)]

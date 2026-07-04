@@ -6,7 +6,7 @@
 //! below the shared `EGRESS_CONCURRENCY`, so a large warm cannot starve interactive tile reads. The job
 //! registry is in memory, cleared on completion plus a TTL.
 
-use crate::cache::{CachedTile, WarmRow};
+use crate::cache::{CachedTile, TileKey, WarmRow};
 use crate::fetcher::{acceptable_content_type, fetch_upstream, strong_etag};
 use crate::geom::{tile_count_in_bbox, tiles_iter};
 use crate::source::{ChartSource, UpstreamTemplate};
@@ -334,10 +334,7 @@ async fn warm_one_asset(
     let budget = effective_budget(st, Some(region));
     let pinned = tokio::task::spawn_blocking(move || {
         cache.pin_if_fresh(
-            &cache_source_owned,
-            0,
-            x,
-            0,
+            TileKey::new(&cache_source_owned, 0, x, 0),
             now,
             fresh_secs,
             neg_ttl,
@@ -520,10 +517,7 @@ async fn warm_one(
     let budget = effective_budget(st, region_id);
     let pinned = tokio::task::spawn_blocking(move || {
         cache.pin_if_fresh(
-            &source_id,
-            z,
-            x,
-            y,
+            TileKey::new(&source_id, z, x, y),
             now,
             fresh_secs,
             neg_ttl,
@@ -933,7 +927,7 @@ mod tests {
         // The stored tile is pinned: an evict_to far below the total leaves it.
         st.cache.evict_to(0).unwrap();
         assert!(
-            st.cache.get("s", 0, 0, 0).unwrap().is_some(),
+            st.cache.get(TileKey::new("s", 0, 0, 0)).unwrap().is_some(),
             "the warmed box is pinned"
         );
     }
@@ -956,7 +950,9 @@ mod tests {
             bytes: 4,
             blob: Some(vec![1, 2, 3, 4].into()),
         };
-        st.cache.put("s", 0, 0, 0, &seeded, false, now).unwrap();
+        st.cache
+            .put(TileKey::new("s", 0, 0, 0), &seeded, false, now)
+            .unwrap();
         let job = start_warm(
             &st,
             WarmRequest {
@@ -976,7 +972,7 @@ mod tests {
         );
         st.cache.evict_to(0).unwrap();
         assert!(
-            st.cache.get("s", 0, 0, 0).unwrap().is_some(),
+            st.cache.get(TileKey::new("s", 0, 0, 0)).unwrap().is_some(),
             "the skipped tile was pinned by the warm"
         );
     }
@@ -1272,7 +1268,7 @@ mod tests {
         st.cache.evict_to(0).unwrap();
         assert!(
             st.cache
-                .get("style:basemap:openmaptiles", 0, 0, 0)
+                .get(TileKey::new("style:basemap:openmaptiles", 0, 0, 0))
                 .unwrap()
                 .is_some(),
             "the basemap vector tile is pinned under the style cache key"
@@ -1301,7 +1297,7 @@ mod tests {
         assert_eq!(snap["state"], "done");
         assert!(
             st.cache
-                .get("style:basemap:openmaptiles", 15, 0, 0)
+                .get(TileKey::new("style:basemap:openmaptiles", 15, 0, 0))
                 .unwrap()
                 .is_none(),
             "no tile above the native maxzoom"
@@ -1370,18 +1366,18 @@ mod tests {
         wait_assets(&st).await;
         let gk = crate::style::glyph_cache_source("basemap", "Noto Sans Regular");
         assert!(
-            st.cache.get(&gk, 0, 0, 0).unwrap().is_some(),
+            st.cache.get(TileKey::new(&gk, 0, 0, 0)).unwrap().is_some(),
             "a glyph range is pinned under the assets region"
         );
         let sk = crate::style::sprite_cache_source("basemap");
         assert!(
-            st.cache.get(&sk, 0, 0, 0).unwrap().is_some(),
+            st.cache.get(TileKey::new(&sk, 0, 0, 0)).unwrap().is_some(),
             "the sprite json is pinned"
         );
         // Pinned: a deep eviction keeps them.
         st.cache.evict_to(0).unwrap();
         assert!(
-            st.cache.get(&gk, 0, 0, 0).unwrap().is_some(),
+            st.cache.get(TileKey::new(&gk, 0, 0, 0)).unwrap().is_some(),
             "the glyph is pinned, not evicted"
         );
     }
@@ -1481,13 +1477,12 @@ mod tests {
             bytes: 3,
             blob: Some(vec![1u8, 2, 3].into()),
         };
-        st.cache.put(&gk, 0, 0, 0, &seeded, false, now).unwrap();
+        st.cache
+            .put(TileKey::new(&gk, 0, 0, 0), &seeded, false, now)
+            .unwrap();
         st.cache
             .pin_for_region(
-                &gk,
-                0,
-                0,
-                0,
+                TileKey::new(&gk, 0, 0, 0),
                 2_000_000_000,
                 Some(crate::state::BASEMAP_ASSETS_REGION_ID),
             )
@@ -1510,7 +1505,12 @@ mod tests {
         // know the warm filled the rest.
         let mut filled = false;
         for _ in 0..200 {
-            if st.cache.get(&gk, 0, 256, 0).unwrap().is_some() {
+            if st
+                .cache
+                .get(TileKey::new(&gk, 0, 256, 0))
+                .unwrap()
+                .is_some()
+            {
                 filled = true;
                 break;
             }
@@ -1519,7 +1519,11 @@ mod tests {
         assert!(filled, "a later glyph range was filled");
         // The seeded range keeps its seeded bytes (not refetched).
         assert_eq!(
-            st.cache.get(&gk, 0, 0, 0).unwrap().unwrap().blob,
+            st.cache
+                .get(TileKey::new(&gk, 0, 0, 0))
+                .unwrap()
+                .unwrap()
+                .blob,
             Some(vec![1u8, 2, 3].into()),
             "the seeded glyph was not refetched"
         );

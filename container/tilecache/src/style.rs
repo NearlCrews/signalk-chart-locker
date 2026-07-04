@@ -5,7 +5,7 @@
 //! allowed hosts (and the client's guarded DNS resolver). The vector tiles are cached through the tile
 //! cache so the basemap geometry works offline. Sprite stays direct in v1 (a small visual degradation).
 
-use crate::cache::CachedTile;
+use crate::cache::{CachedTile, TileKey};
 use crate::source::UpstreamTemplate;
 use crate::state::{now_secs, AppState, StyleState};
 use axum::{
@@ -16,7 +16,7 @@ use axum::{
     Router,
 };
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
 pub fn style_routes() -> Router<AppState> {
@@ -44,12 +44,8 @@ pub(crate) fn sprite_cache_source(style_source: &str) -> String {
 /// The sprite variants MapLibre requests, as (cache-x index, upstream suffix) pairs, for the warm engine
 /// to enumerate. Keep in sync with the four sprite serve routes (sprite_json, sprite_png, sprite_2x_json,
 /// sprite_2x_png), which use the same fixed index and suffix per route.
-pub(crate) const SPRITE_VARIANTS: [(u32, &str); 4] = [
-    (0, ".json"),
-    (1, ".png"),
-    (2, "@2x.json"),
-    (3, "@2x.png"),
-];
+pub(crate) const SPRITE_VARIANTS: [(u32, &str); 4] =
+    [(0, ".json"), (1, ".png"), (2, "@2x.json"), (3, "@2x.png")];
 
 /// Parse and canonicalize a glyph range param like `0-255.pbf`. Returns `(range_start, "start-end.pbf")`
 /// only for a well-formed, 256-aligned, 256-wide range (the shape MapLibre requests). Returns None
@@ -145,6 +141,11 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Value> {
 
     let mut source_tiles: HashMap<String, Vec<String>> = HashMap::new();
     let mut source_maxzoom: HashMap<String, u32> = HashMap::new();
+    // Sources whose inline tiles or TileJSON url reference a host off the style's allowlist. style_doc
+    // strips these from the served style so the browser is never told to fetch that host directly. A
+    // source with a fetchable TileJSON on an allowed host that yields no tiles is NOT recorded here: it
+    // is left in the served style unchanged (its url stays on an allowed host), matching prior behavior.
+    let mut host_rejected: HashSet<String> = HashSet::new();
     let names: Vec<String> = style
         .get("sources")
         .and_then(|v| v.as_object())
@@ -159,12 +160,17 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Value> {
             .map(|m| m as u32);
         let (tiles, tj_max): (Vec<String>, Option<u32>) =
             if let Some(arr) = src.get("tiles").and_then(|v| v.as_array()) {
-                (
-                    arr.iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect(),
-                    None,
-                )
+                let tiles: Vec<String> = arr
+                    .iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect();
+                // Reject inline tiles that point off the allowlist, so they are stripped rather than
+                // learned and rewritten to a proxy path that would only 502 at serve time.
+                if tiles.iter().any(|t| !host_allowed(t, &allowed)) {
+                    host_rejected.insert(name.clone());
+                    continue;
+                }
+                (tiles, None)
             } else if let Some(url) = src.get("url").and_then(|v| v.as_str()) {
                 if host_allowed(url, &allowed) {
                     match fetch_json(state, url).await {
@@ -182,6 +188,7 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Value> {
                         None => (Vec::new(), None),
                     }
                 } else {
+                    host_rejected.insert(name.clone());
                     (Vec::new(), None)
                 }
             } else {
@@ -203,6 +210,7 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Value> {
             source_maxzoom,
             fontstacks,
             sprite_base,
+            host_rejected_sources: host_rejected,
         },
     );
     Some(style)
@@ -264,31 +272,17 @@ async fn style_doc(State(state): State<AppState>, Path(source): Path<String>) ->
             }
         }
     }
-    // Fail closed: a source the learn step could not rewrite (its inline tiles or TileJSON url is off the
-    // style's allowlist) keeps its upstream url in the style unless we strip it, and the browser would
-    // then fetch that host directly, bypassing the container, the cache, and the allowlist. Drop any
-    // leftover off-allowlist url or tiles so an unlearnable source renders empty rather than leaking its
-    // upstream, matching how glyphs and vector tiles fail closed on a disallowed host.
-    let allowed = style_allowed_hosts(&state, &source).await;
-    if let Some(sources_obj) = style["sources"].as_object_mut() {
-        for (name, src) in sources_obj.iter_mut() {
-            if learned.source_tiles.contains_key(name) {
-                continue;
-            }
-            let url_leaks = src
-                .get("url")
-                .and_then(|v| v.as_str())
-                .map(|u| !host_allowed(u, &allowed))
-                .unwrap_or(false);
-            let tiles_leak = src
-                .get("tiles")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .any(|t| t.as_str().map(|u| !host_allowed(u, &allowed)).unwrap_or(false))
-                })
-                .unwrap_or(false);
-            if url_leaks || tiles_leak {
+    // Fail closed: a source recorded host-rejected at learn time (its inline tiles or TileJSON url is off
+    // the style's allowlist) still carries its upstream url in the served style, and the browser would
+    // then fetch that host directly, bypassing the container, the cache, and the allowlist. Strip the url
+    // and tiles from each so it renders empty rather than leaking its upstream. The decision was made
+    // once in fetch_and_learn, so the serve path consumes it instead of re-deriving host_allowed here.
+    if !learned.host_rejected_sources.is_empty() {
+        if let Some(sources_obj) = style["sources"].as_object_mut() {
+            for (name, src) in sources_obj.iter_mut() {
+                if !learned.host_rejected_sources.contains(name) {
+                    continue;
+                }
                 if let Some(obj) = src.as_object_mut() {
                     obj.remove("url");
                     obj.remove("tiles");
@@ -323,89 +317,85 @@ async fn glyphs(
         return StatusCode::NOT_FOUND.into_response();
     };
     let cache_source = glyph_cache_source(&source, &fontstack);
-
-    // Cache first (also the offline path). A cached negative (zero-byte) row serves as a 404 so
-    // MapLibre treats the range as absent rather than an error.
-    if let Ok(Some(tile)) = state.cache.get(&cache_source, 0, range_start, 0) {
+    // A cached negative (zero-byte) glyph row always serves as a 404 so MapLibre treats the range as
+    // absent rather than an error; a 200 is served offline-first.
+    let serve_cached = |tile: &CachedTile| -> Option<Response> {
         if tile.status == 200 {
             if now_secs() - tile.last_access >= crate::fetcher::TOUCH_THROTTLE_SECS {
-                crate::fetcher::log_cache_err(state.cache.touch(
-                    &cache_source,
-                    0,
-                    range_start,
-                    0,
-                    now_secs(),
-                ));
+                crate::fetcher::log_cache_err(
+                    state
+                        .cache
+                        .touch(TileKey::new(&cache_source, 0, range_start, 0), now_secs()),
+                );
             }
-            return (
-                [(header::CONTENT_TYPE, tile.content_type.clone())],
-                tile.blob.clone().unwrap_or_default(),
-            )
-                .into_response();
+            Some(raw_asset_response(tile))
+        } else {
+            Some(StatusCode::NOT_FOUND.into_response())
         }
-        return StatusCode::NOT_FOUND.into_response();
-    }
-
-    let template = {
-        state
-            .style_state
-            .read()
-            .await
-            .get(&source)
-            .and_then(|s| s.glyphs.clone())
     };
-    let Some(template) = template else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let allowed = style_allowed_hosts(&state, &source).await;
-    let upstream = template
-        .replace("{fontstack}", &encode_fontstack(&fontstack))
-        .replace("{range}.pbf", &canonical_range);
-    if !host_allowed(&upstream, &allowed) {
-        return StatusCode::BAD_GATEWAY.into_response();
-    }
-    // Single-flight the miss so a first-load burst of identical glyph requests makes one upstream fetch.
-    let key = format!("{cache_source}/0/{range_start}/0");
-    let lock = state.inflight_lock(&key).await;
-    let _guard = lock.lock().await;
-    // Re-check: a concurrent flight or a warm may have filled the cache while we waited.
-    if let Ok(Some(tile)) = state.cache.get(&cache_source, 0, range_start, 0) {
-        if tile.status == 200 {
-            state.inflight_finish(&key, &lock).await;
-            return (
-                [(header::CONTENT_TYPE, tile.content_type.clone())],
-                tile.blob.clone().unwrap_or_default(),
-            )
-                .into_response();
-        }
-        if now_secs() - tile.fetched_at < state.knobs.negative_ttl_secs {
-            state.inflight_finish(&key, &lock).await;
-            return StatusCode::NOT_FOUND.into_response();
-        }
-    }
-    let resp = match crate::fetcher::fetch_upstream(&state, &upstream, None).await {
-        Ok((200, f)) => {
-            let now = now_secs();
-            let tile = CachedTile {
-                content_type: f.content_type,
-                strong_etag: crate::fetcher::strong_etag(&f.body),
-                upstream_validator: None,
-                status: 200,
-                fetched_at: now,
-                last_access: now,
-                bytes: f.body.len() as i64,
-                blob: Some(f.body),
+    cache_first_single_flight(
+        &state,
+        &cache_source,
+        0,
+        range_start,
+        0,
+        serve_cached,
+        || async {
+            let template = {
+                state
+                    .style_state
+                    .read()
+                    .await
+                    .get(&source)
+                    .and_then(|s| s.glyphs.clone())
             };
-            let content_type = tile.content_type.clone();
-            let body = tile.blob.clone().unwrap_or_default();
-            store_and_evict(&state, cache_source, 0, range_start, 0, tile, now).await;
-            ([(header::CONTENT_TYPE, content_type)], body).into_response()
-        }
-        Ok((404, _)) | Ok((204, _)) => StatusCode::NOT_FOUND.into_response(),
-        _ => StatusCode::BAD_GATEWAY.into_response(),
-    };
-    state.inflight_finish(&key, &lock).await;
-    resp
+            let Some(template) = template else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            let allowed = style_allowed_hosts(&state, &source).await;
+            let upstream = template
+                .replace("{fontstack}", &encode_fontstack(&fontstack))
+                .replace("{range}.pbf", &canonical_range);
+            if !host_allowed(&upstream, &allowed) {
+                return StatusCode::BAD_GATEWAY.into_response();
+            }
+            match crate::fetcher::fetch_upstream(&state, &upstream, None).await {
+                Ok((200, f)) => {
+                    let now = now_secs();
+                    let tile = new_asset_tile(f, now);
+                    let response = raw_asset_response(&tile);
+                    store_and_evict(&state, &cache_source, 0, range_start, 0, tile, now).await;
+                    response
+                }
+                Ok((404, _)) | Ok((204, _)) => StatusCode::NOT_FOUND.into_response(),
+                _ => StatusCode::BAD_GATEWAY.into_response(),
+            }
+        },
+    )
+    .await
+}
+
+/// A raw (content-type plus body, no ETag or Range) response for a cached glyph or sprite asset.
+fn raw_asset_response(tile: &CachedTile) -> Response {
+    (
+        [(header::CONTENT_TYPE, tile.content_type.clone())],
+        tile.blob.clone().unwrap_or_default(),
+    )
+        .into_response()
+}
+
+/// Build a 200 CachedTile for a fetched glyph or sprite asset.
+fn new_asset_tile(f: crate::fetcher::Fetched, now: i64) -> CachedTile {
+    CachedTile {
+        content_type: f.content_type,
+        strong_etag: crate::fetcher::strong_etag(&f.body),
+        upstream_validator: None,
+        status: 200,
+        fetched_at: now,
+        last_access: now,
+        bytes: f.body.len() as i64,
+        blob: Some(f.body),
+    }
 }
 
 // The sprite variants. MapLibre appends the suffix to the sprite base with no slash, so each is an
@@ -427,74 +417,54 @@ async fn sprite_2x_png(s: State<AppState>, p: Path<String>) -> Response {
 /// upstream from the learned sprite base plus the suffix.
 async fn sprite_variant(state: AppState, source: String, variant: u32, suffix: &str) -> Response {
     let cache_source = sprite_cache_source(&source);
-    if let Ok(Some(tile)) = state.cache.get(&cache_source, 0, variant, 0) {
+    let suffix = suffix.to_string();
+    // A cached sprite negative serves as a 404; a 200 is served offline-first (no last_access touch,
+    // matching the prior behavior).
+    let serve_cached = |tile: &CachedTile| -> Option<Response> {
         if tile.status == 200 {
-            return (
-                [(header::CONTENT_TYPE, tile.content_type.clone())],
-                tile.blob.clone().unwrap_or_default(),
-            )
-                .into_response();
+            Some(raw_asset_response(tile))
+        } else {
+            Some(StatusCode::NOT_FOUND.into_response())
         }
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let base = {
-        state
-            .style_state
-            .read()
-            .await
-            .get(&source)
-            .and_then(|s| s.sprite_base.clone())
     };
-    let Some(base) = base else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let allowed = style_allowed_hosts(&state, &source).await;
-    let upstream = format!("{base}{suffix}");
-    if !host_allowed(&upstream, &allowed) {
-        return StatusCode::BAD_GATEWAY.into_response();
-    }
-    // Single-flight the miss so a first-load burst of identical sprite requests makes one upstream fetch.
-    let key = format!("{cache_source}/0/{variant}/0");
-    let lock = state.inflight_lock(&key).await;
-    let _guard = lock.lock().await;
-    // Re-check: a concurrent flight or a warm may have filled the cache while we waited.
-    if let Ok(Some(tile)) = state.cache.get(&cache_source, 0, variant, 0) {
-        if tile.status == 200 {
-            state.inflight_finish(&key, &lock).await;
-            return (
-                [(header::CONTENT_TYPE, tile.content_type.clone())],
-                tile.blob.clone().unwrap_or_default(),
-            )
-                .into_response();
-        }
-        if now_secs() - tile.fetched_at < state.knobs.negative_ttl_secs {
-            state.inflight_finish(&key, &lock).await;
-            return StatusCode::NOT_FOUND.into_response();
-        }
-    }
-    let resp = match crate::fetcher::fetch_upstream(&state, &upstream, None).await {
-        Ok((200, f)) => {
-            let now = now_secs();
-            let tile = CachedTile {
-                content_type: f.content_type,
-                strong_etag: crate::fetcher::strong_etag(&f.body),
-                upstream_validator: None,
-                status: 200,
-                fetched_at: now,
-                last_access: now,
-                bytes: f.body.len() as i64,
-                blob: Some(f.body),
+    cache_first_single_flight(
+        &state,
+        &cache_source,
+        0,
+        variant,
+        0,
+        serve_cached,
+        || async {
+            let base = {
+                state
+                    .style_state
+                    .read()
+                    .await
+                    .get(&source)
+                    .and_then(|s| s.sprite_base.clone())
             };
-            let content_type = tile.content_type.clone();
-            let body = tile.blob.clone().unwrap_or_default();
-            store_and_evict(&state, cache_source, 0, variant, 0, tile, now).await;
-            ([(header::CONTENT_TYPE, content_type)], body).into_response()
-        }
-        Ok((404, _)) | Ok((204, _)) => StatusCode::NOT_FOUND.into_response(),
-        _ => StatusCode::BAD_GATEWAY.into_response(),
-    };
-    state.inflight_finish(&key, &lock).await;
-    resp
+            let Some(base) = base else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            let allowed = style_allowed_hosts(&state, &source).await;
+            let upstream = format!("{base}{suffix}");
+            if !host_allowed(&upstream, &allowed) {
+                return StatusCode::BAD_GATEWAY.into_response();
+            }
+            match crate::fetcher::fetch_upstream(&state, &upstream, None).await {
+                Ok((200, f)) => {
+                    let now = now_secs();
+                    let tile = new_asset_tile(f, now);
+                    let response = raw_asset_response(&tile);
+                    store_and_evict(&state, &cache_source, 0, variant, 0, tile, now).await;
+                    response
+                }
+                Ok((404, _)) | Ok((204, _)) => StatusCode::NOT_FOUND.into_response(),
+                _ => StatusCode::BAD_GATEWAY.into_response(),
+            }
+        },
+    )
+    .await
 }
 
 /// GET /style/:source/tiles/:name/:z/:x/:y: serve a basemap vector tile, cached through the tile cache.
@@ -503,99 +473,79 @@ async fn vector_tile(
     Path((source, name, z, x, y)): Path<(String, String, u32, u32, u32)>,
     headers: HeaderMap,
 ) -> Response {
-    let template = {
-        state
-            .style_state
-            .read()
-            .await
-            .get(&source)
-            .and_then(|s| s.source_tiles.get(&name).and_then(|t| t.first().cloned()))
-    };
-    let Some(template) = template else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
     let cache_source = format!("style:{source}:{name}");
     let if_none_match = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-
-    // Cache first (also the offline path: serve a cached tile when the upstream is unreachable).
-    if let Ok(Some(tile)) = state.cache.get(&cache_source, z, x, y) {
+    // Cache-first serves a 200 (last_access touch-throttled), serves a cached negative within the
+    // negative TTL as a 404 (a warm-pinned 404 or 204), and otherwise falls through to a refetch so an
+    // expired negative refetches.
+    let serve_cached = |tile: &CachedTile| -> Option<Response> {
         if tile.status == 200 {
             if now_secs() - tile.last_access >= crate::fetcher::TOUCH_THROTTLE_SECS {
-                crate::fetcher::log_cache_err(state.cache.touch(
+                crate::fetcher::log_cache_err(
+                    state
+                        .cache
+                        .touch(TileKey::new(&cache_source, z, x, y), now_secs()),
+                );
+            }
+            Some(tile_response(tile, if_none_match.as_deref()))
+        } else if now_secs() - tile.fetched_at < state.knobs.negative_ttl_secs {
+            Some(StatusCode::NOT_FOUND.into_response())
+        } else {
+            None
+        }
+    };
+    cache_first_single_flight(&state, &cache_source, z, x, y, serve_cached, || async {
+        let template = {
+            state
+                .style_state
+                .read()
+                .await
+                .get(&source)
+                .and_then(|s| s.source_tiles.get(&name).and_then(|t| t.first().cloned()))
+        };
+        let Some(template) = template else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        let allowed = style_allowed_hosts(&state, &source).await;
+        let upstream = template
+            .replace("{z}", &z.to_string())
+            .replace("{x}", &x.to_string())
+            .replace("{y}", &y.to_string());
+        if !host_allowed(&upstream, &allowed) {
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+        match crate::fetcher::fetch_upstream(&state, &upstream, None).await {
+            Ok((200, f)) => {
+                let now = now_secs();
+                let tile = new_asset_tile(f, now);
+                let served = tile_response(&tile, if_none_match.as_deref());
+                store_and_evict(&state, &cache_source, z, x, y, tile, now).await;
+                served
+            }
+            // A genuinely missing vector tile is a 404, not a gateway error. Negative-cache it (zero-byte
+            // row) so the negative_ttl branch above serves the miss without refetching, matching the
+            // raster and glyph negative paths.
+            Ok((status @ (404 | 204), _)) => {
+                let now = now_secs();
+                store_and_evict(
+                    &state,
                     &cache_source,
                     z,
                     x,
                     y,
-                    now_secs(),
-                ));
+                    CachedTile::negative(status as i64, now),
+                    now,
+                )
+                .await;
+                StatusCode::NOT_FOUND.into_response()
             }
-            return tile_response(&tile, if_none_match.as_deref());
+            _ => StatusCode::BAD_GATEWAY.into_response(),
         }
-        // A cached negative (a warm-pinned 404 or 204) serves as a 404 within the negative TTL, matching
-        // the glyph route and the raster negative path, rather than refetching on every request.
-        if now_secs() - tile.fetched_at < state.knobs.negative_ttl_secs {
-            return StatusCode::NOT_FOUND.into_response();
-        }
-    }
-
-    let allowed = style_allowed_hosts(&state, &source).await;
-    let upstream = template
-        .replace("{z}", &z.to_string())
-        .replace("{x}", &x.to_string())
-        .replace("{y}", &y.to_string());
-    if !host_allowed(&upstream, &allowed) {
-        return StatusCode::BAD_GATEWAY.into_response();
-    }
-    // Single-flight the miss so a first-load burst of identical vector-tile requests makes one fetch.
-    let key = format!("{cache_source}/{z}/{x}/{y}");
-    let lock = state.inflight_lock(&key).await;
-    let _guard = lock.lock().await;
-    // Re-check: a concurrent flight or a warm may have filled the cache while we waited.
-    if let Ok(Some(tile)) = state.cache.get(&cache_source, z, x, y) {
-        if tile.status == 200 {
-            state.inflight_finish(&key, &lock).await;
-            return tile_response(&tile, if_none_match.as_deref());
-        }
-        if now_secs() - tile.fetched_at < state.knobs.negative_ttl_secs {
-            state.inflight_finish(&key, &lock).await;
-            return StatusCode::NOT_FOUND.into_response();
-        }
-    }
-    let resp = match crate::fetcher::fetch_upstream(&state, &upstream, None).await {
-        Ok((200, f)) => {
-            let now = now_secs();
-            let tile = CachedTile {
-                content_type: f.content_type,
-                strong_etag: crate::fetcher::strong_etag(&f.body),
-                upstream_validator: None,
-                status: 200,
-                fetched_at: now,
-                last_access: now,
-                bytes: f.body.len() as i64,
-                blob: Some(f.body),
-            };
-            // Soft reserve: the scroll cache uses the whole cap. evict_to(cap) drops only unpinned rows,
-            // so the scroll cache fills the cap minus the bytes actually pinned by saved regions. The
-            // store-and-evict runs on the blocking pool so the eviction scan never stalls the reactor.
-            let served = tile_response(&tile, if_none_match.as_deref());
-            store_and_evict(&state, cache_source, z, x, y, tile, now).await;
-            served
-        }
-        // A genuinely missing vector tile is a 404, not a gateway error. Negative-cache it (zero-byte
-        // row) so the negative_ttl branch above serves the miss without refetching, matching the raster
-        // and glyph negative paths.
-        Ok((status @ (404 | 204), _)) => {
-            let now = now_secs();
-            store_and_evict(&state, cache_source, z, x, y, CachedTile::negative(status as i64, now), now).await;
-            StatusCode::NOT_FOUND.into_response()
-        }
-        _ => StatusCode::BAD_GATEWAY.into_response(),
-    };
-    state.inflight_finish(&key, &lock).await;
-    resp
+    })
+    .await
 }
 
 async fn style_allowed_hosts(state: &AppState, source: &str) -> Vec<String> {
@@ -626,7 +576,7 @@ fn tile_response(tile: &CachedTile, if_none_match: Option<&str>) -> Response {
 /// the raster store path in `fetcher::store_200`.
 async fn store_and_evict(
     state: &AppState,
-    cache_source: String,
+    cache_source: &str,
     z: u32,
     x: u32,
     y: u32,
@@ -635,8 +585,14 @@ async fn store_and_evict(
 ) {
     let cache = state.cache.clone();
     let cap = state.live_cap_bytes.load(Ordering::Relaxed);
+    let cache_source = cache_source.to_string();
     if let Err(e) = tokio::task::spawn_blocking(move || {
-        crate::fetcher::log_cache_err(cache.put(&cache_source, z, x, y, &tile, false, now));
+        crate::fetcher::log_cache_err(cache.put(
+            TileKey::new(&cache_source, z, x, y),
+            &tile,
+            false,
+            now,
+        ));
         crate::fetcher::log_cache_err(cache.evict_to(cap));
     })
     .await
@@ -645,9 +601,49 @@ async fn store_and_evict(
     }
 }
 
+/// The cache-first plus single-flight scaffold shared by the glyph, sprite, and vector-tile routes.
+/// `serve_cached` decides whether a cached row is servable now (returning Some, encapsulating each
+/// route's 200-serve and its own negative-cache policy) or should fall through to a fetch (None).
+/// `fetch_store` runs the upstream fetch, stores the result, and builds the response; it runs at most
+/// once, under the single-flight lock. inflight_finish is guaranteed on every return path.
+async fn cache_first_single_flight<S, F, Fut>(
+    state: &AppState,
+    cache_source: &str,
+    z: u32,
+    x: u32,
+    y: u32,
+    serve_cached: S,
+    fetch_store: F,
+) -> Response
+where
+    S: Fn(&CachedTile) -> Option<Response>,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Response>,
+{
+    if let Ok(Some(tile)) = state.cache.get(TileKey::new(cache_source, z, x, y)) {
+        if let Some(resp) = serve_cached(&tile) {
+            return resp;
+        }
+    }
+    // Single-flight the miss so a first-load burst of identical requests makes one upstream fetch.
+    let key = format!("{cache_source}/{z}/{x}/{y}");
+    let lock = state.inflight_lock(&key).await;
+    let _guard = lock.lock().await;
+    // Re-check: a concurrent flight or a warm may have filled the cache while we waited.
+    if let Ok(Some(tile)) = state.cache.get(TileKey::new(cache_source, z, x, y)) {
+        if let Some(resp) = serve_cached(&tile) {
+            state.inflight_finish(&key, &lock).await;
+            return resp;
+        }
+    }
+    let resp = fetch_store().await;
+    state.inflight_finish(&key, &lock).await;
+    resp
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::cache::TileCache;
+    use crate::cache::{TileCache, TileKey};
     use crate::routes::app;
     use crate::state::{AppState, Knobs};
     use axum::body::Body;
@@ -879,7 +875,9 @@ mod tests {
             bytes: 3,
             blob: Some(bytes::Bytes::from(vec![9u8, 9, 9])),
         };
-        st.cache.put(&key, 0, 0, 0, &tile, true, now).unwrap();
+        st.cache
+            .put(TileKey::new(&key, 0, 0, 0), &tile, true, now)
+            .unwrap();
         let resp = router
             .oneshot(
                 Request::get("/style/basemap/glyphs/Noto%20Sans%20Regular/0-255.pbf")
@@ -930,7 +928,9 @@ mod tests {
             bytes: 0,
             blob: None,
         };
-        st.cache.put(&key, 0, 0, 0, &neg, true, now).unwrap();
+        st.cache
+            .put(TileKey::new(&key, 0, 0, 0), &neg, true, now)
+            .unwrap();
         let resp = router
             .oneshot(
                 Request::get("/style/basemap/glyphs/Noto%20Sans%20Regular/0-255.pbf")
@@ -983,7 +983,12 @@ mod tests {
         assert_eq!(sprite.status(), StatusCode::OK);
         assert!(
             st.cache
-                .get(&crate::style::sprite_cache_source("basemap"), 0, 0, 0)
+                .get(TileKey::new(
+                    &crate::style::sprite_cache_source("basemap"),
+                    0,
+                    0,
+                    0
+                ))
                 .unwrap()
                 .is_some(),
             "sprite.json is cached under variant index 0"

@@ -60,6 +60,22 @@ pub enum PutOutcome {
     Degraded,
 }
 
+/// A cache row key: the source id plus the z, x, and y tile coordinates. Passed by value (Copy) to the
+/// cache methods so the four fields travel together and cannot be transposed positionally.
+#[derive(Clone, Copy)]
+pub struct TileKey<'a> {
+    pub source: &'a str,
+    pub z: u32,
+    pub x: u32,
+    pub y: u32,
+}
+
+impl<'a> TileKey<'a> {
+    pub fn new(source: &'a str, z: u32, x: u32, y: u32) -> Self {
+        Self { source, z, x, y }
+    }
+}
+
 /// A tile to store as part of a warm, carrying its key and its `CachedTile`.
 pub struct WarmRow {
     pub source: String,
@@ -81,6 +97,11 @@ struct Inner {
     conn: Connection,
     total_bytes: i64,
     pinned_bytes: i64,
+    /// Memoized `real_region_pinned_bytes` result, valid while `regions_dirty` is false. Invalidated on
+    /// every path that changes real-region membership or a pinned tile's bytes (the pin paths,
+    /// put_many_pinned, delete_region, and a live-proxy put that keeps a tile pinned).
+    real_region_cache: i64,
+    regions_dirty: bool,
 }
 
 /// The disk tile cache, opened at a path on the mounted cache volume.
@@ -116,6 +137,8 @@ impl TileCache {
                 conn,
                 total_bytes,
                 pinned_bytes,
+                real_region_cache: 0,
+                regions_dirty: true,
             }),
         })
     }
@@ -176,13 +199,8 @@ impl TileCache {
     }
 
     /// Look up a cached tile by key. Does not update last_access (the caller throttles touches).
-    pub fn get(
-        &self,
-        source: &str,
-        z: u32,
-        x: u32,
-        y: u32,
-    ) -> rusqlite::Result<Option<CachedTile>> {
+    pub fn get(&self, key: TileKey) -> rusqlite::Result<Option<CachedTile>> {
+        let TileKey { source, z, x, y } = key;
         let inner = self.lock();
         inner
             .conn
@@ -210,17 +228,14 @@ impl TileCache {
     /// Insert or replace a tile, keeping the running byte total in sync. Returns `Degraded` on a
     /// full disk so the caller serves the bytes without storing them. Pass `pinned = true` to mark
     /// the row eviction-exempt (used by the warm engine; the live proxy always passes `false`).
-    #[allow(clippy::too_many_arguments)]
     pub fn put(
         &self,
-        source: &str,
-        z: u32,
-        x: u32,
-        y: u32,
+        key: TileKey,
         tile: &CachedTile,
         pinned: bool,
         now: i64,
     ) -> rusqlite::Result<PutOutcome> {
+        let TileKey { source, z, x, y } = key;
         let mut inner = self.lock();
         let prev: Option<(i64, i64)> = inner
             .conn
@@ -254,6 +269,8 @@ impl TileCache {
                 inner.total_bytes += tile.bytes - old_bytes;
                 if effective_pinned {
                     inner.pinned_bytes += tile.bytes - if was_pinned { old_bytes } else { 0 };
+                    // A pinned tile's bytes changed, so a real-region sum that includes it is now stale.
+                    inner.regions_dirty = true;
                 }
                 Ok(PutOutcome::Stored)
             }
@@ -268,7 +285,8 @@ impl TileCache {
 
     /// Bump a tile's last_access so the LRU keeps the hot tiles. The caller throttles this so a pan
     /// does not turn every read into a write (microSD wear).
-    pub fn touch(&self, source: &str, z: u32, x: u32, y: u32, now: i64) -> rusqlite::Result<()> {
+    pub fn touch(&self, key: TileKey, now: i64) -> rusqlite::Result<()> {
+        let TileKey { source, z, x, y } = key;
         let inner = self.lock();
         inner.conn.execute(
             "UPDATE tiles SET last_access = ?5 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
@@ -348,7 +366,8 @@ impl TileCache {
         subquery: &str,
         params: &[&dyn rusqlite::ToSql],
     ) -> rusqlite::Result<(i64, i64)> {
-        let sum_sql = format!("SELECT COALESCE(SUM(bytes), 0) FROM tiles WHERE rowid IN ({subquery})");
+        let sum_sql =
+            format!("SELECT COALESCE(SUM(bytes), 0) FROM tiles WHERE rowid IN ({subquery})");
         let delete_sql = format!("DELETE FROM tiles WHERE rowid IN ({subquery})");
         let mut freed_bytes = 0i64;
         let mut freed_rows = 0i64;
@@ -483,6 +502,8 @@ impl TileCache {
         }
         inner.total_bytes = base + added - freed;
         inner.pinned_bytes = pinned_base + pinned_added;
+        // The batch pinned rows and recorded region_tiles rows, so the real-region memo is stale.
+        inner.regions_dirty = true;
         Ok(PutManyOutcome {
             stored,
             bytes_added: added,
@@ -494,17 +515,14 @@ impl TileCache {
     /// caller's already-held lock, then add the bytes to `pinned_bytes` only when the row newly entered
     /// the pinned set. Shared by `pin`, `pin_if_fresh`, and `pin_for_region` so the pin transaction and
     /// its accounting live in one place.
-    #[allow(clippy::too_many_arguments)]
     fn pin_locked(
         inner: &mut Inner,
-        source: &str,
-        z: u32,
-        x: u32,
-        y: u32,
+        key: TileKey,
         region_id: Option<&str>,
         was_pinned: bool,
         tile_bytes: i64,
     ) -> rusqlite::Result<()> {
+        let TileKey { source, z, x, y } = key;
         {
             let tx = inner.conn.unchecked_transaction()?;
             tx.execute(
@@ -522,6 +540,8 @@ impl TileCache {
         if !was_pinned {
             inner.pinned_bytes += tile_bytes;
         }
+        // A pin changes region_tiles membership (or re-pins), so the real-region memo is now stale.
+        inner.regions_dirty = true;
         Ok(())
     }
 
@@ -530,7 +550,8 @@ impl TileCache {
     /// unpinned). Test-only: the warm path uses `pin_if_fresh` so the budget gate and the join-table
     /// insert run under the same lock. A no-op when the row is absent.
     #[cfg(test)]
-    pub fn pin(&self, source: &str, z: u32, x: u32, y: u32) -> rusqlite::Result<()> {
+    pub fn pin(&self, key: TileKey) -> rusqlite::Result<()> {
+        let TileKey { source, z, x, y } = key;
         let mut inner = self.lock();
         let prev: Option<(i64, i64)> = inner.conn.query_row(
             "SELECT bytes, pinned FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
@@ -539,7 +560,7 @@ impl TileCache {
         let Some((tile_bytes, pinned)) = prev else {
             return Ok(());
         };
-        Self::pin_locked(&mut inner, source, z, x, y, None, pinned == 1, tile_bytes)
+        Self::pin_locked(&mut inner, key, None, pinned == 1, tile_bytes)
     }
 
     /// Check freshness and pin under the same lock, eliminating the get-then-pin race where a
@@ -550,19 +571,16 @@ impl TileCache {
     /// region). `pinned_bytes` grows only when the tile newly enters the pinned set, so an
     /// already-pinned shared tile is never double-counted; when `region_id` is `Some`, the join row
     /// is recorded regardless so the tile is reference-counted for this region too.
-    #[allow(clippy::too_many_arguments)]
     pub fn pin_if_fresh(
         &self,
-        source: &str,
-        z: u32,
-        x: u32,
-        y: u32,
+        key: TileKey,
         now: i64,
         fresh_secs: i64,
         negative_ttl_secs: i64,
         budget: i64,
         region_id: Option<&str>,
     ) -> rusqlite::Result<bool> {
+        let TileKey { source, z, x, y } = key;
         let mut inner = self.lock();
         let row: Option<(i64, i64)> = inner
             .conn
@@ -589,7 +607,7 @@ impl TileCache {
         if !was_pinned && tile_bytes > 0 && inner.pinned_bytes + tile_bytes > budget {
             return Ok(false);
         }
-        Self::pin_locked(&mut inner, source, z, x, y, region_id, was_pinned, tile_bytes)?;
+        Self::pin_locked(&mut inner, key, region_id, was_pinned, tile_bytes)?;
         Ok(true)
     }
 
@@ -600,13 +618,11 @@ impl TileCache {
     /// `false` when the row is absent.
     pub fn pin_for_region(
         &self,
-        source: &str,
-        z: u32,
-        x: u32,
-        y: u32,
+        key: TileKey,
         budget: i64,
         region_id: Option<&str>,
     ) -> rusqlite::Result<bool> {
+        let TileKey { source, z, x, y } = key;
         let mut inner = self.lock();
         let prev: Option<(i64, i64)> = inner.conn.query_row(
             "SELECT bytes, pinned FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
@@ -621,7 +637,7 @@ impl TileCache {
         if !was_pinned && tile_bytes > 0 && inner.pinned_bytes + tile_bytes > budget {
             return Ok(false);
         }
-        Self::pin_locked(&mut inner, source, z, x, y, region_id, was_pinned, tile_bytes)?;
+        Self::pin_locked(&mut inner, key, region_id, was_pinned, tile_bytes)?;
         Ok(true)
     }
 
@@ -674,6 +690,8 @@ impl TileCache {
             tx.commit()?;
         }
         inner.pinned_bytes -= freed;
+        // Region membership changed, so the real-region memo is stale.
+        inner.regions_dirty = true;
         Ok(())
     }
 
@@ -693,8 +711,13 @@ impl TileCache {
     /// the exact real-region pinned total, so the server-side regions budget gate stays exact rather
     /// than over-subtracting a shared tile.
     pub fn real_region_pinned_bytes(&self, position_warm_region_id: &str) -> rusqlite::Result<i64> {
-        let inner = self.lock();
-        inner.conn.query_row(
+        let mut inner = self.lock();
+        // Memoized: this per-tile EXISTS scan can take seconds on a large cache, and `/cache/stats` is
+        // polled. Recompute only when a pin, unpin, put, or delete_region has marked the regions dirty.
+        if !inner.regions_dirty {
+            return Ok(inner.real_region_cache);
+        }
+        let value: i64 = inner.conn.query_row(
             "SELECT COALESCE(SUM(t.bytes), 0) FROM tiles t \
              WHERE t.pinned = 1 AND EXISTS ( \
                SELECT 1 FROM region_tiles rt \
@@ -702,7 +725,10 @@ impl TileCache {
                  AND rt.region_id != ?1)",
             params![position_warm_region_id],
             |r| r.get(0),
-        )
+        )?;
+        inner.real_region_cache = value;
+        inner.regions_dirty = false;
+        Ok(value)
     }
 
     /// The mean stored byte size per source over real (status 200, blob present) tiles, excluding
@@ -850,49 +876,75 @@ mod tests {
     fn put_then_get_round_trips_bytes_and_metadata() {
         let (_f, c) = open();
         assert_eq!(
-            c.put("s", 1, 0, 0, &tile(3, 200, Some(vec![1, 2, 3])), false, 10)
-                .unwrap(),
+            c.put(
+                TileKey::new("s", 1, 0, 0),
+                &tile(3, 200, Some(vec![1, 2, 3])),
+                false,
+                10
+            )
+            .unwrap(),
             PutOutcome::Stored
         );
-        let got = c.get("s", 1, 0, 0).unwrap().unwrap();
+        let got = c.get(TileKey::new("s", 1, 0, 0)).unwrap().unwrap();
         assert_eq!(got.blob, Some(Bytes::from(vec![1, 2, 3])));
         assert_eq!(got.content_type, "image/png");
         assert_eq!(got.status, 200);
         assert_eq!(got.last_access, 10);
-        assert!(c.get("s", 1, 0, 1).unwrap().is_none());
+        assert!(c.get(TileKey::new("s", 1, 0, 1)).unwrap().is_none());
     }
 
     #[test]
     fn replace_keeps_the_byte_total_in_sync() {
         let (_f, c) = open();
-        c.put("s", 0, 0, 0, &tile(5, 200, Some(vec![0; 5])), false, 1)
-            .unwrap();
-        c.put("s", 0, 0, 0, &tile(2, 200, Some(vec![0; 2])), false, 2)
-            .unwrap();
+        c.put(
+            TileKey::new("s", 0, 0, 0),
+            &tile(5, 200, Some(vec![0; 5])),
+            false,
+            1,
+        )
+        .unwrap();
+        c.put(
+            TileKey::new("s", 0, 0, 0),
+            &tile(2, 200, Some(vec![0; 2])),
+            false,
+            2,
+        )
+        .unwrap();
         assert_eq!(c.stats().unwrap(), (1, 2, 0));
     }
 
     #[test]
     fn evict_to_removes_the_least_recently_accessed_first() {
         let (_f, c) = open();
-        c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, 1)
-            .unwrap(); // older
-        c.put("s", 0, 0, 1, &tile(10, 200, Some(vec![0; 10])), false, 2)
-            .unwrap();
+        c.put(
+            TileKey::new("s", 0, 0, 0),
+            &tile(10, 200, Some(vec![0; 10])),
+            false,
+            1,
+        )
+        .unwrap(); // older
+        c.put(
+            TileKey::new("s", 0, 0, 1),
+            &tile(10, 200, Some(vec![0; 10])),
+            false,
+            2,
+        )
+        .unwrap();
         c.evict_to(10).unwrap();
         assert!(
-            c.get("s", 0, 0, 0).unwrap().is_none(),
+            c.get(TileKey::new("s", 0, 0, 0)).unwrap().is_none(),
             "the older tile is evicted"
         );
-        assert!(c.get("s", 0, 0, 1).unwrap().is_some());
+        assert!(c.get(TileKey::new("s", 0, 0, 1)).unwrap().is_some());
         assert_eq!(c.stats().unwrap().1, 10);
     }
 
     #[test]
     fn negative_cache_row_round_trips() {
         let (_f, c) = open();
-        c.put("s", 0, 0, 0, &tile(0, 404, None), false, 1).unwrap();
-        let got = c.get("s", 0, 0, 0).unwrap().unwrap();
+        c.put(TileKey::new("s", 0, 0, 0), &tile(0, 404, None), false, 1)
+            .unwrap();
+        let got = c.get(TileKey::new("s", 0, 0, 0)).unwrap().unwrap();
         assert_eq!(got.status, 404);
         assert_eq!(got.blob, None);
     }
@@ -900,33 +952,53 @@ mod tests {
     #[test]
     fn touch_protects_a_hot_tile_from_eviction() {
         let (_f, c) = open();
-        c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, 1)
-            .unwrap();
-        c.put("s", 0, 0, 1, &tile(10, 200, Some(vec![0; 10])), false, 2)
-            .unwrap();
-        c.touch("s", 0, 0, 0, 9).unwrap(); // the older tile is now the most recently accessed
+        c.put(
+            TileKey::new("s", 0, 0, 0),
+            &tile(10, 200, Some(vec![0; 10])),
+            false,
+            1,
+        )
+        .unwrap();
+        c.put(
+            TileKey::new("s", 0, 0, 1),
+            &tile(10, 200, Some(vec![0; 10])),
+            false,
+            2,
+        )
+        .unwrap();
+        c.touch(TileKey::new("s", 0, 0, 0), 9).unwrap(); // the older tile is now the most recently accessed
         c.evict_to(10).unwrap();
         assert!(
-            c.get("s", 0, 0, 0).unwrap().is_some(),
+            c.get(TileKey::new("s", 0, 0, 0)).unwrap().is_some(),
             "the touched tile survives"
         );
-        assert!(c.get("s", 0, 0, 1).unwrap().is_none());
+        assert!(c.get(TileKey::new("s", 0, 0, 1)).unwrap().is_none());
     }
 
     #[test]
     fn a_pinned_tile_survives_eviction_that_drops_unpinned_tiles() {
         let (_f, c) = open();
-        c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), true, 1)
-            .unwrap(); // pinned box tile
-        c.put("s", 0, 0, 1, &tile(10, 200, Some(vec![0; 10])), false, 2)
-            .unwrap(); // unpinned; gets evicted because the pinned tile is exempt despite having older access
+        c.put(
+            TileKey::new("s", 0, 0, 0),
+            &tile(10, 200, Some(vec![0; 10])),
+            true,
+            1,
+        )
+        .unwrap(); // pinned box tile
+        c.put(
+            TileKey::new("s", 0, 0, 1),
+            &tile(10, 200, Some(vec![0; 10])),
+            false,
+            2,
+        )
+        .unwrap(); // unpinned; gets evicted because the pinned tile is exempt despite having older access
         c.evict_to(10).unwrap();
         assert!(
-            c.get("s", 0, 0, 0).unwrap().is_some(),
+            c.get(TileKey::new("s", 0, 0, 0)).unwrap().is_some(),
             "the pinned tile is never evicted"
         );
         assert!(
-            c.get("s", 0, 0, 1).unwrap().is_none(),
+            c.get(TileKey::new("s", 0, 0, 1)).unwrap().is_none(),
             "the unpinned tile is evicted to make room"
         );
     }
@@ -934,16 +1006,26 @@ mod tests {
     #[test]
     fn a_live_revalidation_put_does_not_unpin_a_pinned_tile() {
         let (_f, c) = open();
-        c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, 1)
-            .unwrap();
-        c.pin("s", 0, 0, 0).unwrap(); // pinned by a region warm
+        c.put(
+            TileKey::new("s", 0, 0, 0),
+            &tile(10, 200, Some(vec![0; 10])),
+            false,
+            1,
+        )
+        .unwrap();
+        c.pin(TileKey::new("s", 0, 0, 0)).unwrap(); // pinned by a region warm
         assert_eq!(c.stats().unwrap().2, 10, "pinned_bytes counts the pin");
         // A 304 or 200 revalidation of the same tile after fresh_secs re-puts it with pinned = false.
-        c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, 90_000)
-            .unwrap();
+        c.put(
+            TileKey::new("s", 0, 0, 0),
+            &tile(10, 200, Some(vec![0; 10])),
+            false,
+            90_000,
+        )
+        .unwrap();
         c.evict_to(0).unwrap();
         assert!(
-            c.get("s", 0, 0, 0).unwrap().is_some(),
+            c.get(TileKey::new("s", 0, 0, 0)).unwrap().is_some(),
             "a pinned tile keeps its pin across a live revalidation and is never evicted"
         );
         assert_eq!(
@@ -1001,18 +1083,37 @@ mod tests {
 
         // Absent row: returns false.
         assert!(!c
-            .pin_if_fresh("s", 0, 0, 0, now, fresh_secs, neg_ttl, 2_000_000_000, None)
+            .pin_if_fresh(
+                TileKey::new("s", 0, 0, 0),
+                now,
+                fresh_secs,
+                neg_ttl,
+                2_000_000_000,
+                None
+            )
             .unwrap());
 
         // Fresh 200 row: returns true and pins it.
-        c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, now)
-            .unwrap();
+        c.put(
+            TileKey::new("s", 0, 0, 0),
+            &tile(10, 200, Some(vec![0; 10])),
+            false,
+            now,
+        )
+        .unwrap();
         assert!(c
-            .pin_if_fresh("s", 0, 0, 0, now, fresh_secs, neg_ttl, 2_000_000_000, None)
+            .pin_if_fresh(
+                TileKey::new("s", 0, 0, 0),
+                now,
+                fresh_secs,
+                neg_ttl,
+                2_000_000_000,
+                None
+            )
             .unwrap());
         c.evict_to(0).unwrap();
         assert!(
-            c.get("s", 0, 0, 0).unwrap().is_some(),
+            c.get(TileKey::new("s", 0, 0, 0)).unwrap().is_some(),
             "pinned row survives eviction"
         );
 
@@ -1021,9 +1122,17 @@ mod tests {
             fetched_at: now - fresh_secs - 1,
             ..tile(10, 200, Some(vec![0; 10]))
         };
-        c.put("s", 0, 0, 1, &stale, false, now).unwrap();
+        c.put(TileKey::new("s", 0, 0, 1), &stale, false, now)
+            .unwrap();
         assert!(!c
-            .pin_if_fresh("s", 0, 0, 1, now, fresh_secs, neg_ttl, 2_000_000_000, None)
+            .pin_if_fresh(
+                TileKey::new("s", 0, 0, 1),
+                now,
+                fresh_secs,
+                neg_ttl,
+                2_000_000_000,
+                None
+            )
             .unwrap());
 
         // Fresh negative (404) row within negative_ttl: returns true and pins it.
@@ -1032,13 +1141,21 @@ mod tests {
             fetched_at: now,
             ..tile(0, 404, None)
         };
-        c.put("s", 0, 0, 2, &neg_row, false, now).unwrap();
+        c.put(TileKey::new("s", 0, 0, 2), &neg_row, false, now)
+            .unwrap();
         assert!(c
-            .pin_if_fresh("s", 0, 0, 2, now, fresh_secs, neg_ttl, 2_000_000_000, None)
+            .pin_if_fresh(
+                TileKey::new("s", 0, 0, 2),
+                now,
+                fresh_secs,
+                neg_ttl,
+                2_000_000_000,
+                None
+            )
             .unwrap());
         c.evict_to(0).unwrap();
         assert!(
-            c.get("s", 0, 0, 2).unwrap().is_some(),
+            c.get(TileKey::new("s", 0, 0, 2)).unwrap().is_some(),
             "pinned negative row survives eviction"
         );
     }
@@ -1046,9 +1163,15 @@ mod tests {
     #[test]
     fn per_source_avg_excludes_negative_cache_rows() {
         let (_f, c) = open();
-        c.put("s", 0, 0, 0, &tile(100, 200, Some(vec![0; 100])), false, 1)
-            .unwrap();
-        c.put("s", 0, 0, 1, &tile(0, 404, None), false, 2).unwrap(); // negative cache, excluded
+        c.put(
+            TileKey::new("s", 0, 0, 0),
+            &tile(100, 200, Some(vec![0; 100])),
+            false,
+            1,
+        )
+        .unwrap();
+        c.put(TileKey::new("s", 0, 0, 1), &tile(0, 404, None), false, 2)
+            .unwrap(); // negative cache, excluded
         let avg = c.per_source_avg().unwrap();
         assert_eq!(avg, vec![("s".to_string(), 100.0)]);
     }
@@ -1056,12 +1179,17 @@ mod tests {
     #[test]
     fn pin_marks_an_existing_unpinned_row_eviction_exempt() {
         let (_f, c) = open();
-        c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, 1)
-            .unwrap(); // unpinned, e.g. cached by the live proxy
-        c.pin("s", 0, 0, 0).unwrap();
+        c.put(
+            TileKey::new("s", 0, 0, 0),
+            &tile(10, 200, Some(vec![0; 10])),
+            false,
+            1,
+        )
+        .unwrap(); // unpinned, e.g. cached by the live proxy
+        c.pin(TileKey::new("s", 0, 0, 0)).unwrap();
         c.evict_to(0).unwrap(); // would drop every unpinned row
         assert!(
-            c.get("s", 0, 0, 0).unwrap().is_some(),
+            c.get(TileKey::new("s", 0, 0, 0)).unwrap().is_some(),
             "a pinned row survives eviction"
         );
         assert_eq!(c.stats().unwrap().1, 10, "pin changes no bytes");
@@ -1086,14 +1214,14 @@ mod tests {
         // Deleting r1 must not unpin the tile because r2 still references it.
         c.delete_region("r1").unwrap();
         assert!(
-            c.get("s", 0, 0, 0).unwrap().is_some(),
+            c.get(TileKey::new("s", 0, 0, 0)).unwrap().is_some(),
             "tile survives: r2 still holds a reference"
         );
         // Deleting r2 drops the last reference; the tile demotes to unpinned and is evictable.
         c.delete_region("r2").unwrap();
         c.evict_to(0).unwrap();
         assert!(
-            c.get("s", 0, 0, 0).unwrap().is_none(),
+            c.get(TileKey::new("s", 0, 0, 0)).unwrap().is_none(),
             "tile evicted after all references are removed"
         );
     }
@@ -1104,10 +1232,7 @@ mod tests {
         let now = 1000i64;
         // Fill the scroll cache to 900 bytes (unpinned); total_bytes = 900.
         c.put(
-            "s",
-            0,
-            0,
-            0,
+            TileKey::new("s", 0, 0, 0),
             &tile(900, 200, Some(vec![0; 900])),
             false,
             now,
@@ -1148,10 +1273,7 @@ mod tests {
         // Add 350 unpinned scroll bytes; total = 450, which fits the full 500 cap but NOT the old
         // cap - R = 400 reserve.
         c.put(
-            "s",
-            1,
-            0,
-            0,
+            TileKey::new("s", 1, 0, 0),
             &tile(350, 200, Some(vec![0; 350])),
             false,
             now,
@@ -1175,10 +1297,7 @@ mod tests {
         let now = 1000i64;
         // Tile A: an unpinned scroll tile, the oldest (LRU make-room candidate), 100 bytes.
         c.put(
-            "s",
-            0,
-            0,
-            0,
+            TileKey::new("s", 0, 0, 0),
             &tile(100, 200, Some(vec![0; 100])),
             false,
             now,
@@ -1186,10 +1305,7 @@ mod tests {
         .unwrap();
         // Tile B: a newer unpinned scroll tile, 100 bytes. total = 200.
         c.put(
-            "s",
-            0,
-            0,
-            1,
+            TileKey::new("s", 0, 0, 1),
             &tile(100, 200, Some(vec![0; 100])),
             false,
             now + 10,
@@ -1210,11 +1326,11 @@ mod tests {
             .unwrap();
         assert!(!out.capped);
         assert!(
-            c.get("s", 0, 0, 0).unwrap().is_some(),
+            c.get(TileKey::new("s", 0, 0, 0)).unwrap().is_some(),
             "A was re-pinned, not evicted (insert precedes evict)"
         );
         assert!(
-            c.get("s", 0, 0, 1).unwrap().is_none(),
+            c.get(TileKey::new("s", 0, 0, 1)).unwrap().is_none(),
             "B, the only remaining unpinned LRU, is evicted to make room"
         );
         let (_rows, total, pinned_b) = c.stats().unwrap();
@@ -1235,10 +1351,7 @@ mod tests {
         let cap = 500i64;
         // Fill the scroll cache to the cap with one unpinned tile.
         c.put(
-            "s",
-            9,
-            0,
-            0,
+            TileKey::new("s", 9, 0, 0),
             &tile(500, 200, Some(vec![0; 500])),
             false,
             now,
@@ -1269,11 +1382,11 @@ mod tests {
         );
         assert_eq!(pinned_b, 200, "the region tile is pinned");
         assert!(
-            c.get("s", 0, 0, 0).unwrap().is_some(),
+            c.get(TileKey::new("s", 0, 0, 0)).unwrap().is_some(),
             "the pinned region tile is present"
         );
         assert!(
-            c.get("s", 9, 0, 0).unwrap().is_none(),
+            c.get(TileKey::new("s", 9, 0, 0)).unwrap().is_none(),
             "the unpinned scroll tile is evicted"
         );
     }
@@ -1295,10 +1408,7 @@ mod tests {
             .unwrap();
         // Fill the scroll cache near the cap (unpinned). total = 480.
         c.put(
-            "s",
-            9,
-            0,
-            0,
+            TileKey::new("s", 9, 0, 0),
             &tile(280, 200, Some(vec![0; 280])),
             false,
             now + 1,
@@ -1318,11 +1428,11 @@ mod tests {
             .unwrap();
         assert!(!out.capped);
         assert!(
-            c.get("s", 0, 0, 0).unwrap().is_some(),
+            c.get(TileKey::new("s", 0, 0, 0)).unwrap().is_some(),
             "r1's pinned tile survives the r2 warm"
         );
         assert!(
-            c.get("s", 9, 0, 0).unwrap().is_none(),
+            c.get(TileKey::new("s", 9, 0, 0)).unwrap().is_none(),
             "the unpinned scroll tile is evicted instead"
         );
         let (_rows, total, pinned_b) = c.stats().unwrap();
@@ -1336,20 +1446,14 @@ mod tests {
         let now = 1000i64;
         // Two unpinned scroll tiles; total = 200.
         c.put(
-            "s",
-            0,
-            0,
-            0,
+            TileKey::new("s", 0, 0, 0),
             &tile(100, 200, Some(vec![0; 100])),
             false,
             now,
         )
         .unwrap();
         c.put(
-            "s",
-            0,
-            0,
-            1,
+            TileKey::new("s", 0, 0, 1),
             &tile(100, 200, Some(vec![0; 100])),
             false,
             now,
@@ -1357,7 +1461,14 @@ mod tests {
         .unwrap();
         // pin_if_fresh pins the first; it adds no bytes and must NOT evict the second.
         assert!(c
-            .pin_if_fresh("s", 0, 0, 0, now, 86_400, 600, 2_000_000_000, Some("r1"))
+            .pin_if_fresh(
+                TileKey::new("s", 0, 0, 0),
+                now,
+                86_400,
+                600,
+                2_000_000_000,
+                Some("r1")
+            )
             .unwrap());
         assert_eq!(
             c.stats().unwrap().1,
@@ -1365,12 +1476,12 @@ mod tests {
             "pin_if_fresh changes no total bytes"
         );
         assert!(
-            c.get("s", 0, 0, 1).unwrap().is_some(),
+            c.get(TileKey::new("s", 0, 0, 1)).unwrap().is_some(),
             "pin_if_fresh did not evict the other scroll tile"
         );
         // pin_for_region pins the second; same: no bytes added, no eviction.
         assert!(c
-            .pin_for_region("s", 0, 0, 1, 2_000_000_000, Some("r1"))
+            .pin_for_region(TileKey::new("s", 0, 0, 1), 2_000_000_000, Some("r1"))
             .unwrap());
         assert_eq!(
             c.stats().unwrap().1,
@@ -1378,7 +1489,7 @@ mod tests {
             "pin_for_region changes no total bytes"
         );
         assert!(
-            c.get("s", 0, 0, 0).unwrap().is_some(),
+            c.get(TileKey::new("s", 0, 0, 0)).unwrap().is_some(),
             "pin_for_region did not evict the other tile"
         );
         assert_eq!(c.stats().unwrap().2, 200, "both tiles are now pinned");
@@ -1389,24 +1500,23 @@ mod tests {
         let (_f, c) = open();
         let now = 1000i64;
         c.put(
-            "s",
-            0,
-            0,
-            0,
+            TileKey::new("s", 0, 0, 0),
             &tile(500, 200, Some(vec![0; 500])),
             false,
             now,
         )
         .unwrap();
         // R = 100; pinning a 500-byte tile would exceed R.
-        let pinned = c.pin_for_region("s", 0, 0, 0, 100, Some("r1")).unwrap();
+        let pinned = c
+            .pin_for_region(TileKey::new("s", 0, 0, 0), 100, Some("r1"))
+            .unwrap();
         assert!(
             !pinned,
             "pin_for_region must refuse when pinned_bytes + tile_bytes > R"
         );
         c.evict_to(0).unwrap();
         assert!(
-            c.get("s", 0, 0, 0).unwrap().is_none(),
+            c.get(TileKey::new("s", 0, 0, 0)).unwrap().is_none(),
             "the tile was not pinned and is evictable"
         );
     }
@@ -1417,10 +1527,7 @@ mod tests {
         let now = 1000i64;
         // A live-proxy scroll tile already exists UNPINNED at 100 bytes; pinned_bytes = 0.
         c.put(
-            "s",
-            0,
-            0,
-            0,
+            TileKey::new("s", 0, 0, 0),
             &tile(100, 200, Some(vec![0; 100])),
             false,
             now,
@@ -1482,7 +1589,14 @@ mod tests {
             .unwrap();
         // r2's warm skips-but-pins the same already-pinned tile via pin_if_fresh; pinned_bytes must NOT grow.
         assert!(c
-            .pin_if_fresh("s", 0, 0, 0, now, 86_400, 600, 2_000_000_000, Some("r2"))
+            .pin_if_fresh(
+                TileKey::new("s", 0, 0, 0),
+                now,
+                86_400,
+                600,
+                2_000_000_000,
+                Some("r2")
+            )
             .unwrap());
         let (_r, _t, pinned) = c.stats().unwrap();
         assert_eq!(
@@ -1581,6 +1695,57 @@ mod tests {
     }
 
     #[test]
+    fn real_region_pinned_bytes_memo_invalidates_on_pin_delete_and_repin_put() {
+        let (_f, c) = open();
+        let now = 1000i64;
+        let pw = crate::state::POSITION_WARM_REGION_ID;
+        let row = |x: u32, bytes: i64| WarmRow {
+            source: "s".into(),
+            z: 0,
+            x,
+            y: 0,
+            tile: tile(bytes, 200, Some(vec![0; bytes as usize])),
+        };
+        // Pin a real-region tile, read the memoized value, then pin another: the memo must reflect it.
+        c.put_many_pinned(
+            &[row(0, 100)],
+            2_000_000_000,
+            2_000_000_000,
+            Some("r1"),
+            now,
+        )
+        .unwrap();
+        assert_eq!(c.real_region_pinned_bytes(pw).unwrap(), 100, "first read");
+        c.put_many_pinned(&[row(1, 40)], 2_000_000_000, 2_000_000_000, Some("r1"), now)
+            .unwrap();
+        assert_eq!(
+            c.real_region_pinned_bytes(pw).unwrap(),
+            140,
+            "a new pin invalidates the memo"
+        );
+        // A live-proxy revalidation put keeps the tile pinned and changes its bytes: the memo must update.
+        c.put(
+            TileKey::new("s", 0, 0, 0),
+            &tile(10, 200, Some(vec![0; 10])),
+            false,
+            now + 1,
+        )
+        .unwrap();
+        assert_eq!(
+            c.real_region_pinned_bytes(pw).unwrap(),
+            50,
+            "a re-pin put that changes bytes invalidates the memo"
+        );
+        // Deleting the region drops both tiles from the real-region sum.
+        c.delete_region("r1").unwrap();
+        assert_eq!(
+            c.real_region_pinned_bytes(pw).unwrap(),
+            0,
+            "delete_region invalidates the memo"
+        );
+    }
+
+    #[test]
     fn pin_if_fresh_pins_a_zero_byte_row_even_when_pinned_bytes_exceeds_budget() {
         let (_f, c) = open();
         let now = 1000i64;
@@ -1600,10 +1765,10 @@ mod tests {
             fetched_at: now,
             ..tile(0, 404, None)
         };
-        c.put("s", 0, 1, 0, &neg, false, now).unwrap();
+        c.put(TileKey::new("s", 0, 1, 0), &neg, false, now).unwrap();
         // Even with a budget BELOW the current pinned_bytes, a free row is never refused on budget.
         assert!(
-            c.pin_if_fresh("s", 0, 1, 0, now, 86_400, 600, 50, Some("r1"))
+            c.pin_if_fresh(TileKey::new("s", 0, 1, 0), now, 86_400, 600, 50, Some("r1"))
                 .unwrap(),
             "a free zero-byte row is pinned even when pinned_bytes already exceeds the budget",
         );
@@ -1634,18 +1799,25 @@ mod tests {
         let (_f, c) = open();
         // Pinned region tile at an old access time: must survive regardless of age. Pin through pin()
         // so pinned_bytes is tracked (raw put with pinned = true sets the column but not the counter).
-        c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, 0)
-            .unwrap();
-        c.pin("s", 0, 0, 0).unwrap();
+        c.put(
+            TileKey::new("s", 0, 0, 0),
+            &tile(10, 200, Some(vec![0; 10])),
+            false,
+            0,
+        )
+        .unwrap();
+        c.pin(TileKey::new("s", 0, 0, 0)).unwrap();
         // Old unpinned scroll tile (last_access = 100): swept.
-        c.put("s", 0, 0, 1, &tile(20, 200, Some(vec![0; 20])), false, 100)
-            .unwrap();
+        c.put(
+            TileKey::new("s", 0, 0, 1),
+            &tile(20, 200, Some(vec![0; 20])),
+            false,
+            100,
+        )
+        .unwrap();
         // Fresh unpinned scroll tile (last_access = 10_000): kept.
         c.put(
-            "s",
-            0,
-            0,
-            2,
+            TileKey::new("s", 0, 0, 2),
             &tile(30, 200, Some(vec![0; 30])),
             false,
             10_000,
@@ -1659,15 +1831,15 @@ mod tests {
             "exactly the one old scroll tile is freed"
         );
         assert!(
-            c.get("s", 0, 0, 0).unwrap().is_some(),
+            c.get(TileKey::new("s", 0, 0, 0)).unwrap().is_some(),
             "the pinned tile survives"
         );
         assert!(
-            c.get("s", 0, 0, 1).unwrap().is_none(),
+            c.get(TileKey::new("s", 0, 0, 1)).unwrap().is_none(),
             "the old scroll tile is swept"
         );
         assert!(
-            c.get("s", 0, 0, 2).unwrap().is_some(),
+            c.get(TileKey::new("s", 0, 0, 2)).unwrap().is_some(),
             "the fresh scroll tile survives"
         );
         let (_rows, total, pinned) = c.stats().unwrap();
@@ -1681,8 +1853,13 @@ mod tests {
     #[test]
     fn sweep_aged_unpinned_is_a_no_op_when_ttl_is_zero() {
         let (_f, c) = open();
-        c.put("s", 0, 0, 1, &tile(20, 200, Some(vec![0; 20])), false, 1)
-            .unwrap();
+        c.put(
+            TileKey::new("s", 0, 0, 1),
+            &tile(20, 200, Some(vec![0; 20])),
+            false,
+            1,
+        )
+        .unwrap();
         let (freed_bytes, freed_rows) = c.sweep_aged_unpinned(0, 10_000).unwrap();
         assert_eq!(
             (freed_bytes, freed_rows),
@@ -1690,7 +1867,7 @@ mod tests {
             "ttl 0 disables the sweep"
         );
         assert!(
-            c.get("s", 0, 0, 1).unwrap().is_some(),
+            c.get(TileKey::new("s", 0, 0, 1)).unwrap().is_some(),
             "the row survives a disabled sweep"
         );
     }
@@ -1699,16 +1876,23 @@ mod tests {
     fn clear_unpinned_deletes_all_scroll_rows_and_keeps_pinned() {
         let (_f, c) = open();
         // Store as a scroll tile, then pin it so it enters the pinned set and pinned_bytes tracks it.
-        c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, 0)
-            .unwrap();
-        c.pin("s", 0, 0, 0).unwrap(); // pinned
-        c.put("s", 0, 0, 1, &tile(20, 200, Some(vec![0; 20])), false, 5)
-            .unwrap(); // scroll
         c.put(
-            "s",
+            TileKey::new("s", 0, 0, 0),
+            &tile(10, 200, Some(vec![0; 10])),
+            false,
             0,
-            0,
-            2,
+        )
+        .unwrap();
+        c.pin(TileKey::new("s", 0, 0, 0)).unwrap(); // pinned
+        c.put(
+            TileKey::new("s", 0, 0, 1),
+            &tile(20, 200, Some(vec![0; 20])),
+            false,
+            5,
+        )
+        .unwrap(); // scroll
+        c.put(
+            TileKey::new("s", 0, 0, 2),
             &tile(30, 200, Some(vec![0; 30])),
             false,
             9_999,
@@ -1721,7 +1905,7 @@ mod tests {
             "both scroll tiles freed regardless of age"
         );
         assert!(
-            c.get("s", 0, 0, 0).unwrap().is_some(),
+            c.get(TileKey::new("s", 0, 0, 0)).unwrap().is_some(),
             "the pinned tile survives the clear"
         );
         let (_rows, total, pinned) = c.stats().unwrap();
@@ -1732,15 +1916,35 @@ mod tests {
     #[test]
     fn per_source_totals_sums_scroll_rows_per_source() {
         let (_f, c) = open();
-        c.put("a", 0, 0, 0, &tile(100, 200, Some(vec![0; 100])), false, 1)
-            .unwrap();
-        c.put("a", 0, 0, 1, &tile(40, 200, Some(vec![0; 40])), false, 1)
-            .unwrap();
-        c.put("b", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, 1)
-            .unwrap();
+        c.put(
+            TileKey::new("a", 0, 0, 0),
+            &tile(100, 200, Some(vec![0; 100])),
+            false,
+            1,
+        )
+        .unwrap();
+        c.put(
+            TileKey::new("a", 0, 0, 1),
+            &tile(40, 200, Some(vec![0; 40])),
+            false,
+            1,
+        )
+        .unwrap();
+        c.put(
+            TileKey::new("b", 0, 0, 0),
+            &tile(10, 200, Some(vec![0; 10])),
+            false,
+            1,
+        )
+        .unwrap();
         // A pinned row is excluded from the scroll totals.
-        c.put("a", 0, 0, 2, &tile(1000, 200, Some(vec![0; 1000])), true, 1)
-            .unwrap();
+        c.put(
+            TileKey::new("a", 0, 0, 2),
+            &tile(1000, 200, Some(vec![0; 1000])),
+            true,
+            1,
+        )
+        .unwrap();
         let totals = c.per_source_totals().unwrap();
         assert_eq!(
             totals,

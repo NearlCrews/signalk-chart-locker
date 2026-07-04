@@ -38,8 +38,18 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
                 // 6to4 (2002::/16) and the well-known NAT64 prefix (64:ff9b::/96) embed a v4; decode it
                 // and apply the v4 rules so a transition-range address cannot reach a private v4.
                 || embedded_v4(v6).map(|m| is_forbidden_ip(IpAddr::V4(m))).unwrap_or(false)
+                // RFC 8215 local-use NAT64 (64:ff9b:1::/48): a translation prefix whose embedded v4
+                // offset varies by prefix length, so reject the whole /48 rather than decode it. The
+                // prefix is reserved and not globally routable, so no real public upstream falls in it.
+                || is_local_use_nat64(v6)
         }
     }
+}
+
+/// The RFC 8215 local-use NAT64 prefix 64:ff9b:1::/48 (first 48 bits are 0064:ff9b:0001).
+fn is_local_use_nat64(ip: Ipv6Addr) -> bool {
+    let s = ip.segments();
+    s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 0x0001
 }
 
 /// True when the URL's host is an IP literal that is forbidden for egress (loopback, private,
@@ -144,6 +154,11 @@ mod tests {
         )));
         // IPv4-compatible ::127.0.0.1 (::7f00:1) decodes to loopback.
         assert!(is_forbidden_ip(IpAddr::V6("::7f00:1".parse().unwrap())));
+        // RFC 8215 local-use NAT64 (64:ff9b:1::/48) is rejected across the whole prefix.
+        assert!(is_forbidden_ip(IpAddr::V6("64:ff9b:1::1".parse().unwrap())));
+        assert!(is_forbidden_ip(IpAddr::V6(
+            "64:ff9b:1:0:0:0:c0a8:1".parse().unwrap()
+        )));
     }
 
     #[test]
