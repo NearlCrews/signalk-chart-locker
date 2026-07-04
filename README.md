@@ -14,16 +14,16 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.1.1
+## What's new in 0.2.0
 
-Housekeeping and hardening across the plugin and the tilecache container. The egress SSRF guard now
-covers the whole `0.0.0.0/8` block and IPv4-compatible IPv6 addresses, the basemap style no longer
-serves an off-allowlist upstream to the browser, and a downloaded region and the pinned basemap
-glyphs and sprite keep their offline pin across a live revalidation. The configuration panel gains a
-live freshness note that keeps advancing during a status-poll outage, and several a11y and caching
-refinements land alongside a round of internal deduplication.
+Hardening, performance, and internal cleanup across the plugin and the tilecache container, with no
+configuration or data-model changes. The egress SSRF guard adds the RFC 8215 local-use NAT64 range,
+an off-allowlist basemap source is now stripped from the served style at learn time, the cache-info
+panel no longer runs a per-tile scan on every poll, and the position-warm loop reads the saved-regions
+file through a filesystem watcher so it does no disk I/O between writes. Internally the plugin adopts
+`signalk-chart-sources` 0.2.0 and consolidates several shared seams.
 
-See the [changelog](CHANGELOG.md#v011) for the full list.
+See the [changelog](CHANGELOG.md#v020) for the full list.
 
 ## What it does
 

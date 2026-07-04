@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<a id="v020"></a>
+
+## [0.2.0] - 2026-07-04
+
+Hardening, performance, and internal cleanup across the plugin and the tilecache container, plus a
+shared-library uptake. No configuration or data-model changes.
+
+### Security
+
+- The egress SSRF guard now also rejects the RFC 8215 local-use NAT64 prefix `64:ff9b:1::/48`.
+- A basemap style source whose inline tiles or TileJSON url reference a host off the style's allowlist
+  is now decided once at learn time and stripped from the served style, closing a gap where an
+  off-allowlist inline-tiles source was rewritten to a proxy path instead of stripped.
+
+### Performance
+
+- The `/cache/stats` real-region pinned-bytes figure is memoized and recomputed only after a pin, unpin,
+  or region delete, so polling the cache-info panel no longer runs a per-tile scan each time.
+- Position warm reads the saved-regions file through a filesystem watcher with a throttled mtime
+  self-heal, so the per-fix path does no I/O between writes.
+
+### Changed
+
+- Adopt `signalk-chart-sources` 0.2.0 and use its exported `Bbox` type for the geographic and tile
+  bounding boxes the plugin previously spelled out as a four-number tuple.
+- The panel's polling and one-shot fetches share one abortable-fetch hook.
+- Internal cleanup in the container: the glyph, sprite, and vector-tile routes share one cache-first
+  single-flight helper; the cache methods take a single `TileKey` so the tile coordinates travel
+  together and cannot be transposed; and the negative-cache row shape lives in one constructor.
+
 <a id="v011"></a>
 
 ## [0.1.1] - 2026-07-04
