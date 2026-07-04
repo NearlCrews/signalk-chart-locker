@@ -22,6 +22,8 @@ export class OverrideStore {
     this.#filePath = filePath
   }
 
+  /** Load the persisted overrides from disk. Must be called once before get or namer: until it runs the
+   * in-memory map is empty, so get returns undefined and namer applies only the decoded defaults. */
   load (): void {
     this.#map = readJsonState<Record<string, ChartOverride>>(this.#filePath, {})
   }
@@ -30,8 +32,11 @@ export class OverrideStore {
     return this.#map[id]
   }
 
+  /** Merge the given fields into the stored override for this id, so a caller that sets only one field
+   * (for example the scale) does not wipe the previously stored name and description. This mirrors the
+   * patch-merge the position-warm settings use, rather than a full replace. */
   set (id: string, override: ChartOverride): void {
-    this.#map[id] = override
+    this.#map[id] = { ...this.#map[id], ...override }
     writeJsonState(this.#filePath, this.#map)
   }
 

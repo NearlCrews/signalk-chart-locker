@@ -31,7 +31,10 @@ import type { CSSProperties } from 'react'
  * Scale tokens: theme-independent, defined once on the root. Radii and
  * font sizes sit on Bootstrap 5.3 defaults (radius .375rem = 6px, small
  * text .875rem = 14px) so the panel reads native inside the admin shell,
- * and spacing runs an 8/12/16 scale so gutters stay on one rhythm.
+ * and gutters (the token-driven margins and gaps) run an 8/12/16 scale so
+ * they stay on one rhythm. Card inner paddings intentionally use the
+ * Bootstrap-native 10px and 14px half-steps so the cards match the admin
+ * shell's own controls rather than the gutter scale.
  */
 const SCALE_TOKENS = `
   --cl-radius: 6px;
@@ -175,9 +178,21 @@ ${DARK_TOKENS}}
 .cl-config-panel[data-cl-theme="night"] {
 ${NIGHT_TOKENS}}
 .cl-config-panel input:focus-visible,
-.cl-config-panel button:focus-visible {
+.cl-config-panel button:focus-visible,
+.cl-config-panel summary:focus-visible {
   outline: 2px solid var(--cl-accent);
   outline-offset: 1px;
+}
+/* The segmented control clips its overflow so segments sit flush inside the border, which would also clip
+   a 1px-offset focus ring; draw the segment ring inset so keyboard focus stays visible. */
+.cl-config-panel fieldset button:focus-visible {
+  outline-offset: -2px;
+}
+/* Placeholder text: token-driven so it keeps contrast in dark and stays on-palette (not the UA blue-gray)
+   in night mode. opacity 1 undoes the browser's default placeholder fade. */
+.cl-config-panel input::placeholder {
+  color: var(--cl-text-faint);
+  opacity: 1;
 }
 /* Buttons set their background as an inline style, which outranks the
    browser's default disabled appearance, so a disabled button would still
@@ -239,6 +254,41 @@ const SEGMENTED_BTN: CSSProperties = {
   border: 'none',
   fontSize: 'var(--cl-font-small)',
   cursor: 'pointer'
+}
+
+/** Shared face of the three text and number inputs; the variants differ only in width. */
+const INPUT_BASE: CSSProperties = {
+  padding: '6px 10px',
+  minHeight: 36,
+  boxSizing: 'border-box',
+  borderRadius: 'var(--cl-radius)',
+  border: '1px solid var(--cl-border)',
+  background: 'var(--cl-surface)',
+  color: 'var(--cl-text)',
+  fontSize: 'var(--cl-font-body)'
+}
+
+/** Shared card shell for the section and disclosure surfaces. */
+const CARD_BASE: CSSProperties = {
+  background: 'var(--cl-surface)',
+  border: '1px solid var(--cl-border)',
+  borderRadius: 'var(--cl-radius)',
+  marginBottom: 'var(--cl-space-3)',
+  overflow: 'hidden'
+}
+
+/** Shared face of the status line variants; they differ only in text color. */
+const MESSAGE_BASE: CSSProperties = {
+  minWidth: 0,
+  overflowWrap: 'anywhere'
+}
+
+/** Shared face of the banner variants; they differ only in their token triplet. */
+const BANNER_BASE: CSSProperties = {
+  borderRadius: 'var(--cl-radius)',
+  padding: '8px 12px',
+  fontSize: 'var(--cl-font-body)',
+  margin: '0 0 var(--cl-space-3)'
 }
 
 /**
@@ -353,14 +403,12 @@ export const S = {
   // The primary status line: the message the plugin published, or a derived
   // enabled/disabled phrase when no message is available.
   statusMessage: {
-    color: 'var(--cl-text)',
-    minWidth: 0,
-    overflowWrap: 'anywhere'
+    ...MESSAGE_BASE,
+    color: 'var(--cl-text)'
   },
   statusMessageMuted: {
-    color: 'var(--cl-text-muted)',
-    minWidth: 0,
-    overflowWrap: 'anywhere'
+    ...MESSAGE_BASE,
+    color: 'var(--cl-text-muted)'
   },
   dot: { width: 10, height: 10, borderRadius: '50%', display: 'inline-block', flexShrink: 0, alignSelf: 'center' },
   dotOk: { background: 'var(--cl-ok)' },
@@ -369,13 +417,7 @@ export const S = {
   // A titled section card: a header row (title plus optional description) over
   // a body of fields. A white surface so the card stands off the panel
   // background.
-  section: {
-    background: 'var(--cl-surface)',
-    border: '1px solid var(--cl-border)',
-    borderRadius: 'var(--cl-radius)',
-    marginBottom: 'var(--cl-space-3)',
-    overflow: 'hidden'
-  },
+  section: CARD_BASE,
   sectionHeader: {
     padding: '10px 14px',
     borderBottom: '1px solid var(--cl-border)',
@@ -418,28 +460,14 @@ export const S = {
     flexShrink: 0
   },
   input: {
-    padding: '6px 10px',
-    minHeight: 36,
-    boxSizing: 'border-box',
-    borderRadius: 'var(--cl-radius)',
-    border: '1px solid var(--cl-border)',
-    background: 'var(--cl-surface)',
-    color: 'var(--cl-text)',
-    fontSize: 'var(--cl-font-body)',
+    ...INPUT_BASE,
     width: 110
   },
   // Wide text input, for a filesystem path or an image tag.
   inputWide: {
-    padding: '6px 10px',
-    minHeight: 36,
-    borderRadius: 'var(--cl-radius)',
-    border: '1px solid var(--cl-border)',
-    background: 'var(--cl-surface)',
-    color: 'var(--cl-text)',
-    fontSize: 'var(--cl-font-body)',
+    ...INPUT_BASE,
     width: '100%',
-    maxWidth: 440,
-    boxSizing: 'border-box'
+    maxWidth: 440
   },
 
   // Range field: a slider paired with a compact numeric readout and a unit
@@ -460,14 +488,7 @@ export const S = {
     cursor: 'pointer'
   },
   rangeNumber: {
-    padding: '6px 10px',
-    minHeight: 36,
-    boxSizing: 'border-box',
-    borderRadius: 'var(--cl-radius)',
-    border: '1px solid var(--cl-border)',
-    background: 'var(--cl-surface)',
-    color: 'var(--cl-text)',
-    fontSize: 'var(--cl-font-body)',
+    ...INPUT_BASE,
     width: 90
   },
   rangeUnit: {
@@ -499,13 +520,7 @@ export const S = {
    * read as one more section card. The summary is the header row; the body
    * holds the rarely-changed fields.
    */
-  disclosure: {
-    background: 'var(--cl-surface)',
-    border: '1px solid var(--cl-border)',
-    borderRadius: 'var(--cl-radius)',
-    marginBottom: 'var(--cl-space-3)',
-    overflow: 'hidden'
-  },
+  disclosure: CARD_BASE,
   disclosureSummary: {
     cursor: 'pointer',
     minHeight: 36,
@@ -572,24 +587,18 @@ export const S = {
 
   // Non-fatal status-poll error banner.
   errorBanner: {
+    ...BANNER_BASE,
     color: 'var(--cl-danger-fg)',
     background: 'var(--cl-danger-bg)',
-    border: '1px solid var(--cl-danger-border)',
-    borderRadius: 'var(--cl-radius)',
-    padding: '8px 12px',
-    fontSize: 'var(--cl-font-body)',
-    margin: '0 0 var(--cl-space-3)'
+    border: '1px solid var(--cl-danger-border)'
   },
 
   // Advisory warning banner (for example the cache cap exceeding free space). Uses the warn tokens,
   // never the red danger tokens, so a warning does not read as an error.
   warnBanner: {
+    ...BANNER_BASE,
     color: 'var(--cl-warn-fg)',
     background: 'var(--cl-warn-bg)',
-    border: '1px solid var(--cl-warn-border)',
-    borderRadius: 'var(--cl-radius)',
-    padding: '8px 12px',
-    fontSize: 'var(--cl-font-body)',
-    margin: '0 0 var(--cl-space-3)'
+    border: '1px solid var(--cl-warn-border)'
   }
 } satisfies Record<string, CSSProperties>

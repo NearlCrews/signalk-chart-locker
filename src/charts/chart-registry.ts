@@ -5,8 +5,9 @@
 
 import type { ResourceProvider } from '@signalk/server-api'
 import type { DecodedPmtiles } from './pmtiles-metadata.js'
+import { PLUGIN_MOUNT_PATH } from '../shared/plugin-id.js'
 
-const SERVE_BASE = '/plugins/signalk-chart-locker/pmtiles'
+const SERVE_BASE = `${PLUGIN_MOUNT_PATH}/pmtiles`
 export const DEFAULT_SCALE = 250000
 const V1_CHARTS = '/signalk/v1/api/resources/charts'
 
@@ -23,6 +24,9 @@ export interface ChartRecord {
   type: 'tilelayer'
   scale: number
   decoded: DecodedPmtiles
+  /** File identity captured at decode time, so a rescan can skip re-decoding an unchanged file. */
+  mtimeMs?: number
+  bytes?: number
 }
 
 export interface ChartResource {
@@ -81,6 +85,11 @@ export class ChartRegistry {
 
   filePathFor (id: string): string | undefined {
     return this.#records.get(id)?.filePath
+  }
+
+  /** The raw stored record (with its decoded metadata and file identity), for the rescan skip check. */
+  record (id: string): ChartRecord | undefined {
+    return this.#records.get(id)
   }
 
   records (): ChartRecord[] {

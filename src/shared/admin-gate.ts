@@ -4,15 +4,15 @@
  * exactly once per app and reports whether it is in place, so a caller mounts its route only when the gate
  * holds: a route that cannot be gated fails CLOSED (unmounted) rather than answering unauthenticated
  * callers. On an unsecured Signal K server every client is treated as admin, the standard Signal K behavior.
- * Shared: both the regions routes and the PMTiles chart-management routes gate the same /api subtree
- * through this one module, and the per-app WeakSet installs the middleware exactly once.
+ * Shared: the regions routes, the PMTiles chart-management routes, and the cache-info route gate the same
+ * /api subtree through this one module, and the per-app WeakSet installs the middleware exactly once.
  */
 
 import type { ServerAPI } from '@signalk/server-api'
-import { PLUGIN_ID } from './plugin-id.js'
+import { PLUGIN_MOUNT_PATH } from './plugin-id.js'
 
 /** Subtree to admin-gate, an absolute path under the mounted router. */
-const API_PATH = `/plugins/${PLUGIN_ID}/api`
+const API_PATH = `${PLUGIN_MOUNT_PATH}/api`
 
 /** The slice of the server security strategy this module needs (not exposed on the ServerAPI type). */
 interface SecurityAwareApp {

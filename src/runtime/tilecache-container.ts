@@ -24,10 +24,13 @@ function packageVersion (): string {
   }
 }
 
+/** The plugin version string, shared so the container attribution and the image tag read one source. */
+export const PLUGIN_VERSION = packageVersion()
+
 /** Pin the image tag to the plugin version (for example "v0.3.0"), so each release changes the tag
  * string and forces signalk-container to recreate the container, which is the only reliable way to
  * ship container-side code to existing installs (a rebuilt floating ":latest" is never recreated). */
-export const DEFAULT_TILECACHE_TAG = `v${packageVersion()}`
+export const DEFAULT_TILECACHE_TAG = `v${PLUGIN_VERSION}`
 
 /** Where signalk-container mounts the Signal K data directory inside the container (the durable default). */
 const SIGNALK_DATA_MOUNT = '/signalk-data'

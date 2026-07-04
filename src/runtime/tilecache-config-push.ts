@@ -3,9 +3,10 @@
 import { CHART_SOURCES, type ChartSource } from 'signalk-chart-sources'
 import type { FetchResponse } from '../shared/types.js'
 import { CONTAINER_FETCH_TIMEOUT_MS } from './container-fetch.js'
+import { PLUGIN_MOUNT_PATH } from '../shared/plugin-id.js'
 
 /** The Signal K server route base the browser reaches the proxy through (for the container style rewrite). */
-export const PLUGIN_PUBLIC_BASE = '/plugins/signalk-chart-locker'
+export const PLUGIN_PUBLIC_BASE = PLUGIN_MOUNT_PATH
 
 export interface TilecacheConfigPayload {
   sources: ChartSource[]

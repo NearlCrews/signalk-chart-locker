@@ -11,7 +11,7 @@
  */
 
 import type * as React from 'react'
-import { memo } from 'react'
+import { memo, useEffect, useState } from 'react'
 import type { PluginRuntimeStatus } from '../hooks/use-status.js'
 import { relativeTime } from '../relative-time.js'
 import { S } from '../styles.js'
@@ -39,6 +39,14 @@ interface Props {
  * on the panel does not re-run the relative-time formatting.
  */
 export default memo(function StatusBar ({ status, lastUpdatedMs }: Props): React.ReactElement {
+  // Re-render on a slow tick so the "checked N ago" note keeps advancing during an outage, when no new
+  // poll changes the props. relativeTime steps in minutes, so a 30 s cadence keeps it honest cheaply.
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    if (lastUpdatedMs === null) return
+    const id = setInterval(() => setTick((t) => t + 1), 30000)
+    return () => clearInterval(id)
+  }, [lastUpdatedMs])
   return (
     <div style={S.statusBar}>
       <div style={S.statusTitleRow}>

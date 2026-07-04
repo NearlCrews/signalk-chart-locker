@@ -38,6 +38,9 @@ function group (raw: Record<string, unknown>, key: string): RawGroup {
 function clampIntGiB (
   value: unknown, min: number, max: number, fallback: number
 ): number {
+  // Number(null) and Number('') are both 0, which would clamp to the minimum instead of falling back to
+  // the default, so treat an absent or empty stored value as missing and use the fallback.
+  if (value === null || value === undefined || value === '') return fallback
   const parsed = typeof value === 'number' ? value : Number(value)
   if (!Number.isFinite(parsed)) return fallback
   let next = Math.trunc(parsed)
@@ -66,9 +69,9 @@ export function normalizeConfig (configuration: unknown): ChartLockerConfig {
   const charts = group(raw, 'charts')
   const advanced = group(raw, 'advanced')
 
-  // Snap the cap to the 5 GiB step so the slider and the number box agree and the value matches the
-  // increment the panel offers. A legacy value stored off the grid (for example 8) shows as the
-  // nearest multiple (10); clamping to the bounds afterward keeps the top of the range in range.
+  // Snap the cap to the 4 GiB step (CACHE_CAP_STEP_GIB) so the slider and the number box agree and the
+  // value matches the increment the panel offers. A legacy value stored off the grid (for example 10)
+  // shows as the nearest multiple (12); clamping to the bounds afterward keeps the top of the range in range.
   const cacheCapGiB = Math.min(
     CACHE_CAP_MAX_GIB,
     Math.max(

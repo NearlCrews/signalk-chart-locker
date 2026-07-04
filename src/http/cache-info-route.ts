@@ -27,7 +27,7 @@ interface Deps {
 /** Mount the cache-info route behind the admin gate. Returns whether it was mounted. */
 export function registerCacheInfoRoute (router: CacheInfoRouter, app: ServerAPI, deps: Deps = {}): boolean {
   if (!ensureApiAdminGate(app)) return false
-  const dataDir = deps.dataDir ?? (app as unknown as { getDataDirPath(): string }).getDataDirPath()
+  const dataDir = deps.dataDir ?? app.getDataDirPath()
 
   router.get('/api/cache-info', (_req, res) => {
     try {

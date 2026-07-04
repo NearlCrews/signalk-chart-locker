@@ -53,7 +53,7 @@ interface PluginListEntry {
 }
 
 /** Pull this plugin's status out of the raw `GET /plugins` array, or null when it is absent. */
-export function extractStatus (body: unknown): PluginRuntimeStatus | null {
+function extractStatus (body: unknown): PluginRuntimeStatus | null {
   if (!Array.isArray(body)) return null
   const entry = (body as PluginListEntry[]).find((p) => p?.id === PLUGIN_ID)
   if (entry === undefined) return null

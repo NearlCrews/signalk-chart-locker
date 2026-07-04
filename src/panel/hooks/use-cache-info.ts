@@ -19,17 +19,10 @@ export interface UseCacheInfoResult {
   freeGiB: number | null
   /** The recommended cache cap in GiB, or null until the fetch resolves. */
   recommendedCapGiB: number | null
-  /** A message describing a failed fetch, or null. */
-  error: string | null
 }
 
-/** Read `freeGiB` off the raw response as a finite number, else null. */
-function readFreeGiB (value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null
-}
-
-/** Read `recommendedCapGiB` off the raw response as a finite number, else null. */
-function readRecommended (value: unknown): number | null {
+/** Read a value off the raw response as a finite number, else null. */
+function readFiniteNumber (value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
@@ -37,7 +30,6 @@ function readRecommended (value: unknown): number | null {
 export function useCacheInfo (): UseCacheInfoResult {
   const [freeGiB, setFreeGiB] = useState<number | null>(null)
   const [recommendedCapGiB, setRecommendedCapGiB] = useState<number | null>(null)
-  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let canceled = false
@@ -45,7 +37,8 @@ export function useCacheInfo (): UseCacheInfoResult {
     // that is already gone.
     const unmountController = new AbortController()
 
-    // load never rejects: it catches its own failures and surfaces them through setError.
+    // A fetch failure here is non-fatal: this only seeds the default cap and the free-space note, so on
+    // failure the values stay null and the panel falls back to the static default.
     async function load (): Promise<void> {
       try {
         const response = await fetch(CACHE_INFO_URL, {
@@ -58,11 +51,10 @@ export function useCacheInfo (): UseCacheInfoResult {
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         const parsed = await response.json() as { freeGiB?: unknown, recommendedCapGiB?: unknown }
         if (canceled) return
-        setFreeGiB(readFreeGiB(parsed.freeGiB))
-        setRecommendedCapGiB(readRecommended(parsed.recommendedCapGiB))
-        setError(null)
-      } catch (e) {
-        if (!canceled) setError(e instanceof Error ? e.message : String(e))
+        setFreeGiB(readFiniteNumber(parsed.freeGiB))
+        setRecommendedCapGiB(readFiniteNumber(parsed.recommendedCapGiB))
+      } catch {
+        // Non-fatal: leave the values null so the panel keeps the static default.
       }
     }
 
@@ -74,5 +66,5 @@ export function useCacheInfo (): UseCacheInfoResult {
     }
   }, [])
 
-  return { freeGiB, recommendedCapGiB, error }
+  return { freeGiB, recommendedCapGiB }
 }

@@ -2,9 +2,9 @@
 
 import type { Plugin, ServerAPI } from '@signalk/server-api'
 import type { Position } from '../shared/types.js'
-import { PLUGIN_ID, PLUGIN_NAME, PLUGIN_DESCRIPTION } from '../shared/plugin-id.js'
+import { PLUGIN_ID, PLUGIN_NAME, PLUGIN_DESCRIPTION, PLUGIN_MOUNT_PATH } from '../shared/plugin-id.js'
 import { requireContainerManager, getContainerManager, ensureRuntimeReady } from '../runtime/container-manager.js'
-import { TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT, DEFAULT_TILECACHE_TAG, DEFAULT_CACHE_CAP_GIB, buildTilecacheConfig, probeTilecacheHealth } from '../runtime/tilecache-container.js'
+import { TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT, DEFAULT_TILECACHE_TAG, DEFAULT_CACHE_CAP_GIB, PLUGIN_VERSION, buildTilecacheConfig, probeTilecacheHealth } from '../runtime/tilecache-container.js'
 import { buildSourcePayload, pushTilecacheConfig } from '../runtime/tilecache-config-push.js'
 import { registerTileRoutes, type TileRouter } from '../http/tile-routes.js'
 import { registerRegionsRoutes, type RegionsRouter } from '../http/regions-routes.js'
@@ -19,10 +19,10 @@ import { join, resolve } from 'node:path'
 import { readFreeGiB } from '../runtime/free-space.js'
 import { CACHE_CAP_MAX_GIB, CACHE_CAP_MIN_GIB, deriveDefaultCapGiB } from '../shared/cache-cap.js'
 import { createPositionWarmer, type PositionWarmer } from '../runtime/position-warmer.js'
-import { loadRegionsStore, listRegions, updateRegion, POSITION_WARM_REGION_ID, positionWarmBudgetBytes } from '../runtime/regions-store.js'
+import { loadRegionsStore, updateRegion, createCachedRegionsLoader, POSITION_WARM_REGION_ID, positionWarmBudgetBytes } from '../runtime/regions-store.js'
 import { warmRegion } from '../runtime/tilecache-client.js'
 
-interface CompanionConfig {
+interface ChartLockerConfig {
   // Sectioned to match how the admin form groups the fields: nested objects render as titled
   // sections in the Signal K admin UI (rjsf), and the saved config mirrors that shape.
   tileCache?: {
@@ -61,7 +61,7 @@ export function createPlugin (app: ServerAPI): Plugin {
   // in doStart or registerWithRouter, both of which run after the server has bound it.
   let overridesInstance: OverrideStore | undefined
   const getOverrides = (): OverrideStore => {
-    overridesInstance ??= new OverrideStore(join((app as unknown as { getDataDirPath: () => string }).getDataDirPath(), 'pmtiles-overrides.json'))
+    overridesInstance ??= new OverrideStore(join(app.getDataDirPath(), 'pmtiles-overrides.json'))
     return overridesInstance
   }
   let discovery: DiscoveryHandle | undefined
@@ -74,12 +74,12 @@ export function createPlugin (app: ServerAPI): Plugin {
   // rescan will see the latest overrides because it reads them at execution time).
   let rescanInProgress = false
 
-  function chartsDirFor (config: CompanionConfig): string {
+  function chartsDirFor (config: ChartLockerConfig): string {
     const override = config.charts?.path?.trim()
     return override ? resolve(configPath, override) : join(configPath, 'charts', 'pmtiles')
   }
 
-  async function setupCharts (config: CompanionConfig): Promise<void> {
+  async function setupCharts (config: ChartLockerConfig): Promise<void> {
     if (isThirdPartyPmtilesEnabled(configPath)) {
       return
     }
@@ -101,11 +101,16 @@ export function createPlugin (app: ServerAPI): Plugin {
     registry.clear()
   }
 
-  async function doStart (config: CompanionConfig): Promise<void> {
+  async function doStart (config: ChartLockerConfig): Promise<void> {
     app.setPluginStatus('Starting...')
     const manager = requireContainerManager(app)
     if (!manager) return
     if (!(await ensureRuntimeReady(app, manager))) return
+
+    // Chart discovery has no data dependency on the container, so start it now and await it at the end;
+    // it overlaps the container launch instead of running strictly after it. A rejection still surfaces
+    // through the await below into start()'s error handler.
+    const chartsReady = setupCharts(config)
 
     // The tilecache is non-fatal: a failure here disables tile caching but leaves the PMTiles chart
     // provider and the plugin serve routes fully working.
@@ -120,7 +125,7 @@ export function createPlugin (app: ServerAPI): Plugin {
         scrollTtlSecs,
         ...(config.advanced?.cacheVolumeSource?.trim() ? { externalCacheVolumeSource: config.advanced.cacheVolumeSource.trim() } : {})
       })
-      await manager.ensureRunning(TILECACHE_CONTAINER_NAME, tilecacheConfig, { pluginId: PLUGIN_ID })
+      await manager.ensureRunning(TILECACHE_CONTAINER_NAME, tilecacheConfig, { pluginId: PLUGIN_ID, pluginVersion: PLUGIN_VERSION })
       tilecacheLaunched = true
       const tcAddress = await manager.resolveContainerAddress(TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT)
       if (tcAddress) {
@@ -148,18 +153,18 @@ export function createPlugin (app: ServerAPI): Plugin {
       app.debug('Tilecache container did not start; tile caching is disabled:', err)
     }
 
-    // Eagerly load (and migrate) the regions store, then sweep any region left mid-download across a
+    // Load (and migrate) the regions store once, then sweep any region left mid-download across a
     // restart to error: the container's in-memory warm-job registry does not survive a restart, so a
     // region caught downloading is a lost job and must never stay downloading.
     const dataDir = app.getDataDirPath()
-    loadRegionsStore(dataDir)
-    for (const region of listRegions(dataDir)) {
+    for (const region of loadRegionsStore(dataDir).regions) {
       if (region.status === 'downloading') {
         updateRegion(dataDir, region.id, { status: 'error' })
       }
     }
+    const loadStore = createCachedRegionsLoader(dataDir)
     warmer = createPositionWarmer({
-      getStore: () => loadRegionsStore(app.getDataDirPath()),
+      getStore: loadStore,
       warm: async (bbox, sources, minzoom, maxzoom) => {
         const address = tilecacheAddress
         if (address === null) return null
@@ -169,13 +174,13 @@ export function createPlugin (app: ServerAPI): Plugin {
     positionUnsub = app.streambundle.getSelfBus('navigation.position' as unknown as Parameters<typeof app.streambundle.getSelfBus>[0])
       .onValue((delta: { value: unknown }) => { warmer?.onPosition(delta.value as Position) })
 
-    await setupCharts(config)
+    await chartsReady
 
     const tcStatus = tilecacheAddress !== null
       ? `Tilecache at ${tilecacheAddress}.`
       : 'Tilecache container unavailable; tile caching is disabled.'
     if (isThirdPartyPmtilesEnabled(configPath)) {
-      app.setPluginStatus(`${tcStatus} PMTiles charts disabled: signalk-pmtiles-plugin is enabled, disable it to use the companion chart provider.`)
+      app.setPluginStatus(`${tcStatus} PMTiles charts disabled: signalk-pmtiles-plugin is enabled, disable it to use the Chart Locker chart provider.`)
     } else {
       app.setPluginStatus(tcStatus)
     }
@@ -212,7 +217,7 @@ export function createPlugin (app: ServerAPI): Plugin {
       // getDataDirPath throws) and any statfs failure, falling back to the static default.
       let capDefaultGiB = DEFAULT_CACHE_CAP_GIB
       try {
-        const dataDir = (app as unknown as { getDataDirPath: () => string }).getDataDirPath()
+        const dataDir = app.getDataDirPath()
         capDefaultGiB = deriveDefaultCapGiB(readFreeGiB(dataDir))
       } catch {
         // Detection failed (early call or a platform without statfs): keep the conservative default.
@@ -306,7 +311,7 @@ export function createPlugin (app: ServerAPI): Plugin {
     // an explicit catch: a doStart rejection surfaces as a plugin error instead of an unhandled
     // rejection. Chaining onto the shared lifecycle promise serializes this start after any in-flight
     // stop, so a stop() queued before this start() always completes before doStart runs.
-    start (config: CompanionConfig) {
+    start (config: ChartLockerConfig) {
       lifecycle = lifecycle.then(() => doStart(config)).catch((err: unknown) => {
         app.setPluginError(`Startup failed: ${err instanceof Error ? err.message : String(err)}`)
       })
@@ -325,7 +330,7 @@ export function createPlugin (app: ServerAPI): Plugin {
     // routes remain open so every device can fetch cached tiles without authentication. Additional
     // route groups (PMTiles serve and management, v3) compose by mounting alongside these two.
     registerWithRouter (router) {
-      registerTileRoutes(router as unknown as TileRouter, () => tilecacheAddress, undefined, `/plugins/${PLUGIN_ID}`)
+      registerTileRoutes(router as unknown as TileRouter, () => tilecacheAddress, undefined, PLUGIN_MOUNT_PATH)
       registerRegionsRoutes(router as unknown as RegionsRouter, app, () => tilecacheAddress)
       registerCacheInfoRoute(router as unknown as CacheInfoRouter, app)
       registerPmtilesServeRoute(router as unknown as ServeRouter, registry)

@@ -69,7 +69,8 @@ export function registerChartManagementRoutes (
     }
     overrides.set(req.params.id, override)
     onOverride()
-    res.json({ identifier: req.params.id, override })
+    // Return the merged stored override, not just the posted patch, so the caller sees the effective value.
+    res.json({ identifier: req.params.id, override: overrides.get(req.params.id) ?? {} })
   })
   return true
 }

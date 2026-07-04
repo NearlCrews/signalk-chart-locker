@@ -2,6 +2,7 @@
 
 import { Readable, type Writable } from 'node:stream'
 import { CONTAINER_FETCH_TIMEOUT_MS } from '../runtime/container-fetch.js'
+import { PLUGIN_MOUNT_PATH } from '../shared/plugin-id.js'
 
 type HeaderValue = string | string[] | undefined
 
@@ -32,12 +33,30 @@ export type ProxyFetch = (url: string, init: { headers: Record<string, string>, 
 
 /** Upstream headers relayed to the browser verbatim, so the HTTP cache, range, and stale signal all work. */
 const RELAYED_HEADERS = ['content-type', 'etag', 'content-range', 'accept-ranges', 'content-length', 'cache-control', 'x-tilecache', 'last-modified']
+/** Freshness headers relayed on the REWRITTEN style document. The body is transformed (the sprite URL is
+ * absolutized), so the upstream strong etag and content-length no longer describe it and are not relayed;
+ * cache-control and last-modified are body-independent, so relaying them gives the style the same browser
+ * caching every other proxied path gets instead of none. */
+const STYLE_CACHE_HEADERS = ['cache-control', 'last-modified']
 /** Statuses with no body: piping `Readable.fromWeb(null)` would throw, so end without a body. */
 const BODYLESS = new Set([204, 304, 416])
 
+/** A fetch signal that aborts on either the browser cancel (controller) or the container fetch timeout. */
+function proxySignal (controller: AbortController): AbortSignal {
+  return AbortSignal.any([controller.signal, AbortSignal.timeout(CONTAINER_FETCH_TIMEOUT_MS)])
+}
+
+/** Relay the named upstream headers to the browser response, skipping any the upstream omitted. */
+function relayHeaders (upstream: Response, res: ProxyResponse, names: readonly string[]): void {
+  for (const name of names) {
+    const value = upstream.headers.get(name)
+    if (value !== null) res.setHeader(name, value)
+  }
+}
+
 /** Register the tile and style proxy routes plus a readiness probe on the SignalK-provided router.
  * publicBase is the plugin's mount prefix (`/plugins/<id>`), used to build an absolute sprite URL. */
-export function registerTileRoutes (router: TileRouter, getAddress: () => string | null, fetchImpl: ProxyFetch = (url, init) => fetch(url, init), publicBase = '/plugins/signalk-chart-locker'): void {
+export function registerTileRoutes (router: TileRouter, getAddress: () => string | null, fetchImpl: ProxyFetch = (url, init) => fetch(url, init), publicBase = PLUGIN_MOUNT_PATH): void {
   router.get('/tiles/ready', (_req, res) => {
     res.status(getAddress() !== null ? 200 : 503)
     res.end()
@@ -78,7 +97,7 @@ async function rewriteStyleSprite (req: ProxyRequest, res: ProxyResponse, addres
 
   let upstream: Response
   try {
-    upstream = await fetchImpl(`http://${address}${req.url}`, { headers: {}, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(CONTAINER_FETCH_TIMEOUT_MS)]) })
+    upstream = await fetchImpl(`http://${address}${req.url}`, { headers: {}, signal: proxySignal(controller) })
   } catch {
     if (!res.headersSent) res.status(502)
     res.end()
@@ -88,10 +107,7 @@ async function rewriteStyleSprite (req: ProxyRequest, res: ProxyResponse, addres
   // A non-2xx (or bodyless) response is relayed verbatim, like any other proxied path.
   if (upstream.status < 200 || upstream.status >= 300 || upstream.body === null) {
     res.status(upstream.status)
-    for (const name of RELAYED_HEADERS) {
-      const value = upstream.headers.get(name)
-      if (value !== null) res.setHeader(name, value)
-    }
+    relayHeaders(upstream, res, RELAYED_HEADERS)
     if (BODYLESS.has(upstream.status) || upstream.body === null) {
       res.end()
       return
@@ -109,6 +125,7 @@ async function rewriteStyleSprite (req: ProxyRequest, res: ProxyResponse, addres
     res.status(upstream.status)
     const contentType = upstream.headers.get('content-type')
     if (contentType !== null) res.setHeader('content-type', contentType)
+    relayHeaders(upstream, res, STYLE_CACHE_HEADERS)
     res.end(text)
     return
   }
@@ -121,6 +138,7 @@ async function rewriteStyleSprite (req: ProxyRequest, res: ProxyResponse, addres
   }
   res.status(upstream.status)
   res.setHeader('content-type', 'application/json')
+  relayHeaders(upstream, res, STYLE_CACHE_HEADERS)
   res.end(JSON.stringify(style))
 }
 
@@ -141,12 +159,9 @@ async function streamToContainer (req: ProxyRequest, res: ProxyResponse, address
   if (typeof inm === 'string') forward['if-none-match'] = inm
 
   try {
-    const upstream = await fetchImpl(`http://${address}${req.url}`, { headers: forward, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(CONTAINER_FETCH_TIMEOUT_MS)]) })
+    const upstream = await fetchImpl(`http://${address}${req.url}`, { headers: forward, signal: proxySignal(controller) })
     res.status(upstream.status)
-    for (const name of RELAYED_HEADERS) {
-      const value = upstream.headers.get(name)
-      if (value !== null) res.setHeader(name, value)
-    }
+    relayHeaders(upstream, res, RELAYED_HEADERS)
     if (BODYLESS.has(upstream.status) || upstream.body === null) {
       res.end()
       return

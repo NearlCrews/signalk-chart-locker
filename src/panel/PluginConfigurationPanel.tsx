@@ -13,6 +13,7 @@
 import type * as React from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import StatusBar from './components/StatusBar.js'
+import Banner from './components/Banner.js'
 import Section from './components/Section.js'
 import Disclosure from './components/Disclosure.js'
 import RangeField from './components/RangeField.js'
@@ -51,6 +52,11 @@ export default function PluginConfigurationPanel ({ configuration, save }: Props
   const { state, savedState, dispatch, markSaved, reseed } = useConfig(configuration)
   const [theme, setTheme] = useTheme()
   const [justSavedAt, setJustSavedAt] = useState<number | null>(null)
+  // Whether the plugin has ever been saved. Seeded from the mount prop (the admin UI passes null or
+  // undefined for a never-configured plugin) and flipped on the first save, because the admin UI does
+  // not re-pass configuration after a save, so a value derived purely from the prop would stay
+  // never-configured forever.
+  const [everSaved, setEverSaved] = useState(configuration != null)
 
   // Clear the "Saved" pill a short while after a save.
   useEffect(() => {
@@ -63,10 +69,9 @@ export default function PluginConfigurationPanel ({ configuration, save }: Props
   // inequality against the last-saved snapshot is a sound dirty check.
   const dirty = state !== savedState
 
-  // The plugin has never been saved when the admin UI passes null or undefined.
-  // Save must stay enabled in that state so the user can persist defaults to
+  // Save must stay enabled while the plugin has never been saved, so the user can persist defaults to
   // enable the plugin without making a throwaway edit first.
-  const unconfigured = configuration == null
+  const unconfigured = !everSaved
 
   // Warn before a tab close or reload while edits are unsaved, so a
   // fat-fingered close cannot silently lose in-progress configuration.
@@ -105,6 +110,7 @@ export default function PluginConfigurationPanel ({ configuration, save }: Props
     save(stateRef.current)
     markSaved()
     setJustSavedAt(Date.now())
+    setEverSaved(true)
   }, [save, markSaved])
 
   const handleDiscard = useCallback((): void => {
@@ -123,11 +129,7 @@ export default function PluginConfigurationPanel ({ configuration, save }: Props
       </div>
       <StatusBar status={status} lastUpdatedMs={lastUpdatedMs} />
       {error !== null
-        ? (
-          <div role='alert' style={S.errorBanner}>
-            Status unavailable: {error}. The next poll will retry automatically.
-          </div>
-          )
+        ? <Banner variant='danger'>Status unavailable: {error}. The next poll will retry automatically.</Banner>
         : null}
 
       <Section
@@ -137,7 +139,6 @@ export default function PluginConfigurationPanel ({ configuration, save }: Props
         <RangeField
           id='cl-cache-cap'
           label='Cache size cap (GiB)'
-          unit='GiB'
           min={CACHE_CAP_MIN_GIB}
           max={CACHE_CAP_MAX_GIB}
           step={CACHE_CAP_STEP_GIB}
@@ -158,10 +159,10 @@ export default function PluginConfigurationPanel ({ configuration, save }: Props
           : null}
         {freeGiB !== null && state.tileCache.cacheCapGiB > freeGiB
           ? (
-            <div role='alert' style={S.warnBanner}>
+            <Banner variant='warn'>
               Cache cap exceeds free space. Reduce it, or move the cache to an external drive under
               Advanced.
-            </div>
+            </Banner>
             )
           : null}
         <NumberField

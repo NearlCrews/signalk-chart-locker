@@ -5,8 +5,10 @@
  * store use one idiom. */
 
 import { join } from 'node:path'
+import { statSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { readJsonState, writeJsonState } from './json-state.js'
+import { nowUnixSecs } from '../shared/time.js'
 
 export interface PositionWarmSettings {
   enabled: boolean
@@ -60,9 +62,14 @@ export const DEFAULT_REGIONS_STORE: RegionsStore = {
  * escapes nor starves the regions budget. It must match the container constant verbatim. */
 export const POSITION_WARM_REGION_ID = '__position_warm__'
 
+/** P is 10% of the regions budget R, so it scales with R but stays a small slice. */
+const POSITION_WARM_BUDGET_FRACTION = 0.1
+/** P is capped at 64 MiB so a large R does not hand the scrolling position-warm an oversized reserve. */
+const POSITION_WARM_BUDGET_CAP_BYTES = 64 * 1024 * 1024
+
 /** P, the position-warm reserve, derived from R: a small slice (10% of R, capped at 64 MiB). */
 export function positionWarmBudgetBytes (regionsBudgetBytes: number): number {
-  return Math.min(Math.floor(regionsBudgetBytes * 0.1), 64 * 1024 * 1024)
+  return Math.min(Math.floor(regionsBudgetBytes * POSITION_WARM_BUDGET_FRACTION), POSITION_WARM_BUDGET_CAP_BYTES)
 }
 
 const STORE_FILE = 'regions.json'
@@ -94,7 +101,7 @@ function migrateV2 (raw: Record<string, unknown>, dataDir: string): RegionsStore
       sourceIds: rawSources,
       minzoom: rawMinzoom,
       maxzoom: rawMaxzoom,
-      createdAt: Math.floor(Date.now() / 1000),
+      createdAt: nowUnixSecs(),
       lastDownloadedAt: null,
       bytes: 0,
       status: 'needs-redownload'
@@ -129,6 +136,30 @@ export function loadRegionsStore (dataDir: string): RegionsStore {
     regions: rawRegions,
     positionWarm: { ...DEFAULT_REGIONS_STORE.positionWarm, ...rawPositionWarm },
     cacheScrollTtlDays: rawTtl
+  }
+}
+
+/** A loader that caches the parsed store and re-reads only when the file's mtime changes. The
+ * position-warm loop calls its getStore on every navigation.position delta, so a plain loadRegionsStore
+ * there would run a synchronous readFileSync plus JSON.parse per fix on the microSD card. A stat is far
+ * cheaper than a read-and-parse, and every writeJsonState bumps the mtime, so a region saved through the
+ * routes is picked up on the next call. Falls back to a fresh load when the file is missing. */
+export function createCachedRegionsLoader (dataDir: string): () => RegionsStore {
+  const file = join(dataDir, STORE_FILE)
+  let cached: RegionsStore | null = null
+  let cachedMtimeMs = -1
+  return () => {
+    let mtimeMs: number
+    try {
+      mtimeMs = statSync(file).mtimeMs
+    } catch {
+      return loadRegionsStore(dataDir)
+    }
+    if (cached === null || mtimeMs !== cachedMtimeMs) {
+      cached = loadRegionsStore(dataDir)
+      cachedMtimeMs = mtimeMs
+    }
+    return cached
   }
 }
 

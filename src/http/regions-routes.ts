@@ -12,6 +12,7 @@ import {
   addRegion, updateRegion, removeRegion, listRegions,
   type SavedRegion, type RegionStatus
 } from '../runtime/regions-store.js'
+import { nowUnixSecs } from '../shared/time.js'
 
 export interface RegionsRequest {
   params: Record<string, string>
@@ -73,7 +74,7 @@ function isValidBbox (value: unknown): value is [number, number, number, number]
 /** Mount the regions routes behind the admin gate. Returns whether they were mounted. */
 export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, getAddress: () => string | null, deps: Deps = {}): boolean {
   if (!ensureApiAdminGate(app)) return false
-  const dataDir = deps.dataDir ?? (app as unknown as { getDataDirPath(): string }).getDataDirPath()
+  const dataDir = deps.dataDir ?? app.getDataDirPath()
   const rawFetch: FetchImpl = deps.fetchImpl ?? ((url, init) => fetch(url, init))
   // Wrap every container fetch with a bounded timeout, so a hung container endpoint (for example a
   // deadlocked /cache/stats) surfaces as a caught failure and a 502 or 503, never an open request that
@@ -86,7 +87,8 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
   const withAddress = (res: RegionsResponse): string | null => {
     const address = getAddress()
     if (address === null) {
-      res.status(503).end()
+      // Match the JSON error shape every other failure path in this file uses, rather than a bare body.
+      res.status(503).json({ error: 'tilecache unavailable' })
       return null
     }
     return address
@@ -138,7 +140,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     const bytes = await regionBytes(address, regionId, snapshot.bytes)
     updateRegion(dataDir, regionId, {
       status: statusFromState(snapshot.state),
-      lastDownloadedAt: Math.floor(Date.now() / 1000),
+      lastDownloadedAt: nowUnixSecs(),
       bytes
     })
   }
@@ -257,7 +259,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
       sourceIds,
       minzoom,
       maxzoom,
-      createdAt: Math.floor(Date.now() / 1000),
+      createdAt: nowUnixSecs(),
       lastDownloadedAt: null,
       bytes: 0,
       status: 'downloading'
@@ -325,6 +327,10 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     const region = listRegions(dataDir).find((r) => r.id === id)
     if (!region) { res.status(404).json({ error: 'no such region' }); return }
     const address = withAddress(res); if (address === null) return
+    // No upfront budget gate here, unlike POST /api/regions: a redownload re-warms an EXISTING region
+    // under the same id, so the container clears that region's prior pins first and the re-warm replaces
+    // its own tiles rather than pinning a second copy. The region already fit the budget once, and the
+    // server-side pin gate still refuses anything that no longer fits.
     try {
       // Same region.id: the container clears that region's prior pins at warm start, so the re-warm
       // replaces tiles and creates no duplicate region.

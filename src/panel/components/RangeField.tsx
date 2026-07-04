@@ -72,7 +72,7 @@ export default function RangeField ({
           />
           <input
             id={numberId}
-            aria-label={label}
+            aria-label={`${label} exact value`}
             aria-describedby={controlProps['aria-describedby']}
             type='number'
             min={min}

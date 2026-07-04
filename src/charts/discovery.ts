@@ -3,7 +3,7 @@
  * it is decoded, so a symlink or a path that escapes the directory is rejected. */
 
 import { type FSWatcher, watch } from 'node:fs'
-import { readdir, realpath } from 'node:fs/promises'
+import { readdir, realpath, stat } from 'node:fs/promises'
 import { join, sep } from 'node:path'
 import { nameToId } from './chart-id.js'
 import { type ChartRegistry, DEFAULT_SCALE } from './chart-registry.js'
@@ -67,24 +67,45 @@ export async function rescanCharts (deps: DiscoveryDeps): Promise<void> {
     if (!dirReal) continue
     const filePath = await containedRealPath(dirReal, fileName, deps.chartsDir)
     if (!filePath) continue
-    const result = await decode(filePath)
-    if (!result.ok) {
-      deps.registry.setError(fileName, result.error)
-      deps.onError?.(`${fileName}: ${result.error}`)
-      continue
+    const id = nameToId(fileName)
+    // File identity (mtime plus size): when it matches the stored record, reuse the cached decode and
+    // only re-run the namer, so a rescan (a watch event, or an override edit that renames without
+    // touching the file) does not re-parse every unchanged archive.
+    let mtimeMs: number | undefined
+    let bytes: number | undefined
+    try {
+      const st = await stat(filePath)
+      mtimeMs = st.mtimeMs
+      bytes = st.size
+    } catch { /* fall through to a fresh decode */ }
+
+    const existing = deps.registry.record(id)
+    let decoded: DecodedPmtiles
+    if (existing !== undefined && mtimeMs !== undefined && existing.mtimeMs === mtimeMs && existing.bytes === bytes) {
+      decoded = existing.decoded
+    } else {
+      const result = await decode(filePath)
+      if (!result.ok) {
+        deps.registry.setError(fileName, result.error)
+        deps.onError?.(`${fileName}: ${result.error}`)
+        continue
+      }
+      decoded = result.decoded
     }
     deps.registry.clearError(fileName)
-    const naming = namer(fileName, result.decoded)
-    seen.add(nameToId(fileName))
+    const naming = namer(fileName, decoded)
+    seen.add(id)
     deps.registry.set({
-      identifier: nameToId(fileName),
+      identifier: id,
       fileName,
       filePath,
       name: naming.name,
       description: naming.description,
       type: 'tilelayer',
       scale: naming.scale,
-      decoded: result.decoded
+      decoded,
+      mtimeMs,
+      bytes
     })
   }
 
