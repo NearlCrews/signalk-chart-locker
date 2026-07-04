@@ -46,8 +46,6 @@ pub struct WarmJob {
     pub state: WarmState,
     pub cancel: Arc<AtomicBool>,
     pub finished_at: Option<i64>,
-    /// The region this warm pins under, or None for an unpinned-budget warm. Kept for snapshots.
-    pub region_id: Option<String>,
 }
 
 pub struct WarmRequest {
@@ -122,7 +120,6 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
         state: WarmState::Running,
         cancel: cancel.clone(),
         finished_at: None,
-        region_id: req.region_id.clone(),
     }));
     {
         let mut jobs = state.warm_jobs.write().await;
@@ -225,18 +222,31 @@ fn effective_budget(st: &AppState, region_id: Option<&str>) -> i64 {
 // sub-source is clamped to the minimum of the registry vector_maxzoom and the learned source maxzoom,
 // so the enumeration never requests a tile above what the upstream serves. A non-style source passes
 // through unchanged.
-async fn expand_warm_sources(st: &AppState, sources: Vec<ChartSource>) -> Vec<ChartSource> {
+async fn expand_warm_sources(st: &AppState, sources: Vec<ChartSource>) -> (Vec<ChartSource>, u64) {
     let mut out = Vec::new();
+    let mut failed = 0u64;
     for source in sources {
         if !matches!(source.upstream, UpstreamTemplate::Style { .. }) {
             out.push(source);
             continue;
         }
         if !crate::style::ensure_style_learned(st, &source.id).await {
+            eprintln!(
+                "tilecache: warm: style source {} failed to learn; its basemap tiles are omitted from this region",
+                source.id
+            );
+            failed += 1;
             continue;
         }
         let learned = { st.style_state.read().await.get(&source.id).cloned() };
-        let Some(learned) = learned else { continue };
+        let Some(learned) = learned else {
+            eprintln!(
+                "tilecache: warm: style source {} learned but has no state; its basemap tiles are omitted",
+                source.id
+            );
+            failed += 1;
+            continue;
+        };
         let registry_max = source.vector_maxzoom.unwrap_or(source.maxzoom);
         for (name, templates) in &learned.source_tiles {
             let Some(template) = templates.first() else {
@@ -262,7 +272,7 @@ async fn expand_warm_sources(st: &AppState, sources: Vec<ChartSource>) -> Vec<Ch
             });
         }
     }
-    out
+    (out, failed)
 }
 
 // Glyph codepoint ranges to warm: U+0000 through U+2FFF in 256-wide blocks (48 ranges), enough for
@@ -300,10 +310,11 @@ async fn flush_pinned(st: &AppState, batch: &mut Vec<WarmRow>, region: &str) {
     }
 }
 
-// Warm one asset (a glyph range or a sprite variant) cache-first: skip it when already fresh-pinned,
-// else fetch it (host-checked, status-returning) and push a WarmRow with the synthetic key. Builds the
-// WarmRow directly rather than through warm_one because the sprite JSON is rejected by the tile
-// content-type gate.
+// Warm one asset (a glyph range or a sprite variant) cache-first: return None when it is already
+// fresh-pinned, host-blocked, or a miss, else fetch it (host-checked, status-returning) and return a
+// WarmRow with the synthetic key. Builds the WarmRow directly rather than through warm_one because the
+// sprite JSON is rejected by the tile content-type gate. The caller holds the warm-semaphore permit for
+// this task (like warm_one), so this does not take one.
 async fn warm_one_asset(
     st: &AppState,
     cache_source: &str,
@@ -311,8 +322,7 @@ async fn warm_one_asset(
     url: &str,
     allowed: &[String],
     region: &str,
-    batch: &mut Vec<WarmRow>,
-) {
+) -> Option<WarmRow> {
     let now = now_secs();
     // Skip-but-pin a fresh cached asset under one lock, on the blocking pool so the warm's SQLite does not
     // stall the reactor.
@@ -337,23 +347,19 @@ async fn warm_one_asset(
     })
     .await;
     match pinned {
-        Ok(Ok(true)) => return,
+        Ok(Ok(true)) => return None,
         Ok(Ok(false)) => {}
         Ok(Err(e)) => eprintln!("tilecache: assets pin_if_fresh failed: {e}"),
         Err(e) => eprintln!("tilecache: assets pin_if_fresh task failed: {e}"),
     }
     if !crate::style::host_allowed(url, allowed) {
-        return;
+        return None;
     }
-    let _permit = match st.warm_semaphore.clone().acquire_owned().await {
-        Ok(p) => p,
-        Err(_) => return,
-    };
     // A missing asset (404 or 204) is not pinned: a pinned negative is never evicted, so it would
     // permanently mask a glyph range or sprite variant the upstream later begins serving. Leaving it
     // uncached lets the next basemap warm and the live route refetch it, so only a 200 is stored.
-    if let Ok((200, f)) = crate::fetcher::fetch_upstream(st, url, None).await {
-        batch.push(WarmRow {
+    match crate::fetcher::fetch_upstream(st, url, None).await {
+        Ok((200, f)) => Some(WarmRow {
             source: cache_source.to_string(),
             z: 0,
             x,
@@ -368,7 +374,18 @@ async fn warm_one_asset(
                 bytes: f.body.len() as i64,
                 blob: Some(f.body),
             },
-        });
+        }),
+        // A 404 or 204 is an expected sparse-coverage miss (left uncached above); anything else is a
+        // fetch failure worth a log line, matching the other warm fetch paths in this file.
+        Ok((404, _)) | Ok((204, _)) => None,
+        Ok((status, _)) => {
+            eprintln!("tilecache: warm asset {url} returned status {status}; skipped");
+            None
+        }
+        Err(()) => {
+            eprintln!("tilecache: warm asset {url} fetch failed (offline or blocked); skipped");
+            None
+        }
     }
 }
 
@@ -411,46 +428,73 @@ async fn warm_basemap_assets(st: &AppState, style_source: &str) {
         )
     };
 
-    let mut batch: Vec<WarmRow> = Vec::with_capacity(WARM_BATCH);
+    // Build the full asset job list (each glyph range per fontstack, plus the sprite variants) as
+    // (cache_source, synthetic x, upstream url) triples. The cache_source is shared through an Arc so a
+    // fontstack's 48 ranges (and the 4 sprite variants) reuse one allocation rather than cloning the
+    // String per job.
+    let mut jobs: Vec<(Arc<str>, u32, String)> = Vec::new();
     if let Some(template) = glyph_template {
         for fontstack in &fontstacks {
-            let cache_source = crate::style::glyph_cache_source(style_source, fontstack);
+            let cache_source: Arc<str> =
+                Arc::from(crate::style::glyph_cache_source(style_source, fontstack));
             let encoded = crate::style::encode_fontstack(fontstack);
             for range_start in (0..GLYPH_RANGE_END).step_by(GLYPH_RANGE_STEP as usize) {
                 let range = format!("{range_start}-{}.pbf", range_start + GLYPH_RANGE_STEP - 1);
                 let url = template
                     .replace("{fontstack}", &encoded)
                     .replace("{range}.pbf", &range);
-                warm_one_asset(
-                    st,
-                    &cache_source,
-                    range_start,
-                    &url,
-                    &allowed,
-                    region,
-                    &mut batch,
-                )
-                .await;
-                if batch.len() >= WARM_BATCH {
-                    flush_pinned(st, &mut batch, region).await;
-                }
+                jobs.push((cache_source.clone(), range_start, url));
             }
         }
     }
     if let Some(base) = sprite_base {
-        let cache_source = crate::style::sprite_cache_source(style_source);
-        for (idx, suffix) in [
-            (0u32, ".json"),
-            (1, ".png"),
-            (2, "@2x.json"),
-            (3, "@2x.png"),
-        ] {
-            let url = format!("{base}{suffix}");
-            warm_one_asset(st, &cache_source, idx, &url, &allowed, region, &mut batch).await;
+        let cache_source: Arc<str> = Arc::from(crate::style::sprite_cache_source(style_source));
+        for (idx, suffix) in crate::style::SPRITE_VARIANTS {
+            jobs.push((cache_source.clone(), idx, format!("{base}{suffix}")));
+        }
+    }
+
+    // Fetch the assets through a JoinSet bounded by the warm semaphore (the same fan-out the tile warm
+    // uses), collecting the fetched rows into batches that flush at WARM_BATCH. Serial before, so a
+    // fontstack's 48 glyph ranges each blocked on the prior fetch.
+    let allowed = Arc::new(allowed);
+    let region_arc: Arc<str> = Arc::from(region);
+    let mut batch: Vec<WarmRow> = Vec::with_capacity(WARM_BATCH);
+    let mut set: tokio::task::JoinSet<Option<WarmRow>> = tokio::task::JoinSet::new();
+    for (cache_source, x, url) in jobs {
+        let permit = match st.warm_semaphore.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        let st2 = st.clone();
+        let allowed2 = allowed.clone();
+        let region2 = region_arc.clone();
+        set.spawn(async move {
+            let _permit = permit;
+            warm_one_asset(&st2, &cache_source, x, &url, &allowed2, &region2).await
+        });
+        while let Some(done) = set.try_join_next() {
+            if let Ok(Some(row)) = done {
+                push_and_maybe_flush(st, &mut batch, region, row).await;
+            }
+        }
+    }
+    while let Some(done) = set.join_next().await {
+        if let Ok(Some(row)) = done {
+            push_and_maybe_flush(st, &mut batch, region, row).await;
         }
     }
     if !batch.is_empty() {
         flush_pinned(st, &mut batch, region).await;
+    }
+}
+
+// Push a fetched asset row into the batch, flushing the batch pinned when it reaches WARM_BATCH. Shared
+// by the two JoinSet drain loops in warm_basemap_assets so the push-and-flush step lives in one place.
+async fn push_and_maybe_flush(st: &AppState, batch: &mut Vec<WarmRow>, region: &str, row: WarmRow) {
+    batch.push(row);
+    if batch.len() >= WARM_BATCH {
+        flush_pinned(st, batch, region).await;
     }
 }
 
@@ -467,7 +511,7 @@ async fn warm_one(
     let now = now_secs();
     // pin_if_fresh does the freshness check, the budget gate, and the pin under one lock, closing the
     // race where a concurrent evict_to could delete the row between a separate get() and pin() call. It
-    // runs on the blocking pool so the warm's synchronous SQLite does not stall the single-worker reactor.
+    // runs on the blocking pool so the warm's synchronous SQLite does not stall the async reactor.
     let cache = st.cache.clone();
     let source_id = source.id.clone();
     let region_owned = region_id.map(str::to_string);
@@ -525,16 +569,7 @@ async fn warm_one(
             z,
             x,
             y,
-            tile: CachedTile {
-                content_type: String::new(),
-                strong_etag: String::new(),
-                upstream_validator: None,
-                status: 404,
-                fetched_at: now,
-                last_access: now,
-                bytes: 0,
-                blob: None,
-            },
+            tile: CachedTile::negative(404, now),
         }),
         _ => Fetched::Error,
     }
@@ -568,7 +603,13 @@ async fn run(
         .map(|s| s.id.clone());
     // Expand any style source into synthetic XYZ sub-sources keyed style:{source}:{name} (learning the
     // style once), so the enumeration and the pin path below run unchanged for the basemap.
-    let sources = expand_warm_sources(&st, sources).await;
+    let (sources, style_learn_failures) = expand_warm_sources(&st, sources).await;
+    // A style source that failed to learn is dropped from the enumeration, so record it as a job error;
+    // otherwise the region reports Done with done == total and reads as fully cached when its basemap
+    // never warmed and will not render offline.
+    if style_learn_failures > 0 {
+        job.lock().await.errors += style_learn_failures;
+    }
     // Re-gate on the true enumerated total now that a style source has expanded into one sub-source per
     // in-style source: the pre-spawn hard-cap check in start_warm counts a style as a single sub-source,
     // so a multi-source style could otherwise enumerate past WARM_TILE_HARD_CAP. Also correct the job
@@ -593,7 +634,11 @@ async fn run(
 
     // Enumerate tiles lazily via tiles_iter (zero extra allocation beyond the iterator struct) and
     // spawn bounded tasks. The cancel check between tiles keeps the cooperative cancel responsive.
+    // The source and region_id are shared through an Arc so each of the up-to-WARM_TILE_HARD_CAP spawns
+    // costs a refcount bump, not a full ChartSource plus String clone per tile.
+    let region_arc: Option<Arc<str>> = region_id.as_deref().map(Arc::from);
     'outer: for source in &sources {
+        let source_arc = Arc::new(source.clone());
         for (z, x, y) in tiles_iter(source, bbox, zmin, zmax) {
             if cancel.load(Ordering::Relaxed) {
                 final_state = WarmState::Cancelled;
@@ -607,8 +652,8 @@ async fn run(
                 }
             };
             let st2 = st.clone();
-            let source2 = source.clone();
-            let rid = region_id.clone();
+            let source2 = source_arc.clone();
+            let rid = region_arc.clone();
             set.spawn(async move {
                 let _permit = permit;
                 warm_one(&st2, &source2, z, x, y, rid.as_deref()).await
@@ -716,7 +761,7 @@ async fn flush(
 ) -> bool {
     let now = now_secs();
     // The batched pinned write and its make-room eviction scan run on the blocking pool so the warm's
-    // synchronous SQLite does not stall the single-worker reactor.
+    // synchronous SQLite does not stall the async reactor.
     let cache = st.cache.clone();
     let rows = std::mem::take(batch);
     let budget = effective_budget(st, region_id);

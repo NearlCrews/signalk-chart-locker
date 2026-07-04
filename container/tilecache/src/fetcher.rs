@@ -71,6 +71,20 @@ pub(crate) fn log_cache_err<T>(result: rusqlite::Result<T>) {
     }
 }
 
+/// Run a cache write off the reactor on the blocking pool, so a SQLite write never stalls an async
+/// worker alongside live tile reads. When `detached`, the JoinHandle is dropped so a best-effort write
+/// (the LRU touch) runs without delaying the caller; otherwise the caller awaits it and a task-join
+/// failure is logged under `label`.
+async fn run_cache_write(label: &str, detached: bool, f: impl FnOnce() + Send + 'static) {
+    let handle = tokio::task::spawn_blocking(f);
+    if detached {
+        return;
+    }
+    if let Err(e) = handle.await {
+        eprintln!("tilecache: {label} task failed: {e}");
+    }
+}
+
 fn to_response(tile: &CachedTile, stale: bool) -> TileResponse {
     TileResponse {
         status: tile.status as u16,
@@ -144,21 +158,18 @@ async fn store_200(
         blob: Some(fetched.body.clone()),
     };
     // Store and evict on the blocking pool: once the cache sits at the cap, evict_to runs a window-function
-    // scan over the unpinned rows, so keeping it off the single-worker reactor stops a steady-state
+    // scan over the unpinned rows, so keeping it off the async reactor stops a steady-state
     // miss-store from stalling live tile reads. Soft reserve: evict_to(cap) drops only unpinned rows, so the
     // scroll cache fills the cap minus the bytes actually pinned by saved regions (the full cap when nothing
     // is pinned).
     let cache = state.cache.clone();
     let cap = state.live_cap_bytes.load(Ordering::Relaxed);
     let source_owned = source_id.to_string();
-    if let Err(e) = tokio::task::spawn_blocking(move || {
+    run_cache_write("tile store", false, move || {
         log_cache_err(cache.put(&source_owned, z, x, y, &tile, false, now));
         log_cache_err(cache.evict_to(cap));
     })
-    .await
-    {
-        eprintln!("tilecache: tile store task failed: {e}");
-    }
+    .await;
     if if_none_match == Some(etag.as_str()) {
         return FetchOutcome::NotModified { etag };
     }
@@ -171,7 +182,7 @@ async fn store_200(
     })
 }
 
-fn negative_cache(
+async fn negative_cache(
     state: &AppState,
     source_id: &str,
     z: u32,
@@ -180,17 +191,13 @@ fn negative_cache(
     status: u16,
 ) -> FetchOutcome {
     let now = now_secs();
-    let tile = CachedTile {
-        content_type: String::new(),
-        strong_etag: String::new(),
-        upstream_validator: None,
-        status: status as i64,
-        fetched_at: now,
-        last_access: now,
-        bytes: 0,
-        blob: None,
-    };
-    log_cache_err(state.cache.put(source_id, z, x, y, &tile, false, now));
+    let tile = CachedTile::negative(status as i64, now);
+    let cache = state.cache.clone();
+    let source_owned = source_id.to_string();
+    run_cache_write("negative-cache store", false, move || {
+        log_cache_err(cache.put(&source_owned, z, x, y, &tile, false, now))
+    })
+    .await;
     FetchOutcome::Empty { status }
 }
 
@@ -228,9 +235,16 @@ pub async fn get_tile(
                 };
             }
         } else if now - tile.fetched_at < state.knobs.fresh_secs {
-            // Throttle the LRU write so a pan does not write to the microSD on every warm-tile read.
+            // Throttle the LRU write so a pan does not write to the microSD on every warm-tile read, and
+            // run it detached on the blocking pool so the best-effort last_access bump never delays the
+            // cache hit or blocks the reactor on a SQLite write.
             if now - tile.last_access >= TOUCH_THROTTLE_SECS {
-                log_cache_err(state.cache.touch(source_id, z, x, y, now));
+                let cache = state.cache.clone();
+                let source_owned = source_id.to_string();
+                run_cache_write("touch", true, move || {
+                    log_cache_err(cache.touch(&source_owned, z, x, y, now))
+                })
+                .await;
             }
             if if_none_match.as_deref() == Some(&tile.strong_etag) {
                 return FetchOutcome::NotModified {
@@ -245,7 +259,13 @@ pub async fn get_tile(
                     let mut refreshed = tile.clone();
                     refreshed.fetched_at = now;
                     refreshed.last_access = now;
-                    log_cache_err(state.cache.put(source_id, z, x, y, &refreshed, false, now));
+                    // Off the reactor like store_200: the freshness-bump write is a SQLite write.
+                    let cache = state.cache.clone();
+                    let source_owned = source_id.to_string();
+                    run_cache_write("revalidation refresh", false, move || {
+                        log_cache_err(cache.put(&source_owned, z, x, y, &refreshed, false, now))
+                    })
+                    .await;
                     if if_none_match.as_deref() == Some(&tile.strong_etag) {
                         return FetchOutcome::NotModified {
                             etag: tile.strong_etag,
@@ -294,7 +314,7 @@ pub async fn get_tile(
         Ok((200, fetched)) => {
             store_200(state, source_id, z, x, y, fetched, if_none_match.as_deref()).await
         }
-        Ok((status @ (404 | 204), _)) => negative_cache(state, source_id, z, x, y, status),
+        Ok((status @ (404 | 204), _)) => negative_cache(state, source_id, z, x, y, status).await,
         Ok(_) => FetchOutcome::Unavailable,
         Err(()) => {
             // Offline: serve any cached 200 within the max-stale bound.

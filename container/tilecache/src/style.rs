@@ -15,7 +15,6 @@ use axum::{
     routing::get,
     Router,
 };
-use bytes::Bytes;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -42,15 +41,30 @@ pub(crate) fn sprite_cache_source(style_source: &str) -> String {
     format!("style:{style_source}:sprite")
 }
 
-/// Parse the 256-aligned range start from a glyph range param like `0-255.pbf`. Returns None for a
-/// malformed or non-256-aligned range so a crafted range cannot mis-key the cache.
-pub(crate) fn glyph_range_start(range: &str) -> Option<u32> {
-    let start: u32 = range.split('-').next()?.parse().ok()?;
-    if start.is_multiple_of(256) {
-        Some(start)
-    } else {
-        None
+/// The sprite variants MapLibre requests, as (cache-x index, upstream suffix) pairs, for the warm engine
+/// to enumerate. Keep in sync with the four sprite serve routes (sprite_json, sprite_png, sprite_2x_json,
+/// sprite_2x_png), which use the same fixed index and suffix per route.
+pub(crate) const SPRITE_VARIANTS: [(u32, &str); 4] = [
+    (0, ".json"),
+    (1, ".png"),
+    (2, "@2x.json"),
+    (3, "@2x.png"),
+];
+
+/// Parse and canonicalize a glyph range param like `0-255.pbf`. Returns `(range_start, "start-end.pbf")`
+/// only for a well-formed, 256-aligned, 256-wide range (the shape MapLibre requests). Returns None
+/// otherwise. The caller keys the cache on `range_start` and substitutes the returned canonical string
+/// into the upstream URL, never the raw param, so a crafted range can neither mis-key the cache (two
+/// different malformed ends collide on the same start) nor smuggle an arbitrary path into the upstream.
+pub(crate) fn glyph_range(range: &str) -> Option<(u32, String)> {
+    let stem = range.strip_suffix(".pbf")?;
+    let (start_s, end_s) = stem.split_once('-')?;
+    let start: u32 = start_s.parse().ok()?;
+    let end: u32 = end_s.parse().ok()?;
+    if !start.is_multiple_of(256) || end != start + 255 {
+        return None;
     }
+    Some((start, format!("{start}-{end}.pbf")))
 }
 
 /// Percent-encode a fontstack for an upstream glyph URL segment (the cache key uses the decoded form).
@@ -78,21 +92,6 @@ async fn fetch_json(state: &AppState, url: &str) -> Option<Value> {
     }
     let body = state.read_capped(resp).await?;
     serde_json::from_slice::<Value>(&body).ok()
-}
-
-async fn fetch_bytes(state: &AppState, url: &str) -> Option<(String, Bytes)> {
-    let resp = state.guarded_get(url, None).await.ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let content_type = resp
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_string();
-    let body = state.read_capped(resp).await?;
-    Some((content_type, body))
 }
 
 /// Fetch the upstream style, learn its glyph template, per-source tile templates, and per-source
@@ -265,6 +264,42 @@ async fn style_doc(State(state): State<AppState>, Path(source): Path<String>) ->
             }
         }
     }
+    // Fail closed: a source the learn step could not rewrite (its inline tiles or TileJSON url is off the
+    // style's allowlist) keeps its upstream url in the style unless we strip it, and the browser would
+    // then fetch that host directly, bypassing the container, the cache, and the allowlist. Drop any
+    // leftover off-allowlist url or tiles so an unlearnable source renders empty rather than leaking its
+    // upstream, matching how glyphs and vector tiles fail closed on a disallowed host.
+    let allowed = style_allowed_hosts(&state, &source).await;
+    if let Some(sources_obj) = style["sources"].as_object_mut() {
+        for (name, src) in sources_obj.iter_mut() {
+            if learned.source_tiles.contains_key(name) {
+                continue;
+            }
+            let url_leaks = src
+                .get("url")
+                .and_then(|v| v.as_str())
+                .map(|u| !host_allowed(u, &allowed))
+                .unwrap_or(false);
+            let tiles_leak = src
+                .get("tiles")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .any(|t| t.as_str().map(|u| !host_allowed(u, &allowed)).unwrap_or(false))
+                })
+                .unwrap_or(false);
+            if url_leaks || tiles_leak {
+                if let Some(obj) = src.as_object_mut() {
+                    obj.remove("url");
+                    obj.remove("tiles");
+                    eprintln!(
+                        "tilecache: style {source}: source {name} references an off-allowlist upstream; stripped from the served style to avoid a direct browser fetch"
+                    );
+                }
+            }
+        }
+    }
+
     // The sprite is intentionally NOT rewritten to the plugin path: MapLibre requires the sprite URL
     // to be absolute and rejects a path-absolute /plugins/... value ("Invalid sprite URL, must be
     // absolute"), which aborts the whole style load. The sprite stays the upstream absolute URL (so it
@@ -284,7 +319,7 @@ async fn glyphs(
     State(state): State<AppState>,
     Path((source, fontstack, range)): Path<(String, String, String)>,
 ) -> Response {
-    let Some(range_start) = glyph_range_start(&range) else {
+    let Some((range_start, canonical_range)) = glyph_range(&range) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let cache_source = glyph_cache_source(&source, &fontstack);
@@ -325,7 +360,7 @@ async fn glyphs(
     let allowed = style_allowed_hosts(&state, &source).await;
     let upstream = template
         .replace("{fontstack}", &encode_fontstack(&fontstack))
-        .replace("{range}.pbf", &range);
+        .replace("{range}.pbf", &canonical_range);
     if !host_allowed(&upstream, &allowed) {
         return StatusCode::BAD_GATEWAY.into_response();
     }
@@ -529,18 +564,18 @@ async fn vector_tile(
             return StatusCode::NOT_FOUND.into_response();
         }
     }
-    let resp = match fetch_bytes(&state, &upstream).await {
-        Some((content_type, body)) => {
+    let resp = match crate::fetcher::fetch_upstream(&state, &upstream, None).await {
+        Ok((200, f)) => {
             let now = now_secs();
             let tile = CachedTile {
-                content_type,
-                strong_etag: crate::fetcher::strong_etag(&body),
+                content_type: f.content_type,
+                strong_etag: crate::fetcher::strong_etag(&f.body),
                 upstream_validator: None,
                 status: 200,
                 fetched_at: now,
                 last_access: now,
-                bytes: body.len() as i64,
-                blob: Some(body),
+                bytes: f.body.len() as i64,
+                blob: Some(f.body),
             };
             // Soft reserve: the scroll cache uses the whole cap. evict_to(cap) drops only unpinned rows,
             // so the scroll cache fills the cap minus the bytes actually pinned by saved regions. The
@@ -549,7 +584,15 @@ async fn vector_tile(
             store_and_evict(&state, cache_source, z, x, y, tile, now).await;
             served
         }
-        None => StatusCode::BAD_GATEWAY.into_response(),
+        // A genuinely missing vector tile is a 404, not a gateway error. Negative-cache it (zero-byte
+        // row) so the negative_ttl branch above serves the miss without refetching, matching the raster
+        // and glyph negative paths.
+        Ok((status @ (404 | 204), _)) => {
+            let now = now_secs();
+            store_and_evict(&state, cache_source, z, x, y, CachedTile::negative(status as i64, now), now).await;
+            StatusCode::NOT_FOUND.into_response()
+        }
+        _ => StatusCode::BAD_GATEWAY.into_response(),
     };
     state.inflight_finish(&key, &lock).await;
     resp
@@ -579,7 +622,7 @@ fn tile_response(tile: &CachedTile, if_none_match: Option<&str>) -> Response {
 }
 
 /// Store a fetched style sub-resource (glyph, sprite, or vector tile) and evict to the cap on the
-/// blocking pool, so the window-function eviction scan never runs on the single-worker reactor. Mirrors
+/// blocking pool, so the window-function eviction scan never runs on the async reactor. Mirrors
 /// the raster store path in `fetcher::store_200`.
 async fn store_and_evict(
     state: &AppState,

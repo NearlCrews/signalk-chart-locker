@@ -14,6 +14,10 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
                 || v4.is_link_local()
                 || v4.is_multicast()
                 || v4.is_unspecified()
+                // 0.0.0.0/8 "this network": is_unspecified only matches 0.0.0.0 exactly, but Linux routes
+                // the whole 0.0.0.0/8 block to the local host, so 0.0.0.1 through 0.255.255.255 must be
+                // rejected too or they become an SSRF-to-loopback bypass.
+                || v4.octets()[0] == 0
                 || v4.is_broadcast()
                 || v4.is_documentation()
                 // 100.64.0.0/10 carrier-grade NAT (shared address space).
@@ -80,6 +84,17 @@ fn embedded_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
             s[7] as u8,
         ));
     }
+    // ::a.b.c.d IPv4-compatible (deprecated): the high 96 bits are zero and the low 32 are a v4, so
+    // ::7f00:1 (::127.0.0.1) would otherwise reach loopback. :: and ::1 map to 0.0.0.0 and 0.0.0.1,
+    // which the unspecified and 0.0.0.0/8 v4 rules already reject.
+    if s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0 {
+        return Some(Ipv4Addr::new(
+            (s[6] >> 8) as u8,
+            s[6] as u8,
+            (s[7] >> 8) as u8,
+            s[7] as u8,
+        ));
+    }
     None
 }
 
@@ -108,6 +123,7 @@ mod tests {
             "169.254.169.254",
             "100.64.0.1",
             "0.0.0.0",
+            "0.1.2.3",
             "224.0.0.1",
         ] {
             let ip: IpAddr = s.parse().unwrap();
@@ -126,6 +142,8 @@ mod tests {
         assert!(is_forbidden_ip(IpAddr::V6(
             "64:ff9b::c0a8:0101".parse().unwrap()
         )));
+        // IPv4-compatible ::127.0.0.1 (::7f00:1) decodes to loopback.
+        assert!(is_forbidden_ip(IpAddr::V6("::7f00:1".parse().unwrap())));
     }
 
     #[test]

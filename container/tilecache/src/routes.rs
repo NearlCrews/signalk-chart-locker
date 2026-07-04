@@ -47,7 +47,7 @@ async fn stats(State(st): State<AppState>) -> Json<serde_json::Value> {
     let p = st.live_position_warm_budget.load(Ordering::Relaxed);
     // Run the SQLite reads on a blocking thread. real_region_pinned_bytes probes region_tiles per pinned
     // tile, so on a large cache it can scan for many seconds; keeping it off the async runtime stops one
-    // stats call from wedging the single-worker reactor. Each cache read degrades to its zero value on an
+    // stats call from wedging the async reactor. Each cache read degrades to its zero value on an
     // error, matching the prior unwrap_or, and the whole tuple defaults to zeros on a task join failure.
     let cache = st.cache.clone();
     let (rows, bytes, pinned_bytes, pw, real_pinned, avg_rows, by_source_rows) =
@@ -214,6 +214,13 @@ async fn delete_region_route(
     State(st): State<AppState>,
     Path(region_id): Path<String>,
 ) -> StatusCode {
+    // The reserved pseudo-regions (position-warm and basemap assets) are managed by the warm engine, not
+    // by the region API, so refuse to let a caller unpin them out from under it.
+    if region_id == crate::state::POSITION_WARM_REGION_ID
+        || region_id == crate::state::BASEMAP_ASSETS_REGION_ID
+    {
+        return StatusCode::FORBIDDEN;
+    }
     let cache = st.cache.clone();
     let cap = st.live_cap_bytes.load(Ordering::Relaxed);
     // delete_region walks region_tiles and can demote many pinned rows, so run it and the follow-up

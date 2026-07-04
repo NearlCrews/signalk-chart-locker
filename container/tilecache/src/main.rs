@@ -16,14 +16,8 @@ async fn main() {
 
     let port = tilecache_port();
     let db = std::env::var("TILECACHE_DB").unwrap_or_else(|_| "/data/tilecache.sqlite".to_string());
-    let cap = std::env::var("TILECACHE_CAP_BYTES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2_147_483_648i64);
-    let scroll_ttl_secs = std::env::var("TILECACHE_SCROLL_TTL_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0i64);
+    let cap = env_parsed("TILECACHE_CAP_BYTES", 2_147_483_648i64);
+    let scroll_ttl_secs = env_parsed("TILECACHE_SCROLL_TTL_SECS", 0i64);
     // Production never sets this; it exists for a same-host dev or test against a private upstream.
     let allow_private = std::env::var("TILECACHE_ALLOW_PRIVATE").as_deref() == Ok("1");
 
@@ -84,11 +78,16 @@ fn open_or_recreate(path: &Path) -> TileCache {
     }
 }
 
-fn tilecache_port() -> u16 {
-    std::env::var("TILECACHE_PORT")
+/// Parse an env var into T, falling back to `default` when the var is unset or does not parse.
+fn env_parsed<T: std::str::FromStr>(key: &str, default: T) -> T {
+    std::env::var(key)
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(8080)
+        .unwrap_or(default)
+}
+
+fn tilecache_port() -> u16 {
+    env_parsed("TILECACHE_PORT", 8080)
 }
 
 /// Connect to the local port; exit 0 if the service is listening, else 1. Used by the container

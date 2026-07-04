@@ -55,26 +55,15 @@ async fn geocode(State(st): State<AppState>, Query(q): Query<GeocodeQuery>) -> R
     if !host_is_nominatim(&url) {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    // IP literal guard: the DNS resolver never sees a literal, so check it here.
-    if !st.knobs.allow_private_egress && crate::ssrf::is_forbidden_ip_literal_url(&url) {
-        return StatusCode::BAD_GATEWAY.into_response();
-    }
-    // Egress semaphore (same slot as tile fetches so geocode is bounded by EGRESS_CONCURRENCY).
-    let _permit = match st.egress.acquire().await {
-        Ok(p) => p,
-        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    };
-    // Send with the contactable User-Agent, overriding the client-level tile-cache UA.
-    // The client is built with redirect(Policy::none()), so redirects are already off.
+    // Reuse the shared guarded egress path (IP-literal guard, egress permit, redirects off) with the
+    // contactable User-Agent the Nominatim policy requires, overriding the client-level tile-cache UA.
+    // A blocked literal, an exhausted permit, or a transport error all collapse to a 502 here.
     let resp = match st
-        .client
-        .get(&url)
-        .header(reqwest::header::USER_AGENT, NOMINATIM_USER_AGENT)
-        .send()
+        .guarded_get_with_headers(&url, &[(reqwest::header::USER_AGENT, NOMINATIM_USER_AGENT)])
         .await
     {
         Ok(r) => r,
-        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+        Err(()) => return StatusCode::BAD_GATEWAY.into_response(),
     };
     if !resp.status().is_success() {
         return StatusCode::BAD_GATEWAY.into_response();

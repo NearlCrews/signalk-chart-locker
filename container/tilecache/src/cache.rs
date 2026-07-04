@@ -35,6 +35,23 @@ pub struct CachedTile {
     pub blob: Option<Bytes>,
 }
 
+impl CachedTile {
+    /// A zero-byte negative-cache row for a miss `status` (404 or 204), stamped at `now`. Shared by the
+    /// raster, vector, and warm negative paths so the negative-row shape lives in one place.
+    pub(crate) fn negative(status: i64, now: i64) -> CachedTile {
+        CachedTile {
+            content_type: String::new(),
+            strong_etag: String::new(),
+            upstream_validator: None,
+            status,
+            fetched_at: now,
+            last_access: now,
+            bytes: 0,
+            blob: None,
+        }
+    }
+}
+
 /// The outcome of a put: stored, or degraded (the disk is full) so the caller serves the bytes
 /// without caching them rather than erroring the tile.
 #[derive(Debug, PartialEq, Eq)]
@@ -205,26 +222,39 @@ impl TileCache {
         now: i64,
     ) -> rusqlite::Result<PutOutcome> {
         let mut inner = self.lock();
-        let old_bytes: Option<i64> = inner
+        let prev: Option<(i64, i64)> = inner
             .conn
             .query_row(
-                "SELECT bytes FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
+                "SELECT bytes, pinned FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
                 params![source, z, x, y],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
+        let (old_bytes, was_pinned) = match prev {
+            Some((b, p)) => (b, p == 1),
+            None => (0, false),
+        };
+        // A live-proxy refresh passes pinned = false, but pinning is cleared only by delete_region, so a
+        // row that is already pinned must stay pinned. Without this, a 304 or 200 revalidation of a
+        // region-pinned or basemap-asset tile after fresh_secs would flip pinned 1 to 0 and silently drop
+        // its offline guarantee. pinned_bytes tracks the pinned rows, so add the byte delta when the row
+        // stays pinned and the full bytes when it newly enters the pinned set.
+        let effective_pinned = pinned || was_pinned;
         let result = inner.conn.execute(
             "INSERT OR REPLACE INTO tiles
              (source, z, x, y, content_type, strong_etag, upstream_validator, status, fetched_at, last_access, bytes, blob, pinned)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 source, z, x, y, tile.content_type, tile.strong_etag, tile.upstream_validator,
-                tile.status, tile.fetched_at, now, tile.bytes, tile.blob.as_deref(), pinned as i64
+                tile.status, tile.fetched_at, now, tile.bytes, tile.blob.as_deref(), effective_pinned as i64
             ],
         );
         match result {
             Ok(_) => {
-                inner.total_bytes += tile.bytes - old_bytes.unwrap_or(0);
+                inner.total_bytes += tile.bytes - old_bytes;
+                if effective_pinned {
+                    inner.pinned_bytes += tile.bytes - if was_pinned { old_bytes } else { 0 };
+                }
                 Ok(PutOutcome::Stored)
             }
             Err(rusqlite::Error::SqliteFailure(e, _))
@@ -307,34 +337,25 @@ impl TileCache {
         Ok(())
     }
 
-    /// Delete unpinned scroll rows whose `last_access` is older than `now - ttl_secs`, in bounded
-    /// chunks that release the lock between chunks. A no-op when `ttl_secs <= 0`. Never deletes a
-    /// pinned row. Decrements `total_bytes` by the freed bytes; leaves `pinned_bytes` unchanged.
-    /// Returns the freed bytes and the freed row count. Relies on the invariant that an unpinned row
-    /// (`pinned = 0`) carries no `region_tiles` join row, so deleting it leaves no orphan join row:
-    /// the pin paths set `pinned = 1` and the join row together, and `delete_region` clears both.
-    pub fn sweep_aged_unpinned(&self, ttl_secs: i64, now: i64) -> rusqlite::Result<(i64, i64)> {
-        if ttl_secs <= 0 {
-            return Ok((0, 0));
-        }
-        let cutoff = now - ttl_secs;
+    /// Delete unpinned scroll rows selected by `subquery` (a `SELECT rowid ...` that must filter
+    /// `pinned = 0` and `LIMIT DELETE_CHUNK`), in bounded chunks that release the lock between chunks.
+    /// The SUM and the DELETE share the identical subquery under the held lock, so they target the same
+    /// rowset. Decrements `total_bytes` by the freed bytes; leaves `pinned_bytes` untouched (only
+    /// `pinned = 0` rows are removed, and an unpinned row carries no `region_tiles` join row, so none is
+    /// orphaned). Returns the freed bytes and the freed row count.
+    fn delete_unpinned_chunks(
+        &self,
+        subquery: &str,
+        params: &[&dyn rusqlite::ToSql],
+    ) -> rusqlite::Result<(i64, i64)> {
+        let sum_sql = format!("SELECT COALESCE(SUM(bytes), 0) FROM tiles WHERE rowid IN ({subquery})");
+        let delete_sql = format!("DELETE FROM tiles WHERE rowid IN ({subquery})");
         let mut freed_bytes = 0i64;
         let mut freed_rows = 0i64;
         loop {
             let mut inner = self.lock();
-            // The SUM and the DELETE share the identical subquery under the held lock, so they target
-            // the same rowset; the ORDER BY makes the LIMIT deterministic (oldest first).
-            let chunk_bytes: i64 = inner.conn.query_row(
-                "SELECT COALESCE(SUM(bytes), 0) FROM tiles WHERE rowid IN \
-                 (SELECT rowid FROM tiles WHERE pinned = 0 AND last_access < ?1 ORDER BY last_access ASC LIMIT ?2)",
-                params![cutoff, DELETE_CHUNK],
-                |r| r.get(0),
-            )?;
-            let n = inner.conn.execute(
-                "DELETE FROM tiles WHERE rowid IN \
-                 (SELECT rowid FROM tiles WHERE pinned = 0 AND last_access < ?1 ORDER BY last_access ASC LIMIT ?2)",
-                params![cutoff, DELETE_CHUNK],
-            )? as i64;
+            let chunk_bytes: i64 = inner.conn.query_row(&sum_sql, params, |r| r.get(0))?;
+            let n = inner.conn.execute(&delete_sql, params)? as i64;
             inner.total_bytes -= chunk_bytes;
             drop(inner);
             freed_bytes += chunk_bytes;
@@ -346,34 +367,33 @@ impl TileCache {
         Ok((freed_bytes, freed_rows))
     }
 
+    /// Delete unpinned scroll rows whose `last_access` is older than `now - ttl_secs`, in bounded
+    /// chunks that release the lock between chunks. A no-op when `ttl_secs <= 0`. Never deletes a
+    /// pinned row. Decrements `total_bytes` by the freed bytes; leaves `pinned_bytes` unchanged.
+    /// Returns the freed bytes and the freed row count. Relies on the invariant that an unpinned row
+    /// (`pinned = 0`) carries no `region_tiles` join row, so deleting it leaves no orphan join row:
+    /// the pin paths set `pinned = 1` and the join row together, and `delete_region` clears both.
+    pub fn sweep_aged_unpinned(&self, ttl_secs: i64, now: i64) -> rusqlite::Result<(i64, i64)> {
+        if ttl_secs <= 0 {
+            return Ok((0, 0));
+        }
+        let cutoff = now - ttl_secs;
+        // The ORDER BY makes the LIMIT deterministic (oldest first).
+        self.delete_unpinned_chunks(
+            "SELECT rowid FROM tiles WHERE pinned = 0 AND last_access < ?1 ORDER BY last_access ASC LIMIT ?2",
+            &[&cutoff as &dyn rusqlite::ToSql, &DELETE_CHUNK],
+        )
+    }
+
     /// Delete every unpinned scroll row, in bounded chunks that release the lock between chunks. Never
     /// deletes a pinned row, so `total_bytes` settles at `pinned_bytes`. Leaves `pinned_bytes`
     /// unchanged. Returns the freed bytes and the freed row count. Like the age sweep, this relies on
     /// the invariant that an unpinned row carries no `region_tiles` join row, so it leaves none orphaned.
     pub fn clear_unpinned(&self) -> rusqlite::Result<(i64, i64)> {
-        let mut freed_bytes = 0i64;
-        let mut freed_rows = 0i64;
-        loop {
-            let mut inner = self.lock();
-            let chunk_bytes: i64 = inner.conn.query_row(
-                "SELECT COALESCE(SUM(bytes), 0) FROM tiles WHERE rowid IN \
-                 (SELECT rowid FROM tiles WHERE pinned = 0 LIMIT ?1)",
-                params![DELETE_CHUNK],
-                |r| r.get(0),
-            )?;
-            let n = inner.conn.execute(
-                "DELETE FROM tiles WHERE rowid IN (SELECT rowid FROM tiles WHERE pinned = 0 LIMIT ?1)",
-                params![DELETE_CHUNK],
-            )? as i64;
-            inner.total_bytes -= chunk_bytes;
-            drop(inner);
-            freed_bytes += chunk_bytes;
-            freed_rows += n;
-            if n < DELETE_CHUNK {
-                break;
-            }
-        }
-        Ok((freed_bytes, freed_rows))
+        self.delete_unpinned_chunks(
+            "SELECT rowid FROM tiles WHERE pinned = 0 LIMIT ?1",
+            &[&DELETE_CHUNK as &dyn rusqlite::ToSql],
+        )
     }
 
     /// Store a batch of warm tiles pinned, in one transaction, with an explicit pre-store budget check.
@@ -470,6 +490,41 @@ impl TileCache {
         })
     }
 
+    /// Set the pinned bit (and record the `region_tiles` join row when `region_id` is Some) under the
+    /// caller's already-held lock, then add the bytes to `pinned_bytes` only when the row newly entered
+    /// the pinned set. Shared by `pin`, `pin_if_fresh`, and `pin_for_region` so the pin transaction and
+    /// its accounting live in one place.
+    #[allow(clippy::too_many_arguments)]
+    fn pin_locked(
+        inner: &mut Inner,
+        source: &str,
+        z: u32,
+        x: u32,
+        y: u32,
+        region_id: Option<&str>,
+        was_pinned: bool,
+        tile_bytes: i64,
+    ) -> rusqlite::Result<()> {
+        {
+            let tx = inner.conn.unchecked_transaction()?;
+            tx.execute(
+                "UPDATE tiles SET pinned = 1 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
+                params![source, z, x, y],
+            )?;
+            if let Some(rid) = region_id {
+                tx.execute(
+                    "INSERT OR IGNORE INTO region_tiles (region_id, source, z, x, y) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![rid, source, z, x, y],
+                )?;
+            }
+            tx.commit()?;
+        }
+        if !was_pinned {
+            inner.pinned_bytes += tile_bytes;
+        }
+        Ok(())
+    }
+
     /// Mark an already-cached row pinned (eviction-exempt) without re-fetching or changing its
     /// bytes, keeping `pinned_bytes` in sync (the bytes are added only when the row was previously
     /// unpinned). Test-only: the warm path uses `pin_if_fresh` so the budget gate and the join-table
@@ -484,18 +539,7 @@ impl TileCache {
         let Some((tile_bytes, pinned)) = prev else {
             return Ok(());
         };
-        {
-            let tx = inner.conn.unchecked_transaction()?;
-            tx.execute(
-                "UPDATE tiles SET pinned = 1 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
-                params![source, z, x, y],
-            )?;
-            tx.commit()?;
-        }
-        if pinned != 1 {
-            inner.pinned_bytes += tile_bytes;
-        }
-        Ok(())
+        Self::pin_locked(&mut inner, source, z, x, y, None, pinned == 1, tile_bytes)
     }
 
     /// Check freshness and pin under the same lock, eliminating the get-then-pin race where a
@@ -545,23 +589,7 @@ impl TileCache {
         if !was_pinned && tile_bytes > 0 && inner.pinned_bytes + tile_bytes > budget {
             return Ok(false);
         }
-        {
-            let tx = inner.conn.unchecked_transaction()?;
-            tx.execute(
-                "UPDATE tiles SET pinned = 1 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
-                params![source, z, x, y],
-            )?;
-            if let Some(rid) = region_id {
-                tx.execute(
-                    "INSERT OR IGNORE INTO region_tiles (region_id, source, z, x, y) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![rid, source, z, x, y],
-                )?;
-            }
-            tx.commit()?;
-        }
-        if !was_pinned {
-            inner.pinned_bytes += tile_bytes;
-        }
+        Self::pin_locked(&mut inner, source, z, x, y, region_id, was_pinned, tile_bytes)?;
         Ok(true)
     }
 
@@ -593,23 +621,7 @@ impl TileCache {
         if !was_pinned && tile_bytes > 0 && inner.pinned_bytes + tile_bytes > budget {
             return Ok(false);
         }
-        {
-            let tx = inner.conn.unchecked_transaction()?;
-            tx.execute(
-                "UPDATE tiles SET pinned = 1 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
-                params![source, z, x, y],
-            )?;
-            if let Some(rid) = region_id {
-                tx.execute(
-                    "INSERT OR IGNORE INTO region_tiles (region_id, source, z, x, y) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![rid, source, z, x, y],
-                )?;
-            }
-            tx.commit()?;
-        }
-        if !was_pinned {
-            inner.pinned_bytes += tile_bytes;
-        }
+        Self::pin_locked(&mut inner, source, z, x, y, region_id, was_pinned, tile_bytes)?;
         Ok(true)
     }
 
@@ -916,6 +928,28 @@ mod tests {
         assert!(
             c.get("s", 0, 0, 1).unwrap().is_none(),
             "the unpinned tile is evicted to make room"
+        );
+    }
+
+    #[test]
+    fn a_live_revalidation_put_does_not_unpin_a_pinned_tile() {
+        let (_f, c) = open();
+        c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, 1)
+            .unwrap();
+        c.pin("s", 0, 0, 0).unwrap(); // pinned by a region warm
+        assert_eq!(c.stats().unwrap().2, 10, "pinned_bytes counts the pin");
+        // A 304 or 200 revalidation of the same tile after fresh_secs re-puts it with pinned = false.
+        c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, 90_000)
+            .unwrap();
+        c.evict_to(0).unwrap();
+        assert!(
+            c.get("s", 0, 0, 0).unwrap().is_some(),
+            "a pinned tile keeps its pin across a live revalidation and is never evicted"
+        );
+        assert_eq!(
+            c.stats().unwrap().2,
+            10,
+            "pinned_bytes stays exact across the revalidation put"
         );
     }
 
@@ -1664,7 +1698,7 @@ mod tests {
     #[test]
     fn clear_unpinned_deletes_all_scroll_rows_and_keeps_pinned() {
         let (_f, c) = open();
-        // Pin through pin() so pinned_bytes is tracked (raw put with pinned = true sets the column only).
+        // Store as a scroll tile, then pin it so it enters the pinned set and pinned_bytes tracks it.
         c.put("s", 0, 0, 0, &tile(10, 200, Some(vec![0; 10])), false, 0)
             .unwrap();
         c.pin("s", 0, 0, 0).unwrap(); // pinned

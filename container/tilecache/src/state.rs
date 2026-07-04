@@ -169,13 +169,30 @@ impl AppState {
         url: &str,
         if_none_match: Option<&str>,
     ) -> Result<reqwest::Response, ()> {
+        match if_none_match {
+            Some(v) => {
+                self.guarded_get_with_headers(url, &[(reqwest::header::IF_NONE_MATCH, v)])
+                    .await
+            }
+            None => self.guarded_get_with_headers(url, &[]).await,
+        }
+    }
+
+    /// The same guarded GET as `guarded_get`, with caller-supplied request headers (for example the
+    /// contactable User-Agent the geocode proxy must send). Keeps the literal-IP guard, the egress
+    /// permit, and the send in one place so every egress path shares the SSRF discipline.
+    pub async fn guarded_get_with_headers(
+        &self,
+        url: &str,
+        headers: &[(reqwest::header::HeaderName, &str)],
+    ) -> Result<reqwest::Response, ()> {
         if !self.knobs.allow_private_egress && crate::ssrf::is_forbidden_ip_literal_url(url) {
             return Err(());
         }
         let _permit = self.egress.acquire().await.map_err(|_| ())?;
         let mut req = self.client.get(url);
-        if let Some(v) = if_none_match {
-            req = req.header(reqwest::header::IF_NONE_MATCH, v);
+        for (name, value) in headers {
+            req = req.header(name.clone(), *value);
         }
         req.send().await.map_err(|_| ())
     }
