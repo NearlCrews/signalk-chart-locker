@@ -4,6 +4,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ContainerConfig, ContainerManager, ContainerRuntimeInfo } from '../src/shared/types.js'
+import type { RegionsRouter, RegionsRequest, RegionsResponse } from '../src/http/regions-routes.js'
 import { CONTAINER_MANAGER_GLOBAL_KEY } from '../src/runtime/container-manager.js'
 
 /** A ServerAPI stand-in that records the status, error, and debug calls the plugin makes. */
@@ -27,7 +28,7 @@ export interface Recorder {
 export function fakeApp (): Recorder {
   // One real temp directory per app, used for both the config path and the data dir, so the JSON state
   // persistence and the chart discovery in start() have a writable directory and never collide.
-  const dir = mkdtempSync(join(tmpdir(), 'companion-test-'))
+  const dir = mkdtempSync(join(tmpdir(), 'chart-locker-test-'))
   let positionUnsubCalled = false
   const app: Recorder = {
     status: [],
@@ -88,4 +89,33 @@ export function setContainerManager (manager: ContainerManager): void {
 /** Clears the container-manager global between tests. */
 export function clearGlobals (): void {
   delete (globalThis as Record<string, unknown>)[CONTAINER_MANAGER_GLOBAL_KEY]
+}
+
+/** One recorded route mount from the RegionsRouter fake. */
+export interface RecordedRoute {
+  method: string
+  path: string
+  handler: (req: RegionsRequest, res: RegionsResponse) => void | Promise<void>
+}
+
+/** A RegionsRouter that records every mounted route, shared by the region, cache, and geocode route tests. */
+export function makeRegionsRouter (): { routes: RecordedRoute[], router: RegionsRouter } {
+  const routes: RecordedRoute[] = []
+  const router: RegionsRouter = {
+    get (path, handler) { routes.push({ method: 'GET', path, handler }) },
+    post (path, handler) { routes.push({ method: 'POST', path, handler }) },
+    delete (path, handler) { routes.push({ method: 'DELETE', path, handler }) }
+  }
+  return { routes, router }
+}
+
+/** A RegionsResponse that records each status and its body, shared across the route tests. */
+export function fakeRegionsRes (): { responded: Array<{ status: number, body: unknown }>, res: RegionsResponse } {
+  const responded: Array<{ status: number, body: unknown }> = []
+  const res: RegionsResponse = {
+    status (code) { responded.push({ status: code, body: null }); return res },
+    json (body) { const last = responded[responded.length - 1]; if (last) last.body = body },
+    end () { const last = responded[responded.length - 1]; if (last) last.body = null }
+  }
+  return { responded, res }
 }

@@ -98,6 +98,30 @@ test('POST /api/charts/:id/override persists the override and triggers a re-appl
   }
 })
 
+test('POST /api/charts/:id/override merges fields instead of replacing', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'mgmt-'))
+  try {
+    const overrides = new OverrideStore(join(dir, 'overrides.json'))
+    overrides.load()
+    const get: Record<string, (req: ManagementRequest, res: FakeRes) => void> = {}
+    const post: Record<string, (req: ManagementRequest, res: FakeRes) => void> = {}
+    const registry = new ChartRegistry()
+    registry.set(record())
+    registerChartManagementRoutes(
+      { get (p, h) { get[p] = h as never }, post (p, h) { post[p] = h as never } },
+      securedApp(), registry, overrides, () => {}
+    )
+    post['/api/charts/:id/override']({ params: { id: 'sf-pmtiles' }, body: { name: 'Renamed', description: 'Bay' } }, new FakeRes())
+    // A second post setting only the scale must not wipe the name and description.
+    const res = new FakeRes()
+    post['/api/charts/:id/override']({ params: { id: 'sf-pmtiles' }, body: { scale: 50000 } }, res)
+    assert.equal(res.statusCode, 200)
+    assert.deepEqual(overrides.get('sf-pmtiles'), { name: 'Renamed', description: 'Bay', scale: 50000 })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('POST with a non-object body returns 400', () => {
   const ctx = collect()
   ctx.registry.set(record())

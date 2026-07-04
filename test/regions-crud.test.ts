@@ -4,34 +4,14 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ServerAPI } from '@signalk/server-api'
-import { registerRegionsRoutes, type RegionsRouter, type RegionsResponse } from '../src/http/regions-routes.js'
-import { fakeApp } from './helpers.js'
+import { registerRegionsRoutes } from '../src/http/regions-routes.js'
+import { fakeApp, makeRegionsRouter, fakeRegionsRes } from './helpers.js'
 
 /** The Recorder fake carries the slice registerRegionsRoutes reads (securityStrategy, getDataDirPath). */
 const app = (): ServerAPI => fakeApp() as unknown as ServerAPI
 
-function makeRouter () {
-  const routes: Array<{ method: string; path: string; handler: Function }> = []
-  const router: RegionsRouter = {
-    get (path, handler) { routes.push({ method: 'GET', path, handler }) },
-    post (path, handler) { routes.push({ method: 'POST', path, handler }) },
-    delete (path, handler) { routes.push({ method: 'DELETE', path, handler }) }
-  }
-  return { routes, router }
-}
-
-function fakeRes (): { responded: Array<{ status: number; body: unknown }>; res: RegionsResponse } {
-  const responded: Array<{ status: number; body: unknown }> = []
-  const res: RegionsResponse = {
-    status (code) { responded.push({ status: code, body: null }); return res },
-    json (body) { if (responded.length) responded[responded.length - 1].body = body },
-    end () { if (responded.length) responded[responded.length - 1].body = null }
-  }
-  return { responded, res }
-}
-
 test('registerRegionsRoutes mounts all region routes', () => {
-  const { router, routes } = makeRouter()
+  const { router, routes } = makeRegionsRouter()
   registerRegionsRoutes(router, app(), () => '127.0.0.1:9999')
   const paths = routes.map(r => `${r.method} ${r.path}`)
   assert.ok(paths.includes('GET /api/regions'), 'GET /api/regions must be mounted')
@@ -42,31 +22,31 @@ test('registerRegionsRoutes mounts all region routes', () => {
 })
 
 test('POST /api/regions refuses an invalid bbox with 400', async () => {
-  const { router, routes } = makeRouter()
+  const { router, routes } = makeRegionsRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
   registerRegionsRoutes(router, app(), () => null, { dataDir })
   const route = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
-  const { responded, res } = fakeRes()
+  const { responded, res } = fakeRegionsRes()
   await route.handler({ params: {}, body: { bbox: 'not-an-array', sourceIds: [], minzoom: 6, maxzoom: 12, name: 'Test' } }, res)
   assert.equal(responded[0]?.status, 400, 'invalid bbox must yield 400')
 })
 
 test('POST /api/regions returns 503 when the container address is unavailable', async () => {
-  const { router, routes } = makeRouter()
+  const { router, routes } = makeRegionsRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
   registerRegionsRoutes(router, app(), () => null, { dataDir })
   const route = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
-  const { responded, res } = fakeRes()
+  const { responded, res } = fakeRegionsRes()
   await route.handler({ params: {}, body: { bbox: [-10.0, 50.0, 10.0, 60.0], sourceIds: ['depth-gebco'], minzoom: 6, maxzoom: 12, name: 'Test' } }, res)
   assert.equal(responded[0]?.status, 503, 'missing container address must yield 503')
 })
 
 test('GET /api/regions returns the persisted regions list', async () => {
-  const { router, routes } = makeRouter()
+  const { router, routes } = makeRegionsRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
   registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir })
   const route = routes.find(r => r.method === 'GET' && r.path === '/api/regions')!
-  const { responded, res } = fakeRes()
+  const { responded, res } = fakeRegionsRes()
   await route.handler({ params: {}, body: null }, res)
   assert.equal(responded[0]?.status, 200)
   assert.ok(Array.isArray(responded[0]?.body), 'body must be an array')
@@ -90,16 +70,16 @@ test('POST /api/regions returns 400 when the estimate exceeds the regions-free b
     }
     throw new Error(`warm must not be called when over budget: ${url}`)
   }
-  const { router, routes } = makeRouter()
+  const { router, routes } = makeRegionsRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
   registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
   const route = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
-  const { responded, res } = fakeRes()
+  const { responded, res } = fakeRegionsRes()
   await route.handler({ params: {}, body: { bbox: [-10.0, 50.0, 10.0, 60.0], sourceIds: ['depth-gebco'], minzoom: 6, maxzoom: 12, name: 'Test' } }, res)
   assert.equal(responded[0]?.status, 400, 'an over-budget estimate must be refused with 400')
   // Nothing persisted.
   const getRoute = routes.find(r => r.method === 'GET' && r.path === '/api/regions')!
-  const { responded: listed, res: listRes } = fakeRes()
+  const { responded: listed, res: listRes } = fakeRegionsRes()
   await getRoute.handler({ params: {}, body: null }, listRes)
   assert.equal((listed[0]?.body as unknown[]).length, 0, 'an over-budget region must not be persisted')
 })
@@ -124,15 +104,15 @@ test('a warm-relay failure leaves no persisted region', async () => {
     if (url.endsWith('/warm')) return new Response(JSON.stringify({ error: 'busy' }), { status: 503 })
     throw new Error(`unexpected url: ${url}`)
   }
-  const { router, routes } = makeRouter()
+  const { router, routes } = makeRegionsRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
   registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
   const post = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
-  const { responded, res } = fakeRes()
+  const { responded, res } = fakeRegionsRes()
   await post.handler({ params: {}, body: { bbox: [-10.0, 50.0, 10.0, 60.0], sourceIds: ['depth-gebco'], minzoom: 6, maxzoom: 12, name: 'Test' } }, res)
   assert.equal(responded[0]?.status, 502, 'a failed warm start must return 502')
   const list = routes.find(r => r.method === 'GET' && r.path === '/api/regions')!
-  const { responded: listed, res: listRes } = fakeRes()
+  const { responded: listed, res: listRes } = fakeRegionsRes()
   await list.handler({ params: {}, body: null }, listRes)
   assert.equal((listed[0]?.body as unknown[]).length, 0, 'a failed warm start must not leave a persisted region')
 })
@@ -160,21 +140,21 @@ test('a terminal job snapshot reconciles the region status away from downloading
     if (url.includes('/cache/region/')) return new Response(JSON.stringify({ bytes: 100 }), { status: 200 })
     throw new Error(`unexpected url: ${url}`)
   }
-  const { router, routes } = makeRouter()
+  const { router, routes } = makeRegionsRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
   registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
   const post = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
-  const { responded: created, res: postRes } = fakeRes()
+  const { responded: created, res: postRes } = fakeRegionsRes()
   await post.handler({ params: {}, body: { bbox: [-10.0, 50.0, 10.0, 60.0], sourceIds: ['depth-gebco'], minzoom: 6, maxzoom: 12, name: 'Test' } }, postRes)
   assert.equal(created[0]?.status, 200)
   const region = (created[0]?.body as { region: { id: string; status: string } }).region
   assert.equal(region.status, 'downloading')
   // Poll the status: the terminal 'done' snapshot must reconcile the persisted region to 'ready'.
   const status = routes.find(r => r.method === 'GET' && r.path.includes('/api/regions/') && r.path.includes('status'))!
-  const { res: statusRes } = fakeRes()
+  const { res: statusRes } = fakeRegionsRes()
   await status.handler({ params: { id: region.id }, body: null }, statusRes)
   const list = routes.find(r => r.method === 'GET' && r.path === '/api/regions')!
-  const { responded: listed, res: listRes } = fakeRes()
+  const { responded: listed, res: listRes } = fakeRegionsRes()
   await list.handler({ params: {}, body: null }, listRes)
   const persisted = (listed[0]?.body as Array<{ id: string; status: string }>).find(r => r.id === region.id)!
   assert.equal(persisted.status, 'ready', 'a done job reconciles the region to ready, never stuck at downloading')
@@ -200,33 +180,33 @@ test('saving position-warm settings preserves saved regions', async () => {
     if (url.includes('/cache/region/')) return new Response(JSON.stringify({ bytes: 0 }), { status: 200 })
     throw new Error(`unexpected url: ${url}`)
   }
-  const { router, routes } = makeRouter()
+  const { router, routes } = makeRegionsRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
   registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
 
   // Save a region.
   const post = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
-  const { responded: created, res: postRes } = fakeRes()
+  const { responded: created, res: postRes } = fakeRegionsRes()
   await post.handler({ params: {}, body: { bbox: [-10.0, 50.0, 10.0, 60.0], sourceIds: ['depth-gebco'], minzoom: 6, maxzoom: 12, name: 'Bay' } }, postRes)
   assert.equal(created[0]?.status, 200)
   const regionId = (created[0]?.body as { region: { id: string } }).region.id
 
   // Save position-warm settings (the toggle that used to wipe all saved regions).
   const postCfg = routes.find(r => r.method === 'POST' && r.path === '/api/position-warm/config')!
-  const { responded: cfgSaved, res: cfgRes } = fakeRes()
+  const { responded: cfgSaved, res: cfgRes } = fakeRegionsRes()
   await postCfg.handler({ params: {}, body: { positionWarm: { enabled: true, sources: ['seamark'] } } }, cfgRes)
   assert.equal(cfgSaved[0]?.status, 204)
 
   // The region must still be present after the settings save.
   const list = routes.find(r => r.method === 'GET' && r.path === '/api/regions')!
-  const { responded: listed, res: listRes } = fakeRes()
+  const { responded: listed, res: listRes } = fakeRegionsRes()
   await list.handler({ params: {}, body: null }, listRes)
   const persisted = (listed[0]?.body as Array<{ id: string }>).find(r => r.id === regionId)
   assert.ok(persisted, 'saving position-warm settings must not drop the saved region')
 
   // And the position-warm settings must have been updated.
   const getCfg = routes.find(r => r.method === 'GET' && r.path === '/api/position-warm/config')!
-  const { responded: cfg, res: getCfgRes } = fakeRes()
+  const { responded: cfg, res: getCfgRes } = fakeRegionsRes()
   await getCfg.handler({ params: {}, body: null }, getCfgRes)
   const pw = cfg[0]?.body as { enabled: boolean; sources: string[] }
   assert.equal(pw.enabled, true, 'position-warm enabled must be persisted')
@@ -252,21 +232,21 @@ test('DELETE /api/regions/:id removes the region after the container delete succ
     if (url.includes('/cache/region/')) return new Response(JSON.stringify({ bytes: 0 }), { status: 200 })
     throw new Error(`unexpected url: ${url}`)
   }
-  const { router, routes } = makeRouter()
+  const { router, routes } = makeRegionsRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
   registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
   const post = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
-  const { responded: created, res: postRes } = fakeRes()
+  const { responded: created, res: postRes } = fakeRegionsRes()
   await post.handler({ params: {}, body: { bbox: [-10.0, 50.0, 10.0, 60.0], sourceIds: ['depth-gebco'], minzoom: 6, maxzoom: 12, name: 'Bay' } }, postRes)
   const regionId = (created[0]?.body as { region: { id: string } }).region.id
 
   const del = routes.find(r => r.method === 'DELETE' && r.path.startsWith('/api/regions/'))!
-  const { responded: deleted, res: delRes } = fakeRes()
+  const { responded: deleted, res: delRes } = fakeRegionsRes()
   await del.handler({ params: { id: regionId }, body: null }, delRes)
   assert.equal(deleted[0]?.status, 204, 'a successful container delete returns 204')
 
   const list = routes.find(r => r.method === 'GET' && r.path === '/api/regions')!
-  const { responded: listed, res: listRes } = fakeRes()
+  const { responded: listed, res: listRes } = fakeRegionsRes()
   await list.handler({ params: {}, body: null }, listRes)
   assert.equal((listed[0]?.body as unknown[]).length, 0, 'the region is removed once the container delete succeeds')
 })
@@ -292,21 +272,21 @@ test('DELETE /api/regions/:id returns 503 and keeps the region when the containe
     if (url.includes('/cache/region/')) return new Response(JSON.stringify({ bytes: 0 }), { status: 200 })
     throw new Error(`unexpected url: ${url}`)
   }
-  const { router, routes } = makeRouter()
+  const { router, routes } = makeRegionsRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
   registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
   const post = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
-  const { responded: created, res: postRes } = fakeRes()
+  const { responded: created, res: postRes } = fakeRegionsRes()
   await post.handler({ params: {}, body: { bbox: [-10.0, 50.0, 10.0, 60.0], sourceIds: ['depth-gebco'], minzoom: 6, maxzoom: 12, name: 'Bay' } }, postRes)
   const regionId = (created[0]?.body as { region: { id: string } }).region.id
 
   const del = routes.find(r => r.method === 'DELETE' && r.path.startsWith('/api/regions/'))!
-  const { responded: deleted, res: delRes } = fakeRes()
+  const { responded: deleted, res: delRes } = fakeRegionsRes()
   await del.handler({ params: { id: regionId }, body: null }, delRes)
   assert.equal(deleted[0]?.status, 503, 'an unreachable container yields 503')
 
   const list = routes.find(r => r.method === 'GET' && r.path === '/api/regions')!
-  const { responded: listed, res: listRes } = fakeRes()
+  const { responded: listed, res: listRes } = fakeRegionsRes()
   await list.handler({ params: {}, body: null }, listRes)
   const persisted = (listed[0]?.body as Array<{ id: string }>).find(r => r.id === regionId)
   assert.ok(persisted, 'the region remains in the store when the container delete fails')

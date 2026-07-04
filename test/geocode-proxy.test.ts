@@ -1,31 +1,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { registerRegionsRoutes, type RegionsRouter, type RegionsRequest, type RegionsResponse } from '../src/http/regions-routes.js'
+import { registerRegionsRoutes } from '../src/http/regions-routes.js'
 import type { ServerAPI } from '@signalk/server-api'
-import { fakeApp } from './helpers.js'
-
-interface FullRequest extends RegionsRequest {
-  query?: Record<string, string>
-}
+import { fakeApp, makeRegionsRouter, fakeRegionsRes } from './helpers.js'
 
 const securedApp = (): ServerAPI => fakeApp() as unknown as ServerAPI
 
-function makeRouter (): { calls: Array<{ method: string; path: string; handler: (req: FullRequest, res: RegionsResponse) => void | Promise<void> }>; router: RegionsRouter } {
-  const calls: Array<{ method: string; path: string; handler: (req: FullRequest, res: RegionsResponse) => void | Promise<void> }> = []
-  return {
-    calls,
-    router: {
-      get (path, handler) { calls.push({ method: 'GET', path, handler: handler as (req: FullRequest, res: RegionsResponse) => void | Promise<void> }) },
-      post (path, handler) { calls.push({ method: 'POST', path, handler: handler as (req: FullRequest, res: RegionsResponse) => void | Promise<void> }) },
-      delete (path, handler) { calls.push({ method: 'DELETE', path, handler: handler as (req: FullRequest, res: RegionsResponse) => void | Promise<void> }) }
-    }
-  }
-}
-
 test('registerRegionsRoutes mounts GET /api/geocode', () => {
-  const { router, calls } = makeRouter()
+  const { router, routes } = makeRegionsRouter()
   registerRegionsRoutes(router, securedApp(), () => '127.0.0.1:9999')
-  assert.ok(calls.some(c => c.method === 'GET' && c.path === '/api/geocode'), 'geocode route must be mounted')
+  assert.ok(routes.some(c => c.method === 'GET' && c.path === '/api/geocode'), 'geocode route must be mounted')
 })
 
 test('GET /api/geocode proxies lat and lon to the container and returns the response', async () => {
@@ -34,15 +18,10 @@ test('GET /api/geocode proxies lat and lon to the container and returns the resp
     fetched.push(url)
     return new Response(JSON.stringify({ display_name: 'Test City' }), { status: 200 })
   }
-  const { router, calls } = makeRouter()
+  const { router, routes } = makeRegionsRouter()
   registerRegionsRoutes(router, securedApp(), () => '127.0.0.1:9999', { fetchImpl })
-  const route = calls.find(c => c.path === '/api/geocode')!
-  const responded: Array<{ status: number; body: unknown }> = []
-  const res: RegionsResponse = {
-    status (code) { responded.push({ status: code, body: null }); return res },
-    json (body) { if (responded.length) responded[responded.length - 1].body = body },
-    end () {}
-  }
+  const route = routes.find(c => c.path === '/api/geocode')!
+  const { responded, res } = fakeRegionsRes()
   await route.handler({ params: {}, body: null, query: { lat: '37.77', lon: '-122.41' } }, res)
   assert.ok(fetched.length === 1, 'exactly one upstream fetch')
   assert.ok(fetched[0].includes('lat=37.77'), 'lat forwarded')
@@ -53,15 +32,10 @@ test('GET /api/geocode proxies lat and lon to the container and returns the resp
 
 test('GET /api/geocode returns 400 when lat or lon is missing', async () => {
   const fetchImpl = async () => new Response('{}', { status: 200 })
-  const { router, calls } = makeRouter()
+  const { router, routes } = makeRegionsRouter()
   registerRegionsRoutes(router, securedApp(), () => '127.0.0.1:9999', { fetchImpl })
-  const route = calls.find(c => c.path === '/api/geocode')!
-  const responded: Array<{ status: number }> = []
-  const res: RegionsResponse = {
-    status (code) { responded.push({ status: code }); return res },
-    json () {},
-    end () {}
-  }
+  const route = routes.find(c => c.path === '/api/geocode')!
+  const { responded, res } = fakeRegionsRes()
   await route.handler({ params: {}, body: null, query: {} }, res)
   assert.equal(responded[0]?.status, 400, 'both absent must be 400')
   await route.handler({ params: {}, body: null, query: { lon: '-122.41' } }, res)
