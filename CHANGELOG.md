@@ -4,6 +4,68 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<a id="v011"></a>
+
+## [0.1.1] - 2026-07-04
+
+Housekeeping and hardening across the plugin and the tilecache container.
+
+### Security
+
+- The egress SSRF guard now rejects the whole `0.0.0.0/8` "this network" block, not only `0.0.0.0`, so
+  a literal such as `0.1.2.3` (which Linux routes to the local host) can no longer reach loopback
+  through the proxy. IPv4-compatible IPv6 addresses (for example `::127.0.0.1`) are decoded and checked
+  the same way.
+- The basemap glyph range parameter is fully validated and canonicalized before it reaches the
+  upstream URL, so a crafted range can neither mis-key the cache nor smuggle an arbitrary path
+  upstream.
+- A basemap style source whose tiles or TileJSON reference a host off the style's allowlist is stripped
+  from the served style rather than passed through, so the browser can no longer be told to fetch that
+  host directly and bypass the cache and the allowlist.
+- The reserved internal cache regions (position warm and basemap assets) can no longer be deleted
+  through the region API.
+
+### Fixed
+
+- A downloaded region, and the pinned basemap glyph and sprite set, no longer silently lose their
+  offline pin the first time a tile is viewed live after it goes stale. Revalidating a pinned tile
+  keeps it pinned and keeps the pinned-byte accounting exact.
+- A missing basemap vector tile now returns 404 and is negative-cached, instead of being reported as a
+  502 gateway error and refetched on every request.
+- A basemap style source that fails to learn is recorded as a region error and logged, so a region
+  whose basemap never warmed no longer reports as fully downloaded.
+- Position warm reads the saved-regions file through a modification-time cache instead of reading and
+  parsing it on every `navigation.position` fix, so a boat under way no longer does a synchronous disk
+  read per position update.
+- A per-chart override saved through the management route now merges its fields instead of replacing
+  the stored override, so setting one field no longer wipes the others.
+
+### Config panel
+
+- The status bar's "checked N ago" note keeps advancing during a status-poll outage instead of
+  freezing, so a stalled readout is visible.
+- The footer no longer shows "Save to enable the plugin" alongside the "Saved" confirmation after the
+  first save.
+- A stored cache-cap of null or empty now falls back to the default instead of clamping to the minimum.
+- Keyboard focus rings are now visible on the theme segmented control and the Advanced disclosure, and
+  placeholder text is themed for dark and night mode.
+- The free-space warning announces politely rather than assertively, and the cache-cap number box has a
+  distinct accessible name from its slider.
+
+### Changed
+
+- Negative-cache, revalidation, and last-access writes in the container run off the async reactor on
+  the blocking pool, matching the existing tile-store path.
+- The saved-region warm shares the source and the region id through a per-tile reference count instead
+  of cloning them for every enumerated tile.
+- The style route relays `cache-control` and `last-modified` so basemap styles get the same browser
+  caching as every other proxied path.
+- The plugin mount path, the plugin version, and the whole-Unix-seconds timestamp are each defined once
+  and shared, replacing four copies of the mount path and three copies of the timestamp. The container
+  is now attributed with the plugin version.
+- Removed a dead container job field, the vestigial `fetch_bytes` helper, and several duplicated header,
+  timestamp, and type-cast expressions in the plugin.
+
 <a id="v010"></a>
 
 ## [0.1.0] - 2026-06-30

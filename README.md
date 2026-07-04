@@ -14,15 +14,16 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.1.0
+## What's new in 0.1.1
 
-The first public release. Chart Locker hosts a boat-wide tile cache and local PMTiles chart serving
-in an egress-isolated Rust container managed by signalk-container: shared overlay and basemap
-caching, saved region downloads that work fully offline, around-the-boat auto-cache, scroll-cache
-management, a local PMTiles chart provider, and a custom configuration panel with free-space-aware
-cache sizing.
+Housekeeping and hardening across the plugin and the tilecache container. The egress SSRF guard now
+covers the whole `0.0.0.0/8` block and IPv4-compatible IPv6 addresses, the basemap style no longer
+serves an off-allowlist upstream to the browser, and a downloaded region and the pinned basemap
+glyphs and sprite keep their offline pin across a live revalidation. The configuration panel gains a
+live freshness note that keeps advancing during a status-poll outage, and several a11y and caching
+refinements land alongside a round of internal deduplication.
 
-See the [changelog](CHANGELOG.md#v010) for the full list.
+See the [changelog](CHANGELOG.md#v011) for the full list.
 
 ## What it does
 
