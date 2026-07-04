@@ -8,7 +8,7 @@
 
 import { useEffect, useState } from 'react'
 import { PLUGIN_ID } from '../../shared/plugin-id.js'
-import { PANEL_REQUEST_TIMEOUT_MS } from '../request-timeout.js'
+import { useAbortableFetch } from './use-abortable-fetch.js'
 
 /** The admin-gated cache-info route, under this plugin's mount. Same-origin, gated by the session. */
 const CACHE_INFO_URL = `/plugins/${PLUGIN_ID}/api/cache-info`
@@ -30,27 +30,15 @@ function readFiniteNumber (value: unknown): number | null {
 export function useCacheInfo (): UseCacheInfoResult {
   const [freeGiB, setFreeGiB] = useState<number | null>(null)
   const [recommendedCapGiB, setRecommendedCapGiB] = useState<number | null>(null)
+  const fetcher = useAbortableFetch()
 
   useEffect(() => {
-    let canceled = false
-    // Aborted on unmount so an outstanding request does not run to its timeout against a component
-    // that is already gone.
-    const unmountController = new AbortController()
-
     // A fetch failure here is non-fatal: this only seeds the default cap and the free-space note, so on
     // failure the values stay null and the panel falls back to the static default.
     async function load (): Promise<void> {
       try {
-        const response = await fetch(CACHE_INFO_URL, {
-          credentials: 'same-origin',
-          signal: AbortSignal.any([
-            unmountController.signal,
-            AbortSignal.timeout(PANEL_REQUEST_TIMEOUT_MS)
-          ])
-        })
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
-        const parsed = await response.json() as { freeGiB?: unknown, recommendedCapGiB?: unknown }
-        if (canceled) return
+        const parsed = await fetcher.fetchJson(CACHE_INFO_URL) as { freeGiB?: unknown, recommendedCapGiB?: unknown }
+        if (fetcher.canceled()) return
         setFreeGiB(readFiniteNumber(parsed.freeGiB))
         setRecommendedCapGiB(readFiniteNumber(parsed.recommendedCapGiB))
       } catch {
@@ -59,12 +47,7 @@ export function useCacheInfo (): UseCacheInfoResult {
     }
 
     load()
-
-    return () => {
-      canceled = true
-      unmountController.abort()
-    }
-  }, [])
+  }, [fetcher])
 
   return { freeGiB, recommendedCapGiB }
 }

@@ -5,7 +5,7 @@
  * store use one idiom. */
 
 import { join } from 'node:path'
-import { statSync } from 'node:fs'
+import { statSync, watch, type FSWatcher } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import type { Bbox } from 'signalk-chart-sources'
 import { readJsonState, writeJsonState } from './json-state.js'
@@ -140,27 +140,82 @@ export function loadRegionsStore (dataDir: string): RegionsStore {
   }
 }
 
-/** A loader that caches the parsed store and re-reads only when the file's mtime changes. The
- * position-warm loop calls its getStore on every navigation.position delta, so a plain loadRegionsStore
- * there would run a synchronous readFileSync plus JSON.parse per fix on the microSD card. A stat is far
- * cheaper than a read-and-parse, and every writeJsonState bumps the mtime, so a region saved through the
- * routes is picked up on the next call. Falls back to a fresh load when the file is missing. */
-export function createCachedRegionsLoader (dataDir: string): () => RegionsStore {
+/** A cached regions loader with a stop handle for its filesystem watcher. */
+export interface CachedRegionsLoader {
+  /** The current store, served from cache between writes. */
+  getStore: () => RegionsStore
+  /** Tear down the watcher. Idempotent. */
+  stop: () => void
+}
+
+/** The self-heal cadence: even with the watcher, getStore re-stats at most this often so a dropped
+ * fs.watch event converges instead of leaving the cache stale until the next write. */
+const REGIONS_SELF_HEAL_MS = 5000
+
+/** A loader that caches the parsed store so the position-warm loop, which calls getStore on every
+ * navigation.position delta, does not read and parse the file per fix. An fs.watch on the data directory
+ * marks the cache dirty on a write, so getStore does no I/O between writes; a throttled mtime re-stat
+ * self-heals a dropped watch event (this project has seen fs.watch drop events on some platforms), and
+ * is also the sole mechanism when the watcher cannot be established. Falls back to the store defaults
+ * when the file is missing. Call stop() at plugin teardown to close the watcher. */
+export function createCachedRegionsLoader (dataDir: string): CachedRegionsLoader {
   const file = join(dataDir, STORE_FILE)
   let cached: RegionsStore | null = null
   let cachedMtimeMs = -1
-  return () => {
-    let mtimeMs: number
-    try {
-      mtimeMs = statSync(file).mtimeMs
-    } catch {
-      return loadRegionsStore(dataDir)
-    }
-    if (cached === null || mtimeMs !== cachedMtimeMs) {
-      cached = loadRegionsStore(dataDir)
-      cachedMtimeMs = mtimeMs
-    }
+  let dirty = true
+  let lastStatMs = Number.NEGATIVE_INFINITY
+  let watcher: FSWatcher | null = null
+
+  // Watch the directory, not the file: regions.json may not exist yet, and an atomic rename-replace is
+  // only observable at the directory level. A null filename (some platforms omit it) is treated as a
+  // possible change to be safe.
+  try {
+    watcher = watch(dataDir, (_event, filename) => {
+      if (filename === null || filename === STORE_FILE) dirty = true
+    })
+    // An unhandled watcher error would throw; on error, drop the watcher and rely on the self-heal stat.
+    watcher.on('error', () => { if (watcher !== null) { watcher.close(); watcher = null } })
+  } catch {
+    watcher = null
+  }
+
+  const reload = (mtimeMs: number): RegionsStore => {
+    cached = loadRegionsStore(dataDir)
+    cachedMtimeMs = mtimeMs
+    dirty = false
     return cached
+  }
+
+  const statMtime = (): number => {
+    try {
+      return statSync(file).mtimeMs
+    } catch {
+      return -1
+    }
+  }
+
+  return {
+    getStore (): RegionsStore {
+      const now = Date.now()
+      if (dirty || cached === null) {
+        lastStatMs = now
+        return reload(statMtime())
+      }
+      // Self-heal: re-stat at most once per interval so a missed watch event, or a run with no watcher,
+      // still converges without doing I/O on every delta.
+      if (now - lastStatMs >= REGIONS_SELF_HEAL_MS) {
+        lastStatMs = now
+        const mtimeMs = statMtime()
+        if (mtimeMs !== cachedMtimeMs) return reload(mtimeMs)
+      }
+      return cached
+    },
+    stop (): void {
+      if (watcher !== null) {
+        watcher.close()
+        watcher = null
+      }
+    }
   }
 }
 

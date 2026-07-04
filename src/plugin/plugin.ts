@@ -51,6 +51,8 @@ export function createPlugin (app: ServerAPI): Plugin {
   // Position-warm lifecycle state (factory scope, like tilecacheAddress).
   let positionUnsub: (() => void) | null = null
   let warmer: PositionWarmer | null = null
+  // Closes the cached regions loader's filesystem watcher at teardown.
+  let regionsLoaderStop: (() => void) | null = null
 
   interface ConfigAwareApp { config: { configPath: string } }
   const configPath = (app as unknown as ConfigAwareApp).config.configPath
@@ -162,9 +164,10 @@ export function createPlugin (app: ServerAPI): Plugin {
         updateRegion(dataDir, region.id, { status: 'error' })
       }
     }
-    const loadStore = createCachedRegionsLoader(dataDir)
+    const regionsLoader = createCachedRegionsLoader(dataDir)
+    regionsLoaderStop = regionsLoader.stop
     warmer = createPositionWarmer({
-      getStore: loadStore,
+      getStore: regionsLoader.getStore,
       warm: async (bbox, sources, minzoom, maxzoom) => {
         const address = tilecacheAddress
         if (address === null) return null
@@ -188,6 +191,7 @@ export function createPlugin (app: ServerAPI): Plugin {
 
   async function doStop (): Promise<void> {
     if (positionUnsub) { positionUnsub(); positionUnsub = null }
+    if (regionsLoaderStop) { regionsLoaderStop(); regionsLoaderStop = null }
     warmer = null
     teardownCharts()
 

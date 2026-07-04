@@ -3,11 +3,49 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadRegionsStore, saveRegionsStore, type RegionsStore } from '../src/runtime/regions-store.js'
+import { loadRegionsStore, saveRegionsStore, createCachedRegionsLoader, DEFAULT_REGIONS_STORE, type RegionsStore } from '../src/runtime/regions-store.js'
 
 function tmp (): string {
   return mkdtempSync(join(tmpdir(), 'regions-store-'))
 }
+
+test('createCachedRegionsLoader serves the store from cache and stop is idempotent', () => {
+  const dir = tmp()
+  saveRegionsStore(dir, { ...DEFAULT_REGIONS_STORE, cacheScrollTtlDays: 21 })
+  const loader = createCachedRegionsLoader(dir)
+  const first = loader.getStore()
+  assert.equal(first.cacheScrollTtlDays, 21)
+  // A second call within the self-heal window serves the identical cached object without re-reading.
+  assert.equal(loader.getStore(), first, 'cached store identity is stable between writes')
+  loader.stop()
+  loader.stop() // idempotent: a second stop must not throw
+})
+
+test('createCachedRegionsLoader with a missing file returns store defaults', () => {
+  const dir = tmp()
+  const loader = createCachedRegionsLoader(dir)
+  const store = loader.getStore()
+  assert.deepEqual(store.regions, [])
+  assert.equal(store.positionWarm.enabled, DEFAULT_REGIONS_STORE.positionWarm.enabled)
+  loader.stop()
+})
+
+// Linux only: this asserts fs.watch fires an invalidation, and fs.watch delays or drops events on macOS
+// and Windows CI. The mtime self-heal keeps the loader correct on every platform regardless.
+test('createCachedRegionsLoader picks up a write through the watcher', { skip: process.platform !== 'linux' }, async () => {
+  const dir = tmp()
+  saveRegionsStore(dir, { ...DEFAULT_REGIONS_STORE, cacheScrollTtlDays: 10 })
+  const loader = createCachedRegionsLoader(dir)
+  assert.equal(loader.getStore().cacheScrollTtlDays, 10)
+  saveRegionsStore(dir, { ...DEFAULT_REGIONS_STORE, cacheScrollTtlDays: 30 })
+  // Poll for the watcher-driven invalidation for up to two seconds.
+  const deadline = Date.now() + 2000
+  while (loader.getStore().cacheScrollTtlDays !== 30 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  assert.equal(loader.getStore().cacheScrollTtlDays, 30, 'a write is picked up after the watch event')
+  loader.stop()
+})
 
 test('a corrupt file falls back to an empty store rather than throwing', () => {
   const dir = mkdtempSync(join(tmpdir(), 'regions-store-'))

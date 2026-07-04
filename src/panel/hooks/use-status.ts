@@ -15,7 +15,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { PLUGIN_ID } from '../../shared/plugin-id.js'
-import { PANEL_REQUEST_TIMEOUT_MS } from '../request-timeout.js'
+import { useAbortableFetch } from './use-abortable-fetch.js'
 
 /** The admin plugin-list route. Same-origin, gated by the admin session. */
 const PLUGINS_URL = '/plugins'
@@ -67,19 +67,14 @@ export function useStatus (): UseStatusResult {
   const [status, setStatus] = useState<PluginRuntimeStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [lastUpdatedMs, setLastUpdatedMs] = useState<number | null>(null)
-  const canceled = useRef(false)
   const inFlight = useRef(false)
   // The JSON of the last status we committed to state, so a byte-identical
   // poll is detected without re-rendering: the status object keeps stable
   // identity across unchanged polls.
   const lastStatusJson = useRef<string | null>(null)
+  const fetcher = useAbortableFetch()
 
   useEffect(() => {
-    canceled.current = false
-    // Aborted on unmount so an outstanding request does not run to its
-    // timeout against a component that is already gone.
-    const unmountController = new AbortController()
-
     // poll never rejects: it catches its own failures and surfaces them
     // through setError, so callers can leave its promise unhandled.
     async function poll (): Promise<void> {
@@ -90,20 +85,12 @@ export function useStatus (): UseStatusResult {
       }
       inFlight.current = true
       try {
-        const response = await fetch(PLUGINS_URL, {
-          credentials: 'same-origin',
-          signal: AbortSignal.any([
-            unmountController.signal,
-            AbortSignal.timeout(PANEL_REQUEST_TIMEOUT_MS)
-          ])
-        })
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
-        const parsed: unknown = await response.json()
+        const parsed = await fetcher.fetchJson(PLUGINS_URL)
         const next = extractStatus(parsed)
         if (next === null) {
           throw new Error('plugin not found in the server plugin list')
         }
-        if (!canceled.current) {
+        if (!fetcher.canceled()) {
           // Skip the state update when the status is byte-identical to the
           // last one committed, so the panel does not re-render once per
           // 5 s for no user-visible change.
@@ -116,7 +103,7 @@ export function useStatus (): UseStatusResult {
           setError(null)
         }
       } catch (e) {
-        if (!canceled.current) {
+        if (!fetcher.canceled()) {
           setError(e instanceof Error ? e.message : String(e))
         }
       } finally {
@@ -137,12 +124,10 @@ export function useStatus (): UseStatusResult {
     document.addEventListener('visibilitychange', onVisibilityChange)
 
     return () => {
-      canceled.current = true
-      unmountController.abort()
       clearInterval(intervalId)
       document.removeEventListener('visibilitychange', onVisibilityChange)
     }
-  }, [])
+  }, [fetcher])
 
   return { status, error, lastUpdatedMs }
 }
