@@ -425,7 +425,16 @@ async fn fill(
                 respond_cached(&tile, if_none_match.as_deref(), false)
             }
             Ok((200, fetched)) => {
-                store_200(&state, &source_id, z, x, y, fetched, if_none_match.as_deref()).await
+                store_200(
+                    &state,
+                    &source_id,
+                    z,
+                    x,
+                    y,
+                    fetched,
+                    if_none_match.as_deref(),
+                )
+                .await
             }
             // A failed revalidation, including a 404 (which does not negative-cache a live tile), serves
             // the stale tile while it is within the max-stale bound.
@@ -441,7 +450,16 @@ async fn fill(
         // A miss or an expired negative: fetch fresh, storing a 200 or negative-caching a 404 or 204.
         match fetch_upstream(&state, &source_id, &url, None).await {
             Ok((200, fetched)) => {
-                store_200(&state, &source_id, z, x, y, fetched, if_none_match.as_deref()).await
+                store_200(
+                    &state,
+                    &source_id,
+                    z,
+                    x,
+                    y,
+                    fetched,
+                    if_none_match.as_deref(),
+                )
+                .await
             }
             Ok((status @ (404 | 204), _)) => {
                 negative_cache(&state, &source_id, z, x, y, status).await
@@ -733,8 +751,7 @@ mod tests {
     async fn a_timed_out_fetch_retries_once_at_the_escalated_timeout() {
         let hits = Arc::new(AtomicUsize::new(0));
         // Hit 1 sleeps 1s against the 100ms base timeout (a forced timeout); hit 2 answers instantly.
-        let addr =
-            spawn_counting_stub(hits.clone(), 1, std::time::Duration::from_secs(1)).await;
+        let addr = spawn_counting_stub(hits.clone(), 1, std::time::Duration::from_secs(1)).await;
         let db = NamedTempFile::new().unwrap();
         let st = state_with(
             &db,
@@ -743,7 +760,10 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(get_tile(&st, "s", 1, 0, 0, None).await, FetchOutcome::Hit(_)),
+            matches!(
+                get_tile(&st, "s", 1, 0, 0, None).await,
+                FetchOutcome::Hit(_)
+            ),
             "the single retry at the escalated timeout succeeds"
         );
         assert_eq!(
@@ -757,8 +777,7 @@ mod tests {
     async fn a_timeout_is_never_negative_cached() {
         let hits = Arc::new(AtomicUsize::new(0));
         // Every hit sleeps 1s against the 100ms base, so both the initial fetch and its retry time out.
-        let addr =
-            spawn_counting_stub(hits, usize::MAX, std::time::Duration::from_secs(1)).await;
+        let addr = spawn_counting_stub(hits, usize::MAX, std::time::Duration::from_secs(1)).await;
         let db = NamedTempFile::new().unwrap();
         let st = state_with(
             &db,
@@ -780,8 +799,7 @@ mod tests {
     async fn repeated_timeouts_escalate_the_per_source_timeout() {
         let hits = Arc::new(AtomicUsize::new(0));
         // Hits 1 and 2 (the first request and its retry) sleep 1s; later hits answer instantly.
-        let addr =
-            spawn_counting_stub(hits, 2, std::time::Duration::from_secs(1)).await;
+        let addr = spawn_counting_stub(hits, 2, std::time::Duration::from_secs(1)).await;
         let db = NamedTempFile::new().unwrap();
         let st = state_with(
             &db,
@@ -849,8 +867,7 @@ mod tests {
     async fn a_slow_source_serves_stale_immediately() {
         let hits = Arc::new(AtomicUsize::new(0));
         // The revalidation stub sleeps 1s; fresh_secs 0 makes the primed tile immediately stale.
-        let addr =
-            spawn_counting_stub(hits, usize::MAX, std::time::Duration::from_secs(1)).await;
+        let addr = spawn_counting_stub(hits, usize::MAX, std::time::Duration::from_secs(1)).await;
         let db = NamedTempFile::new().unwrap();
         let knobs = Knobs {
             fresh_secs: 0,
@@ -881,8 +898,7 @@ mod tests {
     async fn a_slow_source_answers_not_modified_for_a_matching_etag() {
         let hits = Arc::new(AtomicUsize::new(0));
         // The revalidation stub sleeps 1s; fresh_secs 0 makes the primed tile immediately stale.
-        let addr =
-            spawn_counting_stub(hits, usize::MAX, std::time::Duration::from_secs(1)).await;
+        let addr = spawn_counting_stub(hits, usize::MAX, std::time::Duration::from_secs(1)).await;
         let db = NamedTempFile::new().unwrap();
         let knobs = Knobs {
             fresh_secs: 0,
@@ -903,7 +919,10 @@ mod tests {
         .await;
         match outcome {
             Ok(FetchOutcome::NotModified { etag }) => {
-                assert_eq!(etag, "e", "the matching etag answers 304 with the stale etag")
+                assert_eq!(
+                    etag, "e",
+                    "the matching etag answers 304 with the stale etag"
+                )
             }
             _ => panic!("expected a not-modified within 500ms"),
         }

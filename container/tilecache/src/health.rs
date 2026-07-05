@@ -113,7 +113,11 @@ mod tests {
     #[test]
     fn schedule_escalates_then_caps_at_the_streak_and_the_ceiling() {
         let h = UpstreamHealth::new(20_000);
-        assert_eq!(h.timeout_ms("s"), 20_000, "an unknown source runs at the base");
+        assert_eq!(
+            h.timeout_ms("s"),
+            20_000,
+            "an unknown source runs at the base"
+        );
         h.record_timeout("s", 0);
         assert_eq!(h.timeout_ms("s"), 40_000, "base * 2 after one timeout");
         h.record_timeout("s", 1);
@@ -125,7 +129,11 @@ mod tests {
         // A large base clamps at the 90 second ceiling: 60s << 1 is 120s, capped to 90s.
         let big = UpstreamHealth::new(60_000);
         big.record_timeout("s", 0);
-        assert_eq!(big.timeout_ms("s"), 90_000, "base << streak clamps to the ceiling");
+        assert_eq!(
+            big.timeout_ms("s"),
+            90_000,
+            "base << streak clamps to the ceiling"
+        );
     }
 
     #[test]
@@ -150,7 +158,11 @@ mod tests {
         assert!(h.is_slow("s"));
         // Exactly 300 quiet seconds later: full recovery drops the entry and returns to the base.
         h.record_success("s", 100 + 300);
-        assert_eq!(h.timeout_ms("s"), 20_000, "recovery returns the source to the base timeout");
+        assert_eq!(
+            h.timeout_ms("s"),
+            20_000,
+            "recovery returns the source to the base timeout"
+        );
         assert!(!h.is_slow("s"));
     }
 
