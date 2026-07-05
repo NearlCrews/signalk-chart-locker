@@ -2,6 +2,7 @@
 //! and politeness knobs, the global egress semaphore, and the single-flight map.
 
 use crate::cache::TileCache;
+use crate::health::UpstreamHealth;
 use crate::source::ChartSource;
 use crate::ssrf::is_forbidden_ip;
 use bytes::Bytes;
@@ -10,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
 /// Global concurrent egress fetches. Bounds the load the proxy puts on the upstream chart providers.
@@ -63,6 +64,11 @@ pub struct Knobs {
     /// The scroll-tile TTL in seconds, seeded from the env at construction so the startup sweep has a
     /// value before the plugin's first /config push. Zero disables the age sweep.
     pub scroll_ttl_secs: i64,
+    /// The base (streak-zero) egress timeout in milliseconds. Both the client-level default timeout and
+    /// the per-source adaptive schedule in `UpstreamHealth` derive from this, so the two cannot diverge.
+    /// A compile-time default, set directly by tests: it is not exposed on POST /config and reads no env
+    /// var, because the escalation is automatic and the issue asks for no user tuning surface.
+    pub upstream_base_timeout_ms: u64,
 }
 
 impl Default for Knobs {
@@ -75,8 +81,18 @@ impl Default for Knobs {
             max_stale_secs: 30 * 86_400,
             allow_private_egress: false,
             scroll_ttl_secs: 0,
+            upstream_base_timeout_ms: 20_000,
         }
     }
+}
+
+/// Why an egress fetch failed, so the caller can adapt. A timeout escalates the per-source schedule and
+/// is retried once; a transport error is treated as offline (serve stale) and is not retried. An SSRF
+/// rejection and a closed egress semaphore both map to `Transport`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchError {
+    Timeout,
+    Transport,
 }
 
 /// Per-style upstream templates, learned when the style document is first fetched, so the glyph and
@@ -128,6 +144,9 @@ pub struct AppState {
     /// Single-flight guard for the one-time global basemap assets warm, so two concurrent basemap
     /// downloads do not both fetch the full glyph and sprite set.
     pub assets_warming: Arc<AtomicBool>,
+    /// Per-source upstream health: the adaptive egress timeout that backs off while a source keeps timing
+    /// out. Read on every `fetch_upstream` and surfaced on /cache/stats.
+    pub upstream_health: Arc<UpstreamHealth>,
 }
 
 impl AppState {
@@ -135,7 +154,9 @@ impl AppState {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .user_agent("signalk-chart-locker-tilecache")
-            .timeout(std::time::Duration::from_secs(20))
+            // The client default is the base timeout: `fetch_upstream` overrides it per request with the
+            // adaptive schedule, so only the direct-fetch callers (style-document learn, geocode) run here.
+            .timeout(Duration::from_millis(knobs.upstream_base_timeout_ms))
             .dns_resolver(Arc::new(GuardedResolver {
                 allow_private: knobs.allow_private_egress,
             }))
@@ -144,6 +165,7 @@ impl AppState {
         // Captured before the struct literal moves `knobs` into its field.
         let cap_bytes = knobs.cap_bytes;
         let scroll_ttl_secs = knobs.scroll_ttl_secs;
+        let base_timeout_ms = knobs.upstream_base_timeout_ms;
         Self {
             cache,
             client,
@@ -161,23 +183,27 @@ impl AppState {
             live_position_warm_budget: Arc::new(AtomicI64::new(0)),
             live_scroll_ttl_secs: Arc::new(AtomicI64::new(scroll_ttl_secs)),
             assets_warming: Arc::new(AtomicBool::new(false)),
+            upstream_health: Arc::new(UpstreamHealth::new(base_timeout_ms)),
         }
     }
 
     /// A GET that enforces egress safety: it rejects a URL whose host is a forbidden IP literal (the
-    /// DNS resolver never sees a literal), then takes an egress permit and sends the request. Returns
-    /// Err on a rejected host, a permit failure, or a transport error.
+    /// DNS resolver never sees a literal), then takes an egress permit and sends the request. `timeout`
+    /// applies a per-request timeout that overrides the client-level default; `None` leaves the client
+    /// default in place. Returns a `FetchError`: `Timeout` for a timed-out send, `Transport` for a
+    /// rejected host, a permit failure, or any other send error.
     pub async fn guarded_get(
         &self,
         url: &str,
         if_none_match: Option<&str>,
-    ) -> Result<reqwest::Response, ()> {
+        timeout: Option<Duration>,
+    ) -> Result<reqwest::Response, FetchError> {
         match if_none_match {
             Some(v) => {
-                self.guarded_get_with_headers(url, &[(reqwest::header::IF_NONE_MATCH, v)])
+                self.guarded_get_with_headers(url, &[(reqwest::header::IF_NONE_MATCH, v)], timeout)
                     .await
             }
-            None => self.guarded_get_with_headers(url, &[]).await,
+            None => self.guarded_get_with_headers(url, &[], timeout).await,
         }
     }
 
@@ -188,16 +214,30 @@ impl AppState {
         &self,
         url: &str,
         headers: &[(reqwest::header::HeaderName, &str)],
-    ) -> Result<reqwest::Response, ()> {
+        timeout: Option<Duration>,
+    ) -> Result<reqwest::Response, FetchError> {
         if !self.knobs.allow_private_egress && crate::ssrf::is_forbidden_ip_literal_url(url) {
-            return Err(());
+            return Err(FetchError::Transport);
         }
-        let _permit = self.egress.acquire().await.map_err(|_| ())?;
+        let _permit = self
+            .egress
+            .acquire()
+            .await
+            .map_err(|_| FetchError::Transport)?;
         let mut req = self.client.get(url);
+        if let Some(t) = timeout {
+            req = req.timeout(t);
+        }
         for (name, value) in headers {
             req = req.header(name.clone(), *value);
         }
-        req.send().await.map_err(|_| ())
+        req.send().await.map_err(|e| {
+            if e.is_timeout() {
+                FetchError::Timeout
+            } else {
+                FetchError::Transport
+            }
+        })
     }
 
     /// Read a response body with a hard cap, streaming chunks so a gzip or brotli decompression bomb or
@@ -237,6 +277,12 @@ impl AppState {
         if Arc::strong_count(lock) <= 2 {
             map.remove(key);
         }
+    }
+
+    /// True when a fill already holds or awaits the single-flight entry for this key, so the
+    /// stale-while-revalidate path spawns at most one background fill per tile.
+    pub async fn inflight_contains(&self, key: &str) -> bool {
+        self.inflight.lock().await.contains_key(key)
     }
 }
 

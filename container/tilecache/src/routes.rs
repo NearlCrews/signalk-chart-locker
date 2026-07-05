@@ -85,6 +85,25 @@ async fn stats(State(st): State<AppState>) -> Json<serde_json::Value> {
         .into_iter()
         .map(|(source, bytes, rows)| serde_json::json!({ "source": source, "bytes": bytes, "rows": rows }))
         .collect();
+    // Per-source upstream health, present only for sources with a live health entry. The in-memory
+    // snapshot is a fast lock, so it runs on the reactor rather than the blocking cache pool. timeoutSecs
+    // is the adaptive timeout in whole seconds, rounded up so a sub-second remainder never floors to a
+    // smaller reported timeout; lastTimeoutAt is Unix epoch seconds.
+    let upstream: serde_json::Map<String, serde_json::Value> = st
+        .upstream_health
+        .snapshot()
+        .into_iter()
+        .map(|h| {
+            (
+                h.source,
+                serde_json::json!({
+                    "slow": h.streak > 0,
+                    "timeoutSecs": h.timeout_ms.div_ceil(1000),
+                    "lastTimeoutAt": h.last_timeout_at,
+                }),
+            )
+        })
+        .collect();
     Json(serde_json::json!({
         "rows": rows,
         "bytes": bytes,
@@ -103,6 +122,7 @@ async fn stats(State(st): State<AppState>) -> Json<serde_json::Value> {
         "regionsFreeBytes": ((r - p) - real_pinned).max(0),
         "perSourceAvgBytes": avg,
         "bySource": by_source,
+        "upstream": upstream,
     }))
 }
 
@@ -812,6 +832,35 @@ mod tests {
         assert!(
             body.contains("\"source\":\"s\""),
             "the warmed source appears in the per-source totals"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_stats_reports_upstream_health() {
+        let db = NamedTempFile::new().unwrap();
+        let state = dev_state(&db);
+        // Record a timeout so the source has a live entry: streak 1 at the 20s default base is a 40s timeout.
+        state
+            .upstream_health
+            .record_timeout("depth-noaa", crate::state::now_secs());
+        let resp = app(state.clone())
+            .oneshot(Request::get("/cache/stats").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let (status, body) = body_string(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("\"upstream\""),
+            "stats reports the upstream health map"
+        );
+        assert!(
+            body.contains("\"depth-noaa\""),
+            "the slow source appears under upstream"
+        );
+        assert!(body.contains("\"slow\":true"));
+        assert!(
+            body.contains("\"timeoutSecs\":40"),
+            "the escalated timeout is reported in seconds"
         );
     }
 

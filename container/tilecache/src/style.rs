@@ -82,7 +82,9 @@ pub(crate) fn host_allowed(url: &str, allowed_hosts: &[String]) -> bool {
 }
 
 async fn fetch_json(state: &AppState, url: &str) -> Option<Value> {
-    let resp = state.guarded_get(url, None).await.ok()?;
+    // The style-document and TileJSON learn stays at the client default timeout (no adaptive schedule):
+    // it is a control-plane fetch, not a per-source tile fetch.
+    let resp = state.guarded_get(url, None, None).await.ok()?;
     if !resp.status().is_success() {
         return None;
     }
@@ -359,7 +361,7 @@ async fn glyphs(
             if !host_allowed(&upstream, &allowed) {
                 return StatusCode::BAD_GATEWAY.into_response();
             }
-            match crate::fetcher::fetch_upstream(&state, &upstream, None).await {
+            match crate::fetcher::fetch_upstream(&state, &source, &upstream, None).await {
                 Ok((200, f)) => {
                     let now = now_secs();
                     let tile = new_asset_tile(f, now);
@@ -451,7 +453,7 @@ async fn sprite_variant(state: AppState, source: String, variant: u32, suffix: &
             if !host_allowed(&upstream, &allowed) {
                 return StatusCode::BAD_GATEWAY.into_response();
             }
-            match crate::fetcher::fetch_upstream(&state, &upstream, None).await {
+            match crate::fetcher::fetch_upstream(&state, &source, &upstream, None).await {
                 Ok((200, f)) => {
                     let now = now_secs();
                     let tile = new_asset_tile(f, now);
@@ -517,7 +519,7 @@ async fn vector_tile(
         if !host_allowed(&upstream, &allowed) {
             return StatusCode::BAD_GATEWAY.into_response();
         }
-        match crate::fetcher::fetch_upstream(&state, &upstream, None).await {
+        match crate::fetcher::fetch_upstream(&state, &source, &upstream, None).await {
             Ok((200, f)) => {
                 let now = now_secs();
                 let tile = new_asset_tile(f, now);

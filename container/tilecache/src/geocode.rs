@@ -59,11 +59,15 @@ async fn geocode(State(st): State<AppState>, Query(q): Query<GeocodeQuery>) -> R
     // contactable User-Agent the Nominatim policy requires, overriding the client-level tile-cache UA.
     // A blocked literal, an exhausted permit, or a transport error all collapse to a 502 here.
     let resp = match st
-        .guarded_get_with_headers(&url, &[(reqwest::header::USER_AGENT, NOMINATIM_USER_AGENT)])
+        .guarded_get_with_headers(
+            &url,
+            &[(reqwest::header::USER_AGENT, NOMINATIM_USER_AGENT)],
+            None,
+        )
         .await
     {
         Ok(r) => r,
-        Err(()) => return StatusCode::BAD_GATEWAY.into_response(),
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
     };
     if !resp.status().is_success() {
         return StatusCode::BAD_GATEWAY.into_response();

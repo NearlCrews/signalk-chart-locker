@@ -355,7 +355,7 @@ async fn warm_one_asset(
     // A missing asset (404 or 204) is not pinned: a pinned negative is never evicted, so it would
     // permanently mask a glyph range or sprite variant the upstream later begins serving. Leaving it
     // uncached lets the next basemap warm and the live route refetch it, so only a 200 is stored.
-    match crate::fetcher::fetch_upstream(st, url, None).await {
+    match crate::fetcher::fetch_upstream(st, cache_source, url, None).await {
         Ok((200, f)) => Some(WarmRow {
             source: cache_source.to_string(),
             z: 0,
@@ -379,7 +379,7 @@ async fn warm_one_asset(
             eprintln!("tilecache: warm asset {url} returned status {status}; skipped");
             None
         }
-        Err(()) => {
+        Err(_) => {
             eprintln!("tilecache: warm asset {url} fetch failed (offline or blocked); skipped");
             None
         }
@@ -536,7 +536,7 @@ async fn warm_one(
         Ok(u) => u,
         Err(_) => return Fetched::Error,
     };
-    match fetch_upstream(st, &url, None).await {
+    match fetch_upstream(st, &source.id, &url, None).await {
         Ok((200, f)) => {
             if f.body.len() > st.knobs.max_blob_bytes || !acceptable_content_type(&f.content_type) {
                 return Fetched::Error;

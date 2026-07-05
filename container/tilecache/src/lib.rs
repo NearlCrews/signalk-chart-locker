@@ -6,6 +6,7 @@ pub mod cache;
 pub mod fetcher;
 pub mod geocode;
 pub mod geom;
+pub mod health;
 pub mod response;
 pub mod routes;
 pub mod source;
