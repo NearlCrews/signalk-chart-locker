@@ -14,16 +14,17 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.2.0
+## What's new in 0.3.0
 
-Hardening, performance, and internal cleanup across the plugin and the tilecache container, with no
-configuration or data-model changes. The egress SSRF guard adds the RFC 8215 local-use NAT64 range,
-an off-allowlist basemap source is now stripped from the served style at learn time, the cache-info
-panel no longer runs a per-tile scan on every poll, and the position-warm loop reads the saved-regions
-file through a filesystem watcher so it does no disk I/O between writes. Internally the plugin adopts
-`signalk-chart-sources` 0.2.0 and consolidates several shared seams.
+The tile cache now rides out slow chart upstreams instead of leaving blank areas on the
+chartplotter. A per-source timeout backs off from 20 to 80 seconds while an upstream keeps timing
+out and recovers once it has been quiet, a timed-out fetch is retried once, and tile downloads keep
+running in the container even when the browser gives up, so blank areas fill in and self-heal as
+the map is panned. A slow source serves its cached tiles immediately and refreshes them in the
+background, and `/cache/stats` reports per-source upstream health so a client can surface a
+degraded upstream instead of blank tiles.
 
-See the [changelog](CHANGELOG.md#v020) for the full list.
+See the [changelog](CHANGELOG.md#v030) for the full list.
 
 ## What it does
 

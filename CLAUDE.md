@@ -70,7 +70,11 @@ delegated to the installed `signalk-container` plugin.
   include the vector basemap: the warm expands a style source into synthetic XYZ sub-sources keyed
   `style:{source}:{name}` clamped to the native vector maxzoom, and after a basemap region warm it
   warms the global glyphs (common scripts) and the sprite once, cache-first, pinned under the reserved
-  `__basemap_assets__` region, so a region renders fully offline including labels and icons.
+  `__basemap_assets__` region, so a region renders fully offline including labels and icons. The
+  egress fetch path adapts to slow upstreams: a per-source timeout backs off 20s, 40s, 80s while a
+  source keeps timing out (sticky until 5 quiet minutes), a timed-out fetch retries once, a timeout
+  is never negative-cached, tile fills run detached so a browser or proxy disconnect no longer
+  cancels a slow fetch, and per-source health surfaces as `upstream` on /cache/stats.
 - `docs/superpowers/specs/`, `docs/superpowers/plans/`, `docs/superpowers/reviews/`: design
   specs, plans, and review records. The router-engine milestone docs (M1 through M4) are kept as
   historical records; the routing work was removed 2026-06-29.

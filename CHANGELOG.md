@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<a id="v030"></a>
+
+## [0.3.0] - 2026-07-05
+
+The tilecache now rides out slow chart upstreams instead of leaving blank areas on the
+chartplotter (issue #3, observed with NOAA MaritimeChartService answering GetMap in about
+65 seconds per tile). No configuration or data-model changes.
+
+### Added
+
+- Per-source adaptive upstream timeout in the tilecache. The egress timeout backs off from 20 to
+  40 to 80 seconds while a source keeps timing out, stays escalated until the source has been
+  quiet for five minutes, and then recovers to the base. A timed-out fetch is retried once at the
+  escalated timeout. A timeout is never negative-cached; only a real upstream 404 or 204 is.
+- Upstream health on `GET /cache/stats`: a new `upstream` object reports, per source, whether it
+  is currently slow, the adaptive timeout in seconds, and the time of the last timeout, so a
+  client can show a degraded badge instead of blank tiles. The plugin's `/api/cache/stats` passes
+  it through unchanged.
+
+### Fixed
+
+- A tile fetch now survives the browser or the plugin proxy giving up. The fill runs detached in
+  the container, completes, and stores the tile, so areas blanked by a degraded upstream self-heal
+  as the map is panned. Previously a disconnect cancelled the upstream fetch mid-flight and the
+  cache never filled from scroll traffic on a slow upstream.
+- A source marked slow serves its stale cached tiles immediately and revalidates them in the
+  background, instead of blocking each tile request on a multi-second upstream round trip.
+- Concurrent revalidations of the same stale tile now coalesce through the single-flight guard
+  instead of each fetching the upstream.
+
 <a id="v020"></a>
 
 ## [0.2.0] - 2026-07-04
