@@ -60,6 +60,34 @@ interface EnsureRunningOptions {
   pluginVersion?: string
 }
 
+/** Opaque version-source handle from the manager's update-source factories; consumers never implement it. */
+export interface ContainerVersionSource {
+  /** Payload deliberately opaque: this plugin never calls fetch. */
+  fetch(runtime: ContainerRuntimeInfo): Promise<unknown>
+}
+
+/** One registration with signalk-container's centralized update service (the "up to date" / "Check now" UI). */
+export interface ContainerUpdateRegistration {
+  pluginId: string
+  containerName: string
+  /** Image repo without tag, for example "ghcr.io/nearlcrews/signalk-chart-locker-tilecache". */
+  image: string
+  /** Must be a function so live config edits are picked up without re-registering. */
+  currentTag: () => string
+  versionSource: ContainerVersionSource
+}
+
+/** The subset of the manager's update service this plugin uses. */
+export interface ContainerUpdateService {
+  register(reg: ContainerUpdateRegistration): void
+  unregister(pluginId: string): void
+  /** Payload deliberately opaque: fired detached, result never read. */
+  checkOne(pluginId: string): Promise<unknown>
+  sources: {
+    githubReleases(repo: string, options?: { allowPrerelease?: boolean, tagPrefix?: string }): ContainerVersionSource
+  }
+}
+
 /** The subset of the signalk-container manager API this plugin uses. */
 export interface ContainerManager {
   whenReady(): Promise<void>
@@ -67,4 +95,6 @@ export interface ContainerManager {
   ensureRunning(name: string, config: ContainerConfig, options?: EnsureRunningOptions): Promise<void>
   resolveContainerAddress(name: string, port: number): Promise<string | null>
   stop(name: string): Promise<void>
+  /** The centralized update service; optional because older signalk-container versions predate it. */
+  updates?: ContainerUpdateService
 }

@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createPlugin } from '../src/plugin/plugin.js'
 import { PLUGIN_ID, PLUGIN_NAME } from '../src/shared/plugin-id.js'
-import { fakeApp, fakeManager, managerRecord, setContainerManager, clearGlobals } from './helpers.js'
+import { TILECACHE_CONTAINER_NAME, DEFAULT_TILECACHE_IMAGE, DEFAULT_TILECACHE_TAG } from '../src/runtime/tilecache-container.js'
+import { fakeApp, fakeManager, managerRecord, updatesRecord, setContainerManager, clearGlobals } from './helpers.js'
 
 test.afterEach(() => {
   clearGlobals()
@@ -79,4 +80,88 @@ test('stop calls the navigation.position unsubscribe returned by streambundle', 
   assert.equal(app.positionUnsubCalled, false)
   await plugin.stop()
   assert.equal(app.positionUnsubCalled, true)
+})
+
+test('start registers the tilecache with the update service exactly once', async () => {
+  const updates = updatesRecord()
+  setContainerManager(fakeManager({ updates }))
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  await plugin.start({}, () => {})
+  assert.equal(updates.registered.length, 1)
+  const reg = updates.registered[0]
+  assert.equal(reg.pluginId, PLUGIN_ID)
+  assert.equal(reg.containerName, TILECACHE_CONTAINER_NAME)
+  assert.equal(reg.image, DEFAULT_TILECACHE_IMAGE)
+  assert.equal(reg.currentTag(), DEFAULT_TILECACHE_TAG)
+  // The version source must be the exact sentinel built for this plugin's public repo, and the
+  // GitHub source factory must be asked for that repo and no other.
+  assert.deepEqual([...updates.sentinels.keys()], ['NearlCrews/signalk-chart-locker'])
+  assert.strictEqual(reg.versionSource, updates.sentinels.get('NearlCrews/signalk-chart-locker'))
+  // The detached initial check runs so the badge populates without waiting for the scheduled check.
+  assert.deepEqual(updates.checked, [PLUGIN_ID])
+  await plugin.stop()
+})
+
+test('the registration currentTag reflects a trimmed configured image tag', async () => {
+  const updates = updatesRecord()
+  setContainerManager(fakeManager({ updates }))
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  await plugin.start({ advanced: { imageTag: ' v9.9.9 ' } }, () => {})
+  assert.equal(updates.registered.length, 1)
+  assert.equal(updates.registered[0].currentTag(), 'v9.9.9')
+  await plugin.stop()
+})
+
+test('start completes against an older manager with no update service', async () => {
+  setContainerManager(fakeManager())
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  await assert.doesNotReject(async () => { await plugin.start({}, () => {}) })
+  await plugin.stop()
+})
+
+test('a throwing update-service register does not break start', async () => {
+  // The real update service never throws on validation: it logs and returns, so this exercises only
+  // the plugin's defensive try/catch around register. The container still launches, and doStart
+  // completes to its final status.
+  const updates = updatesRecord()
+  setContainerManager(fakeManager({ updates, throwsOn: ['register'] }))
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  await assert.doesNotReject(async () => { await plugin.start({}, () => {}) })
+  assert.deepEqual(updates.registered, [])
+  assert.deepEqual(updates.checked, [])
+  assert.ok(app.status.some(s => s.startsWith('Tilecache at')), 'doStart must reach its final tilecache status')
+  await plugin.stop()
+})
+
+test('stop after start unregisters the update service', async () => {
+  const updates = updatesRecord()
+  setContainerManager(fakeManager({ updates }))
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  await plugin.start({}, () => {})
+  await plugin.stop()
+  assert.deepEqual(updates.unregistered, [PLUGIN_ID])
+})
+
+test('a failed container launch skips update-service registration', async () => {
+  const updates = updatesRecord()
+  setContainerManager(fakeManager({ updates, throwsOn: ['ensureRunning'] }))
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  await plugin.start({}, () => {})
+  assert.deepEqual(updates.registered, [])
+  await plugin.stop()
+})
+
+test('stop without a prior start does not unregister', async () => {
+  const updates = updatesRecord()
+  setContainerManager(fakeManager({ updates }))
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  await plugin.stop()
+  assert.deepEqual(updates.unregistered, [])
 })

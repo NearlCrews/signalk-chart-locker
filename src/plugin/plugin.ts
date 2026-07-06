@@ -4,7 +4,7 @@ import type { Plugin, ServerAPI } from '@signalk/server-api'
 import type { Position } from '../shared/types.js'
 import { PLUGIN_ID, PLUGIN_NAME, PLUGIN_DESCRIPTION, PLUGIN_MOUNT_PATH } from '../shared/plugin-id.js'
 import { requireContainerManager, getContainerManager, ensureRuntimeReady } from '../runtime/container-manager.js'
-import { TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT, DEFAULT_TILECACHE_TAG, DEFAULT_CACHE_CAP_GIB, PLUGIN_VERSION, buildTilecacheConfig, probeTilecacheHealth } from '../runtime/tilecache-container.js'
+import { TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT, DEFAULT_TILECACHE_TAG, DEFAULT_CACHE_CAP_GIB, PLUGIN_VERSION, buildTilecacheConfig, probeTilecacheHealth, registerTilecacheUpdates, unregisterTilecacheUpdates } from '../runtime/tilecache-container.js'
 import { buildSourcePayload, pushTilecacheConfig } from '../runtime/tilecache-config-push.js'
 import { registerTileRoutes, type TileRouter } from '../http/tile-routes.js'
 import { registerRegionsRoutes, type RegionsRouter } from '../http/regions-routes.js'
@@ -122,13 +122,27 @@ export function createPlugin (app: ServerAPI): Plugin {
       // fallback is needed here; clamp and convert days to seconds at this edge.
       const scrollTtlSecs = Math.max(0, Math.round(loadRegionsStore(app.getDataDirPath()).cacheScrollTtlDays * 86_400))
       const tilecacheConfig = buildTilecacheConfig({
-        tag: config.advanced?.imageTag?.trim() || undefined,
+        tag: config.advanced?.imageTag,
         capBytes,
         scrollTtlSecs,
         ...(config.advanced?.cacheVolumeSource?.trim() ? { externalCacheVolumeSource: config.advanced.cacheVolumeSource.trim() } : {})
       })
       await manager.ensureRunning(TILECACHE_CONTAINER_NAME, tilecacheConfig, { pluginId: PLUGIN_ID, pluginVersion: PLUGIN_VERSION })
       tilecacheLaunched = true
+      // Show update state for this container in the Container Manager panel. Re-registering on
+      // every start is the supported pattern, and the detached initial check populates the badge
+      // without waiting for the daily scheduled check; offline it resolves from cache without penalty.
+      const updates = manager.updates
+      if (updates) {
+        try {
+          registerTilecacheUpdates(updates, config.advanced?.imageTag)
+          updates.checkOne(PLUGIN_ID).catch((err: unknown) => {
+            app.debug('Initial update check failed:', err)
+          })
+        } catch (err) {
+          app.debug('Update-service registration failed:', err)
+        }
+      }
       const tcAddress = await manager.resolveContainerAddress(TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT)
       if (tcAddress) {
         tilecacheAddress = tcAddress
@@ -200,6 +214,14 @@ export function createPlugin (app: ServerAPI): Plugin {
     if (tilecacheLaunched) {
       const manager = getContainerManager()
       if (manager) {
+        const updates = manager.updates
+        if (updates) {
+          try {
+            unregisterTilecacheUpdates(updates)
+          } catch (err) {
+            app.debug('Update-service unregister failed:', err)
+          }
+        }
         try {
           await manager.stop(TILECACHE_CONTAINER_NAME)
         } catch (err) {

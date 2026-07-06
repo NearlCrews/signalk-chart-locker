@@ -3,7 +3,7 @@
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { ContainerConfig, ContainerManager, ContainerRuntimeInfo } from '../src/shared/types.js'
+import type { ContainerConfig, ContainerManager, ContainerRuntimeInfo, ContainerUpdateRegistration, ContainerVersionSource } from '../src/shared/types.js'
 import type { RegionsRouter, RegionsRequest, RegionsResponse } from '../src/http/regions-routes.js'
 import { CONTAINER_MANAGER_GLOBAL_KEY } from '../src/runtime/container-manager.js'
 
@@ -58,6 +58,19 @@ export function managerRecord (): ManagerRecord {
   return { ensured: [], stopped: [] }
 }
 
+/** Records the calls made through the fake manager's optional update-service surface. */
+export interface UpdatesRecord {
+  registered: ContainerUpdateRegistration[]
+  unregistered: string[]
+  checked: string[]
+  /** The version-source sentinel returned by githubReleases for each repo, so a test can assert the registration carries the exact object. */
+  sentinels: Map<string, ContainerVersionSource>
+}
+
+export function updatesRecord (): UpdatesRecord {
+  return { registered: [], unregistered: [], checked: [], sentinels: new Map() }
+}
+
 export interface FakeManagerOptions {
   /** The detected runtime; pass null to model a host with no Docker or Podman. Defaults to docker. */
   runtime?: ContainerRuntimeInfo | null
@@ -65,6 +78,10 @@ export interface FakeManagerOptions {
   address?: string | null
   /** When supplied, ensureRunning and stop calls are appended to this record. */
   record?: ManagerRecord
+  /** When supplied, the fake gains an update-service surface and its calls are appended to this record. Omit to model an older signalk-container with no update service. */
+  updates?: UpdatesRecord
+  /** The operations that should throw: 'ensureRunning' models a container launch that fails, 'register' exercises the plugin's defensive try/catch around the update service. */
+  throwsOn?: ReadonlyArray<'ensureRunning' | 'register'>
 }
 
 /** A simple container manager fake: a detected docker runtime and a resolvable address by default. */
@@ -72,13 +89,35 @@ export function fakeManager (opts: FakeManagerOptions = {}): ContainerManager {
   const runtime = opts.runtime === undefined ? { runtime: 'docker' } : opts.runtime
   const address = opts.address === undefined ? '127.0.0.1:8080' : opts.address
   const record = opts.record
-  return {
+  const updates = opts.updates
+  const manager: ContainerManager = {
     async whenReady () {},
     getRuntime () { return runtime },
-    async ensureRunning (name, config) { record?.ensured.push({ name, config }) },
+    async ensureRunning (name, config) {
+      if (opts.throwsOn?.includes('ensureRunning')) throw new Error('ensureRunning failed')
+      record?.ensured.push({ name, config })
+    },
     async resolveContainerAddress () { return address },
     async stop (name) { record?.stopped.push(name) }
   }
+  if (updates) {
+    manager.updates = {
+      register (reg) {
+        if (opts.throwsOn?.includes('register')) throw new Error('register failed')
+        updates.registered.push(reg)
+      },
+      unregister (pluginId) { updates.unregistered.push(pluginId) },
+      async checkOne (pluginId) { updates.checked.push(pluginId); return null },
+      sources: {
+        githubReleases (repo) {
+          const sentinel: ContainerVersionSource = { fetch: async () => null }
+          updates.sentinels.set(repo, sentinel)
+          return sentinel
+        }
+      }
+    }
+  }
+  return manager
 }
 
 /** Publishes a container manager on the global signalk-container reads. */

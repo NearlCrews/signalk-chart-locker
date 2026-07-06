@@ -2,7 +2,8 @@
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { ContainerConfig } from '../shared/types.js'
+import type { ContainerConfig, ContainerUpdateService } from '../shared/types.js'
+import { PLUGIN_ID, PLUGIN_REPO_SLUG } from '../shared/plugin-id.js'
 import { makeContainerHealthcheck, probeContainerHealth, type FetchLike } from './container-health.js'
 import { CACHE_CAP_STATIC_DEFAULT_GIB } from '../shared/cache-cap.js'
 
@@ -31,6 +32,11 @@ export const PLUGIN_VERSION = packageVersion()
  * string and forces signalk-container to recreate the container, which is the only reliable way to
  * ship container-side code to existing installs (a rebuilt floating ":latest" is never recreated). */
 export const DEFAULT_TILECACHE_TAG = `v${PLUGIN_VERSION}`
+
+/** The single trim-and-default rule for the container image tag, shared by the container config and the update registration so the badge always reports the tag the container actually runs. */
+export function resolveTilecacheTag (rawTag?: string): string {
+  return rawTag?.trim() || DEFAULT_TILECACHE_TAG
+}
 
 /** Where signalk-container mounts the Signal K data directory inside the container (the durable default). */
 const SIGNALK_DATA_MOUNT = '/signalk-data'
@@ -68,7 +74,7 @@ export function buildTilecacheConfig (opts: TilecacheContainerOptions = {}): Con
   const cap = opts.capBytes ?? DEFAULT_CACHE_CAP_GIB * 1024 ** 3
   const config: ContainerConfig = {
     image: opts.image ?? DEFAULT_TILECACHE_IMAGE,
-    tag: opts.tag ?? DEFAULT_TILECACHE_TAG,
+    tag: resolveTilecacheTag(opts.tag),
     signalkAccessiblePorts: [TILECACHE_INTERNAL_PORT],
     healthcheck: TILECACHE_HEALTHCHECK,
     resources: TILECACHE_RESOURCES,
@@ -91,3 +97,19 @@ export function buildTilecacheConfig (opts: TilecacheContainerOptions = {}): Con
 }
 
 export const probeTilecacheHealth = probeContainerHealth
+
+/** Registers the tilecache container with the manager's update service (the Container Manager panel's "up to date" and "Check now"). Re-registering on every start is the supported pattern. */
+export function registerTilecacheUpdates (updates: ContainerUpdateService, rawTag?: string): void {
+  updates.register({
+    pluginId: PLUGIN_ID,
+    containerName: TILECACHE_CONTAINER_NAME,
+    image: DEFAULT_TILECACHE_IMAGE,
+    currentTag: () => resolveTilecacheTag(rawTag),
+    versionSource: updates.sources.githubReleases(PLUGIN_REPO_SLUG)
+  })
+}
+
+/** Removes the tilecache update registration; paired with registerTilecacheUpdates at stop. */
+export function unregisterTilecacheUpdates (updates: ContainerUpdateService): void {
+  updates.unregister(PLUGIN_ID)
+}

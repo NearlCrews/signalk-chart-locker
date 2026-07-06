@@ -7,4 +7,6 @@ export const PLUGIN_NAME = 'Chart Locker'
 export const PLUGIN_MOUNT_PATH = `/plugins/${PLUGIN_ID}`
 export const PLUGIN_DESCRIPTION =
   'Signal K plugin that runs a Rust container alongside the server for a boat-wide tile cache, a PMTiles chart provider, and saved downloadable map regions.'
-export const PLUGIN_REPO_URL = 'https://github.com/NearlCrews/signalk-chart-locker'
+/** The GitHub owner/repo slug, single source for the repo URL and the update-service version source. */
+export const PLUGIN_REPO_SLUG = 'NearlCrews/signalk-chart-locker'
+export const PLUGIN_REPO_URL = `https://github.com/${PLUGIN_REPO_SLUG}`
