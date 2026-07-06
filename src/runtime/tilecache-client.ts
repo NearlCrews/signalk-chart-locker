@@ -12,6 +12,27 @@ export interface WarmResult {
 
 const POLL_ATTEMPTS = 20
 const POLL_INTERVAL_MS = 500
+const MAX_RETRIES = 3
+const RETRY_DELAY_MS = 1000
+
+async function fetchWithRetry (url: string, options: RequestInit, fetchImpl: typeof fetch): Promise<Response> {
+  let lastError: unknown
+  for (let i = 0; i < MAX_RETRIES; i++) {
+    try {
+      const res = await fetchImpl(url, options)
+      if (res.status >= 500) {
+        throw new Error(`Server error: ${res.status}`)
+      }
+      return res
+    } catch (err) {
+      lastError = err
+      if (i < MAX_RETRIES - 1) {
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * (i + 1)))
+      }
+    }
+  }
+  throw lastError
+}
 
 export async function warmRegion (
   address: string,
@@ -19,12 +40,12 @@ export async function warmRegion (
   fetchImpl: typeof fetch = fetch
 ): Promise<WarmResult | null> {
   try {
-    const start = await fetchImpl(`http://${address}/warm`, {
+    const start = await fetchWithRetry(`http://${address}/warm`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(req),
       signal: AbortSignal.timeout(CONTAINER_FETCH_TIMEOUT_MS)
-    })
+    }, fetchImpl)
     if (!start.ok) return null
     const { jobId } = (await start.json()) as { jobId: string }
     // Poll briefly so the caller learns whether the warm was all-errors (offline) for its backoff decision.

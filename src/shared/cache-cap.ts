@@ -37,10 +37,12 @@ export function snapToStep (value: number, step: number): number {
  * The recommended cap for a filesystem with `freeGiB` free: about 80 percent of free space, floored
  * to the step to leave headroom, clamped to `[CACHE_CAP_MIN_GIB, CACHE_CAP_MAX_GIB]`. A non-finite
  * input yields the minimum. A large disk is capped at the maximum rather than reserving far more than
- * a tile cache needs.
+ * a tile cache needs. On smaller disks (< 16 GiB free), a more conservative 50% is used to avoid
+ * filling up the host system.
  */
 export function deriveDefaultCapGiB (freeGiB: number): number {
   if (!Number.isFinite(freeGiB)) return CACHE_CAP_MIN_GIB
-  const floored = floorToStep(freeGiB * 0.8, CACHE_CAP_STEP_GIB)
+  const percentage = freeGiB < 16 ? 0.5 : 0.8
+  const floored = floorToStep(freeGiB * percentage, CACHE_CAP_STEP_GIB)
   return Math.min(CACHE_CAP_MAX_GIB, Math.max(CACHE_CAP_MIN_GIB, floored))
 }
