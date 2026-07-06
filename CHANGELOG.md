@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<a id="v031"></a>
+
+## [0.3.1] - 2026-07-06
+
+The tilecache container now reports its update state in the Container Manager panel. No
+configuration or data-model changes.
+
+### Added
+
+- Update checks for the tilecache container in the Container Manager panel of the Signal K admin
+  UI: an "up to date" badge, a "checked N ago" timestamp, and a "Check now" button for
+  `sk-chart-locker-tilecache`, like the other managed containers. The plugin registers the
+  container with the signalk-container update service on start, checks the GitHub releases of this
+  repository, runs one check right away so the badge populates without waiting for the daily
+  scheduled check, and unregisters on stop. Because the image tag is pinned to the plugin version,
+  "up to date" means the newest Chart Locker release is running; when a newer release exists,
+  updating the plugin in the App Store recreates the container on the new tag. Offline at sea the
+  check returns the last cached result marked offline and never fabricates an update. The badge
+  needs signalk-container 1.20.2 or newer; older versions skip the registration and everything
+  else works unchanged.
+
 <a id="v030"></a>
 
 ## [0.3.0] - 2026-07-05

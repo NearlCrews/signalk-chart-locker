@@ -14,17 +14,18 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.3.0
+## What's new in 0.3.1
 
-The tile cache now rides out slow chart upstreams instead of leaving blank areas on the
-chartplotter. A per-source timeout backs off from 20 to 80 seconds while an upstream keeps timing
-out and recovers once it has been quiet, a timed-out fetch is retried once, and tile downloads keep
-running in the container even when the browser gives up, so blank areas fill in and self-heal as
-the map is panned. A slow source serves its cached tiles immediately and refreshes them in the
-background, and `/cache/stats` reports per-source upstream health so a client can surface a
-degraded upstream instead of blank tiles.
+The Container Manager panel in the Signal K admin UI now shows update state for the tilecache
+container: an "up to date" badge, a "checked N ago" timestamp, and a "Check now" button, like the
+other managed containers. The check reads the GitHub releases of this repository, and because the
+container image tag is pinned to the plugin version, "update available" means a newer Chart Locker
+release exists: update the plugin in the App Store and the container is recreated on the new tag.
+Offline at sea the check reports the last cached result and never fabricates an update. The badge
+needs `signalk-container` 1.20.2 or newer; older versions skip it and everything else works
+unchanged.
 
-See the [changelog](CHANGELOG.md#v030) for the full list.
+See the [changelog](CHANGELOG.md#v031) for the full list.
 
 ## What it does
 
@@ -37,6 +38,14 @@ HTTP caching semantics.
 The plugin side is thin by design. It resolves the `signalk-container` manager, starts the
 tilecache container, and exposes the regions and chart-management HTTP routes. All tile-cache
 compute lives in the container.
+
+The tilecache container also reports its update state in the `signalk-container` Container Manager
+panel: an "up to date" badge, a "checked N ago" timestamp, and a "Check now" button. The check
+reads the GitHub releases of this repository, and because the container image tag is pinned to the
+plugin version, "update available" means a newer Chart Locker release exists: update the plugin in
+the App Store and the container is recreated on the new tag. Offline at sea the check reports the
+last cached result and never fabricates an update. The badge needs `signalk-container` 1.20.2 or
+newer; older versions skip the registration and everything else works unchanged.
 
 When Chart Locker is absent, the Binnacle chartplotter falls back to direct upstream sources for
 tiles. A standalone install of Binnacle is unaffected.
@@ -66,8 +75,9 @@ tiles. A standalone install of Binnacle is unaffected.
 
 - Signal K server 2.x.
 - Node.js >= 20.3.
-- [signalk-container](https://www.npmjs.com/package/signalk-container) >= 1.20.0, installed and
-  running. The companion delegates all container lifecycle to it.
+- [signalk-container](https://www.npmjs.com/package/signalk-container) >= 1.20.2, installed and
+  running. The companion delegates all container lifecycle to it. Versions before 1.20.2 still
+  run the plugin, just without the Container Manager update badge.
 - A container runtime (Podman or Docker) accessible to the Signal K server process.
 - The [Binnacle Chartplotter](https://www.npmjs.com/package/signalk-binnacle) for the regions
   and chart-management panels.
