@@ -15,11 +15,13 @@ const POLL_INTERVAL_MS = 500
 const MAX_RETRIES = 3
 const RETRY_DELAY_MS = 1000
 
+// Each attempt gets its own timeout signal, so a slow attempt's timeout does not eat into the
+// budget of the retries that follow it.
 async function fetchWithRetry (url: string, options: RequestInit, fetchImpl: typeof fetch): Promise<Response> {
   let lastError: unknown
   for (let i = 0; i < MAX_RETRIES; i++) {
     try {
-      const res = await fetchImpl(url, options)
+      const res = await fetchImpl(url, { ...options, signal: AbortSignal.timeout(CONTAINER_FETCH_TIMEOUT_MS) })
       if (res.status >= 500) {
         throw new Error(`Server error: ${res.status}`)
       }
@@ -43,16 +45,13 @@ export async function warmRegion (
     const start = await fetchWithRetry(`http://${address}/warm`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(req),
-      signal: AbortSignal.timeout(CONTAINER_FETCH_TIMEOUT_MS)
+      body: JSON.stringify(req)
     }, fetchImpl)
     if (!start.ok) return null
     const { jobId } = (await start.json()) as { jobId: string }
     // Poll briefly so the caller learns whether the warm was all-errors (offline) for its backoff decision.
     for (let i = 0; i < POLL_ATTEMPTS; i++) {
-      const status = await fetchImpl(`http://${address}/warm/${encodeURIComponent(jobId)}`, {
-        signal: AbortSignal.timeout(CONTAINER_FETCH_TIMEOUT_MS)
-      })
+      const status = await fetchWithRetry(`http://${address}/warm/${encodeURIComponent(jobId)}`, {}, fetchImpl)
       if (status.status === 404) return null
       const snap = (await status.json()) as { errors: number, total: number, state: string }
       if (snap.state !== 'running') return { errors: snap.errors, total: snap.total }

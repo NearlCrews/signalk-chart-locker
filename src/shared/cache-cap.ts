@@ -14,6 +14,13 @@ export const CACHE_CAP_MAX_GIB = 32
 export const CACHE_CAP_STEP_GIB = 4
 /** The cap used when free space cannot be detected, in GiB. A multiple of the step. */
 export const CACHE_CAP_STATIC_DEFAULT_GIB = 8
+/** Below this much free space, the more conservative percentage applies, to leave more headroom on a
+ *  small disk. */
+export const CACHE_CAP_LOW_FREE_THRESHOLD_GIB = 16
+/** Percentage of free space used at or above the low-free threshold. */
+export const CACHE_CAP_DEFAULT_PERCENTAGE = 0.8
+/** Percentage of free space used below the low-free threshold. */
+export const CACHE_CAP_LOW_FREE_PERCENTAGE = 0.5
 
 /**
  * Round a value down to the nearest multiple of `step`, never below zero. A non-finite value or a
@@ -42,7 +49,7 @@ export function snapToStep (value: number, step: number): number {
  */
 export function deriveDefaultCapGiB (freeGiB: number): number {
   if (!Number.isFinite(freeGiB)) return CACHE_CAP_MIN_GIB
-  const percentage = freeGiB < 16 ? 0.5 : 0.8
+  const percentage = freeGiB < CACHE_CAP_LOW_FREE_THRESHOLD_GIB ? CACHE_CAP_LOW_FREE_PERCENTAGE : CACHE_CAP_DEFAULT_PERCENTAGE
   const floored = floorToStep(freeGiB * percentage, CACHE_CAP_STEP_GIB)
   return Math.min(CACHE_CAP_MAX_GIB, Math.max(CACHE_CAP_MIN_GIB, floored))
 }

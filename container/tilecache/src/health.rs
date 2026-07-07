@@ -5,7 +5,7 @@
 //! escalates the timeout for that source alone rather than raising it globally.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::Mutex;
 
 /// The hard ceiling on the adaptive timeout, regardless of the base or the streak.
 const MAX_TIMEOUT_MS: u64 = 90_000;
@@ -34,25 +34,21 @@ pub struct HealthSnapshot {
 /// held across an await.
 pub struct UpstreamHealth {
     base_ms: u64,
-    inner: RwLock<HashMap<String, SourceHealth>>,
+    inner: Mutex<HashMap<String, SourceHealth>>,
 }
 
 impl UpstreamHealth {
     pub fn new(base_ms: u64) -> Self {
         Self {
             base_ms,
-            inner: RwLock::new(HashMap::new()),
+            inner: Mutex::new(HashMap::new()),
         }
     }
 
-    // The critical sections are infallible map and arithmetic operations, so the lock is never poisoned;
+    // The critical sections are infallible map and arithmetic operations, so the mutex is never poisoned;
     // recover the guard on a theoretical poison rather than cascade a panic.
-    fn map_read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, SourceHealth>> {
-        self.inner.read().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn map_write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, SourceHealth>> {
-        self.inner.write().unwrap_or_else(|e| e.into_inner())
+    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<String, SourceHealth>> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     // The schedule for a given streak: `base << streak`, clamped to the ceiling. Shared by `timeout_ms`
@@ -63,13 +59,13 @@ impl UpstreamHealth {
 
     /// The current timeout for a source. An unknown source runs at the base.
     pub fn timeout_ms(&self, id: &str) -> u64 {
-        let streak = self.map_read().get(id).map(|h| h.streak).unwrap_or(0);
+        let streak = self.map().get(id).map(|h| h.streak).unwrap_or(0);
         self.schedule(streak)
     }
 
     /// Record a timed-out fetch: bump the streak (capped) and stamp the time.
     pub fn record_timeout(&self, id: &str, now: i64) {
-        let mut map = self.map_write();
+        let mut map = self.map();
         let entry = map.entry(id.to_string()).or_insert(SourceHealth {
             streak: 0,
             last_timeout_at: now,
@@ -83,7 +79,7 @@ impl UpstreamHealth {
     /// stays sticky, so a source that genuinely needs a long timeout does not oscillate back to the base
     /// after each success.
     pub fn record_success(&self, id: &str, now: i64) {
-        let mut map = self.map_write();
+        let mut map = self.map();
         if let Some(h) = map.get(id) {
             if now - h.last_timeout_at >= RECOVERY_SECS {
                 map.remove(id);
@@ -93,12 +89,12 @@ impl UpstreamHealth {
 
     /// True when the source has a live escalation (streak greater than zero).
     pub fn is_slow(&self, id: &str) -> bool {
-        self.map_read().get(id).map(|h| h.streak > 0).unwrap_or(false)
+        self.map().get(id).map(|h| h.streak > 0).unwrap_or(false)
     }
 
     /// A snapshot of every source with a live health entry, for the stats route.
     pub fn snapshot(&self) -> Vec<HealthSnapshot> {
-        self.map_read()
+        self.map()
             .iter()
             .map(|(source, h)| HealthSnapshot {
                 source: source.clone(),

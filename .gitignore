@@ -24,3 +24,4 @@ container/storage-spike/data/
 
 # Subagent-driven-development scratch (briefs, reports, diffs, ledger)
 .superpowers/
+.aider*
