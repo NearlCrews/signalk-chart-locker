@@ -14,18 +14,15 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.3.1
+## What's new in 0.4.0
 
-The Container Manager panel in the Signal K admin UI now shows update state for the tilecache
-container: an "up to date" badge, a "checked N ago" timestamp, and a "Check now" button, like the
-other managed containers. The check reads the GitHub releases of this repository, and because the
-container image tag is pinned to the plugin version, "update available" means a newer Chart Locker
-release exists: update the plugin in the App Store and the container is recreated on the new tag.
-Offline at sea the check reports the last cached result and never fabricates an update. The badge
-needs `signalk-container` 1.20.2 or newer; older versions skip it and everything else works
-unchanged.
+Dependency currency and hardening pass: the tilecache container's Rust dependencies (axum,
+reqwest, rusqlite, sha2) and the plugin's build tooling (Babel, `@types/node`) are updated to
+their current major versions, and the egress SSRF guard now has a regression test proving it
+rejects a loopback-resolving host through the real request path. No configuration or data-model
+changes.
 
-See the [changelog](CHANGELOG.md#v031) for the full list.
+See the [changelog](CHANGELOG.md#v040) for the full list.
 
 ## What it does
 

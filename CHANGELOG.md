@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<a id="v040"></a>
+
+## [0.4.0] - 2026-07-07
+
+Dependency currency and hardening pass for the tilecache container and the Node plugin build
+tooling. No configuration or data-model changes.
+
+### Changed
+
+- Updated the tilecache container's Rust dependencies to their current major versions: axum,
+  reqwest, rusqlite, and sha2. The egress fetch path now uses reqwest's current TLS defaults (the
+  platform certificate verifier backed by the runtime's system CA bundle) in place of the prior
+  pinned root set.
+- Updated the plugin's build tooling to its current major versions: Babel and `@types/node`.
+
+### Added
+
+- A regression test proving the egress SSRF guard still rejects a loopback-resolving host through
+  the real request path, not just the resolver in isolation.
+
 <a id="v031"></a>
 
 ## [0.3.1] - 2026-07-06
