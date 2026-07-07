@@ -59,9 +59,18 @@ pub(crate) const TOUCH_THROTTLE_SECS: i64 = 3600;
 /// The strong content-address ETag served to the browser. Shared with the style proxy so the two
 /// content-address minters cannot diverge.
 pub(crate) fn strong_etag(body: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut h = Sha256::new();
     h.update(body);
-    format!("\"{:x}\"", h.finalize())
+    let digest = h.finalize();
+    let mut etag = String::with_capacity(digest.len() * 2 + 2);
+    etag.push('"');
+    for byte in &digest {
+        etag.push(HEX[(byte >> 4) as usize] as char);
+        etag.push(HEX[(byte & 0xf) as usize] as char);
+    }
+    etag.push('"');
+    etag
 }
 
 /// Log a cache write that failed for a reason other than a graceful disk-full degrade, so a real DB
@@ -499,6 +508,27 @@ mod tests {
     use tempfile::NamedTempFile;
     use tokio::net::TcpListener;
 
+    #[test]
+    fn strong_etag_is_a_quoted_64_char_lowercase_hex_digest() {
+        // Known SHA-256 vectors, so the content-address ETag stays byte-identical across the sha2
+        // bump (digest output moved to a hybrid-array type with no LowerHex, forcing manual hex).
+        assert_eq!(
+            strong_etag(b""),
+            "\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\""
+        );
+        let etag = strong_etag(b"abc");
+        assert_eq!(
+            etag,
+            "\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\""
+        );
+        assert_eq!(etag.len(), 66);
+        let inner = &etag[1..etag.len() - 1];
+        assert_eq!(inner.len(), 64);
+        assert!(inner
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
     // Bind an ephemeral loopback port, serve the router in the background, and pause briefly so the
     // listener is accepting before the first request.
     async fn serve_router(app: Router) -> SocketAddr {
@@ -515,7 +545,7 @@ mod tests {
         let h = hits.clone();
         let app = Router::new()
             .route(
-                "/img/:z/:x/:y",
+                "/img/{z}/{x}/{y}",
                 get(move || {
                     let h = h.clone();
                     async move {
@@ -594,7 +624,7 @@ mod tests {
     ) -> SocketAddr {
         let h = hits.clone();
         let app = Router::new().route(
-            "/img/:z/:x/:y",
+            "/img/{z}/{x}/{y}",
             get(move || {
                 let h = h.clone();
                 async move {

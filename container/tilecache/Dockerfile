@@ -18,6 +18,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --bin tilecache \
  && cp target/release/tilecache /tilecache
 
+# Egress TLS uses rustls-platform-verifier: it reads the runtime base image's CA bundle through
+# rustls-native-certs (/etc/ssl/certs, from ca-certificates, which distroless/cc-debian12 ships), with
+# a bundled webpki-root-certs fallback if that is absent. Currently fine on this base. If the runtime
+# base is ever swapped to a CA-less image (distroless/static or scratch), egress TLS would fail
+# silently, so keep a CA bundle in whatever runtime base replaces this one.
 FROM gcr.io/distroless/cc-debian12 AS runtime
 COPY --from=builder /tilecache /tilecache
 EXPOSE 8080

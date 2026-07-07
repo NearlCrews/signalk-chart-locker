@@ -805,11 +805,11 @@ mod tests {
     async fn stub() -> SocketAddr {
         let app = Router::new()
             .route(
-                "/img/:z/:x/:y",
+                "/img/{z}/{x}/{y}",
                 get(|| async { ([(header::CONTENT_TYPE, "image/png")], vec![1u8, 2, 3, 4]) }),
             )
             .route(
-                "/missing/:z/:x/:y",
+                "/missing/{z}/{x}/{y}",
                 get(|| async { axum::http::StatusCode::NOT_FOUND }),
             );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1116,7 +1116,7 @@ mod tests {
     async fn concurrent_job_cap_rejects_excess_starts() {
         // Use a slow stub so all MAX_ACTIVE_WARM_JOBS jobs stay Running while we attempt the extra one.
         let app = axum::Router::new().route(
-            "/slow/:z/:x/:y",
+            "/slow/{z}/{x}/{y}",
             get(|| async {
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 ([(header::CONTENT_TYPE, "image/png")], vec![1u8, 2, 3, 4])
@@ -1216,7 +1216,7 @@ mod tests {
             .route("/tiles.json", get(move || async move {
                 ([(header::CONTENT_TYPE, "application/json")], format!(r#"{{"tiles":["http://{a}/t/{{z}}/{{x}}/{{y}}.pbf"],"maxzoom":14}}"#))
             }))
-            .route("/t/:z/:x/:y", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![8u8, 8, 8, 8]) }));
+            .route("/t/{z}/{x}/{y}", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![8u8, 8, 8, 8]) }));
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -1316,9 +1316,9 @@ mod tests {
             .route("/tiles.json", get(move || async move {
                 ([(header::CONTENT_TYPE, "application/json")], format!(r#"{{"tiles":["http://{a}/t/{{z}}/{{x}}/{{y}}.pbf"],"maxzoom":14}}"#))
             }))
-            .route("/t/:z/:x/:y", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![8u8, 8, 8, 8]) }))
-            .route("/fonts/:fontstack/:range", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![7u8, 7, 7]) }))
-            .route("/sprites/:name", get(|| async { ([(header::CONTENT_TYPE, "application/json")], r#"{"ok":1}"#) }));
+            .route("/t/{z}/{x}/{y}", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![8u8, 8, 8, 8]) }))
+            .route("/fonts/{fontstack}/{range}", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![7u8, 7, 7]) }))
+            .route("/sprites/{name}", get(|| async { ([(header::CONTENT_TYPE, "application/json")], r#"{"ok":1}"#) }));
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });

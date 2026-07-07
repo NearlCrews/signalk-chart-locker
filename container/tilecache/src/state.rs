@@ -161,7 +161,7 @@ impl AppState {
                 allow_private: knobs.allow_private_egress,
             }))
             .build()
-            .expect("the rustls HTTP client builds with static webpki roots");
+            .expect("the rustls HTTP client builds with the platform certificate verifier");
         // Captured before the struct literal moves `knobs` into its field.
         let cap_bytes = knobs.cap_bytes;
         let scroll_ttl_secs = knobs.scroll_ttl_secs;
@@ -292,4 +292,76 @@ pub fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppState, FetchError, GuardedResolver, Knobs};
+    use crate::cache::TileCache;
+    use reqwest::dns::{Name, Resolve};
+    use std::net::SocketAddr;
+    use std::str::FromStr;
+    use std::sync::Arc;
+    use tempfile::NamedTempFile;
+
+    // The SSRF DNS-rebind guard must drop any looked-up address that lands in a forbidden range, so
+    // an allowlisted hostname that resolves (or rebinds) to loopback or a private IP cannot turn the
+    // tokenless proxy into an SSRF pivot. `localhost` resolves only to loopback (127.0.0.1 or ::1).
+    #[tokio::test]
+    async fn guarded_resolver_drops_loopback_but_keeps_it_when_private_is_allowed() {
+        let guarded = GuardedResolver {
+            allow_private: false,
+        };
+        let filtered: Vec<SocketAddr> = guarded
+            .resolve(Name::from_str("localhost").unwrap())
+            .await
+            .expect("the lookup itself succeeds; the guard filters its results")
+            .collect();
+        assert!(
+            filtered.is_empty(),
+            "loopback must be filtered out, got {filtered:?}"
+        );
+
+        // The dev/test escape hatch keeps the loopback address, proving the filter (not a failed
+        // lookup) is what emptied the guarded result above.
+        let unguarded = GuardedResolver {
+            allow_private: true,
+        };
+        let kept: Vec<SocketAddr> = unguarded
+            .resolve(Name::from_str("localhost").unwrap())
+            .await
+            .expect("the lookup succeeds")
+            .collect();
+        assert!(
+            !kept.is_empty(),
+            "allow_private must keep the loopback address"
+        );
+    }
+
+    // End to end through the real shipped egress entry point: AppState::guarded_get carries both SSRF
+    // layers (the literal-IP pre-check and the guarded DNS resolver). A host that resolves only to
+    // loopback hands the connector zero addresses, so the guarded fetch fails as a Transport error, not
+    // a Timeout. Driving guarded_get (not a hand-built client) proves the guard the container actually
+    // ships rejects the loopback host.
+    #[tokio::test]
+    async fn a_client_using_the_guarded_resolver_rejects_a_loopback_host() {
+        let db = NamedTempFile::new().unwrap();
+        let cache = Arc::new(TileCache::open(db.path()).unwrap());
+        let state = AppState::new(
+            cache,
+            Knobs {
+                allow_private_egress: false,
+                ..Default::default()
+            },
+        );
+        let err = state
+            .guarded_get("http://localhost/", None, None)
+            .await
+            .expect_err("guarded_get must reject a loopback-resolving host");
+        assert_eq!(
+            err,
+            FetchError::Transport,
+            "a host resolving only to loopback yields zero addresses: a Transport failure, not a Timeout"
+        );
+    }
 }

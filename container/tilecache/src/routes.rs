@@ -24,12 +24,12 @@ pub fn app(state: AppState) -> Router {
         .route("/config", post(config))
         .route("/cache/scroll-ttl", post(set_scroll_ttl))
         .route("/cache/clear-scroll", post(clear_scroll))
-        .route("/tile/:source/:z/:x/:y", get(tile))
+        .route("/tile/{source}/{z}/{x}/{y}", get(tile))
         .route("/warm", post(warm_start))
-        .route("/warm/:job_id", get(warm_status))
-        .route("/warm/:job_id/cancel", post(warm_cancel))
+        .route("/warm/{job_id}", get(warm_status))
+        .route("/warm/{job_id}/cancel", post(warm_cancel))
         .route(
-            "/cache/region/:region_id",
+            "/cache/region/{region_id}",
             axum::routing::get(region_bytes_route).delete(delete_region_route),
         )
         .merge(crate::style::style_routes())
@@ -379,7 +379,7 @@ mod tests {
     async fn spawn_stub(hits: Arc<AtomicUsize>) -> SocketAddr {
         let h = hits.clone();
         let stub = Router::new().route(
-            "/img/:z/:x/:y",
+            "/img/{z}/{x}/{y}",
             get(move || {
                 let h = h.clone();
                 async move {
@@ -684,7 +684,7 @@ mod tests {
         use axum::routing::get as aget;
         // Slow stub keeps jobs in Running state long enough to fill the cap.
         let slow = Router::new().route(
-            "/slow/:z/:x/:y",
+            "/slow/{z}/{x}/{y}",
             aget(|| async {
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 ([(header::CONTENT_TYPE, "image/png")], vec![1u8])

@@ -33,7 +33,9 @@ module.exports = {
         exclude: /node_modules/,
         options: {
           presets: [
-            ['@babel/preset-typescript', { isTSX: true, allExtensions: true }],
+            // Babel 8 detects JSX from the file extension (.tsx enables it,
+            // .ts does not), so the old isTSX/allExtensions options are gone.
+            '@babel/preset-typescript',
             ['@babel/preset-react', { runtime: 'automatic' }]
           ]
         }

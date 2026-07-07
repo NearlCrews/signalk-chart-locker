@@ -21,13 +21,13 @@ use std::sync::atomic::Ordering;
 
 pub fn style_routes() -> Router<AppState> {
     Router::new()
-        .route("/style/:source", get(style_doc))
-        .route("/style/:source/glyphs/:fontstack/:range", get(glyphs))
-        .route("/style/:source/sprite.json", get(sprite_json))
-        .route("/style/:source/sprite.png", get(sprite_png))
-        .route("/style/:source/sprite@2x.json", get(sprite_2x_json))
-        .route("/style/:source/sprite@2x.png", get(sprite_2x_png))
-        .route("/style/:source/tiles/:name/:z/:x/:y", get(vector_tile))
+        .route("/style/{source}", get(style_doc))
+        .route("/style/{source}/glyphs/{fontstack}/{range}", get(glyphs))
+        .route("/style/{source}/sprite.json", get(sprite_json))
+        .route("/style/{source}/sprite.png", get(sprite_png))
+        .route("/style/{source}/sprite@2x.json", get(sprite_2x_json))
+        .route("/style/{source}/sprite@2x.png", get(sprite_2x_png))
+        .route("/style/{source}/tiles/{name}/{z}/{x}/{y}", get(vector_tile))
 }
 
 /// The synthetic cache source for a fontstack's glyph ranges. The fontstack is the canonical DECODED
@@ -680,9 +680,9 @@ mod tests {
                     ([(header::CONTENT_TYPE, "application/json")], format!(r#"{{"tiles":["http://{a}/t/{{z}}/{{x}}/{{y}}.pbf"],"maxzoom":14}}"#))
                 }),
             )
-            .route("/fonts/:fontstack/:range", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![7u8, 7, 7]) }))
-            .route("/sprites/:name", get(|| async { ([(header::CONTENT_TYPE, "application/json")], r#"{"ok":1}"#) }))
-            .route("/t/:z/:x/:y", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![8u8, 8, 8, 8]) }));
+            .route("/fonts/{fontstack}/{range}", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![7u8, 7, 7]) }))
+            .route("/sprites/{name}", get(|| async { ([(header::CONTENT_TYPE, "application/json")], r#"{"ok":1}"#) }))
+            .route("/t/{z}/{x}/{y}", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![8u8, 8, 8, 8]) }));
         tokio::spawn(async move {
             axum::serve(listener, stub).await.unwrap();
         });
