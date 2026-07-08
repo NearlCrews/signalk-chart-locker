@@ -34,6 +34,33 @@ test('pushTilecacheConfig posts the payload to /config and reports success', asy
   assert.ok(posted?.body.includes('"positionWarmBudgetBytes"'))
 })
 
-test('pushTilecacheConfig returns false on a transport failure', async () => {
-  assert.equal(await pushTilecacheConfig('addr:8080', buildSourcePayload(2_147_483_648, 1_073_741_824, 64 * 1024 * 1024, 0), async () => { throw new Error('down') }), false)
+test('pushTilecacheConfig returns false after every retry fails on a transport failure', async () => {
+  let calls = 0
+  const result = await pushTilecacheConfig(
+    'addr:8080',
+    buildSourcePayload(2_147_483_648, 1_073_741_824, 64 * 1024 * 1024, 0),
+    async () => { calls++; throw new Error('down') },
+    async () => {}
+  )
+  assert.equal(result, false)
+  assert.equal(calls, 3, 'every retry attempt ran')
+})
+
+test('pushTilecacheConfig retries a transient failure and succeeds once the container is ready', async () => {
+  // The exact race this retry exists for: a recreated container is not yet accepting connections when
+  // the first attempt lands, and is ready by the time a later attempt runs.
+  let calls = 0
+  const ok: FetchResponse = { ok: true, json: async () => ({}) } as unknown as FetchResponse
+  const result = await pushTilecacheConfig(
+    'addr:8080',
+    buildSourcePayload(2_147_483_648, 1_073_741_824, 64 * 1024 * 1024, 0),
+    async () => {
+      calls++
+      if (calls < 3) throw new Error('connection refused')
+      return ok
+    },
+    async () => {}
+  )
+  assert.equal(result, true)
+  assert.equal(calls, 3, 'succeeded on the third attempt, after two transient failures')
 })

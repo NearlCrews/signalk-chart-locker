@@ -38,17 +38,39 @@ export function buildSourcePayload (
 }
 
 export type PostJson = (url: string, body: string) => Promise<FetchResponse>
+export type Delay = (ms: number) => Promise<void>
 
-/** Push the source allowlist to the container. Returns true on a 2xx, false on any failure. */
+const defaultDelay: Delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+// A recreated container (a version bump changes the image tag, see tilecache-container.ts) can take
+// a few seconds longer to start accepting connections than a warm restart, especially the first time
+// a new image layer needs pulling. doStart calls this exactly once per plugin start with no caller-side
+// retry, so a push that lands in that boot window failed outright and left the container's source
+// allowlist and regions/position-warm budget accounting at zero until the next restart happened to win
+// the race. Three attempts with linear backoff (1s, 2s) covers that window without a caller-side retry.
+const MAX_RETRIES = 3
+const RETRY_DELAY_MS = 1000
+
+/** Push the source allowlist to the container, retrying a transient failure (the container not yet
+ * accepting connections right after it starts) with linear backoff. Returns true on a 2xx from any
+ * attempt, false once every attempt has failed. */
 export async function pushTilecacheConfig (
   address: string,
   payload: TilecacheConfigPayload,
-  postJson: PostJson = (url, body) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(CONTAINER_FETCH_TIMEOUT_MS) })
+  postJson: PostJson = (url, body) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(CONTAINER_FETCH_TIMEOUT_MS) }),
+  delay: Delay = defaultDelay
 ): Promise<boolean> {
-  try {
-    const response = await postJson(`http://${address}/config`, JSON.stringify(payload))
-    return response.ok
-  } catch {
-    return false
+  const url = `http://${address}/config`
+  const body = JSON.stringify(payload)
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const response = await postJson(url, body)
+      if (response.ok) return true
+    } catch {
+      // A thrown fetch (connection refused, timeout) is the boot-window race this retry exists for;
+      // fall through to the backoff below rather than failing on the first attempt.
+    }
+    if (attempt < MAX_RETRIES - 1) await delay(RETRY_DELAY_MS * (attempt + 1))
   }
+  return false
 }
