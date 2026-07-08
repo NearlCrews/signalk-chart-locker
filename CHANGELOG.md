@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<a id="v041"></a>
+
+## [0.4.1] - 2026-07-07
+
+### Fixed
+
+- **Seascape bathymetry tiles.** Bump `signalk-chart-sources` to 0.2.1, which adds the
+  `seascape-dem` and `seascape-vector` catalog entries the Binnacle chartplotter's new bathymetry
+  layer group needs. Every `/tile/seascape-dem/...` and `/tile/seascape-vector/...` request was
+  404ing because the tilecache container's proxy allowlist had no entry for either id.
+
 <a id="v040"></a>
 
 ## [0.4.0] - 2026-07-07

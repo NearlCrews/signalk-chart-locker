@@ -14,15 +14,13 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.4.0
+## What's new in 0.4.1
 
-Dependency currency and hardening pass: the tilecache container's Rust dependencies (axum,
-reqwest, rusqlite, sha2) and the plugin's build tooling (Babel, `@types/node`) are updated to
-their current major versions, and the egress SSRF guard now has a regression test proving it
-rejects a loopback-resolving host through the real request path. No configuration or data-model
-changes.
+Bumps `signalk-chart-sources` to 0.2.1, adding the `seascape-dem` and `seascape-vector` catalog
+entries the Binnacle chartplotter's Seascape bathymetry layer group needs. Without this, every
+Seascape tile request 404ed at the proxy.
 
-See the [changelog](CHANGELOG.md#v040) for the full list.
+See the [changelog](CHANGELOG.md#v041) for the full list.
 
 ## What it does
 
