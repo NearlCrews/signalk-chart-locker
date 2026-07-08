@@ -14,13 +14,14 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.4.1
+## What's new in 0.4.2
 
-Bumps `signalk-chart-sources` to 0.2.1, adding the `seascape-dem` and `seascape-vector` catalog
-entries the Binnacle chartplotter's Seascape bathymetry layer group needs. Without this, every
-Seascape tile request 404ed at the proxy.
+The tile-cache config push (the source allowlist and cache budget accounting) now retries a
+transient failure instead of giving up after one attempt. A container recreated for a version
+bump can take a few seconds longer to accept connections than a warm restart, and a push lost to
+that race left every tile 404ing until the next restart happened to win it.
 
-See the [changelog](CHANGELOG.md#v041) for the full list.
+See the [changelog](CHANGELOG.md#v042) for the full list.
 
 ## What it does
 

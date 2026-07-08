@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<a id="v042"></a>
+
+## [0.4.2] - 2026-07-07
+
+### Fixed
+
+- **A recreated tilecache container could start with an empty tile allowlist.** `doStart` pushes
+  the source allowlist and cache budget accounting to the container exactly once per plugin start,
+  with no retry. A container recreated for a version bump can take a few seconds longer to start
+  accepting connections than a warm restart (the first time a new image layer needs pulling), and a
+  push that landed in that window failed outright, leaving every tile request 404ing and the
+  regions and position-warm budgets at zero until the next restart happened to win the race.
+  `pushTilecacheConfig` now retries a transient failure three times with linear backoff (1s, 2s)
+  before giving up.
+
 <a id="v041"></a>
 
 ## [0.4.1] - 2026-07-07
