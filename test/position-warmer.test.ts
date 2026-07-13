@@ -1,11 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import type { Bbox } from 'signalk-chart-sources'
+import type { LngLatBbox } from 'signalk-chart-sources'
 import { createPositionWarmer } from '../src/runtime/position-warmer.js'
 import { DEFAULT_REGIONS_STORE } from '../src/runtime/regions-store.js'
 import type { RegionsStore, SavedRegion } from '../src/runtime/regions-store.js'
 
-function region (bbox: Bbox): SavedRegion {
+function region (bbox: LngLatBbox): SavedRegion {
   return { id: 'r1', name: 'Test', bbox, sourceIds: [], minzoom: 6, maxzoom: 12, createdAt: 0, lastDownloadedAt: null, bytes: 0, status: 'ready' }
 }
 
@@ -19,7 +19,7 @@ function store (over: Partial<typeof DEFAULT_REGIONS_STORE.positionWarm> = {}): 
 
 test('warms once outside the box, then respects the interval', async () => {
   let clock = 1_000_000
-  const warmed: Array<Bbox> = []
+  const warmed: LngLatBbox[] = []
   const warmer = createPositionWarmer({
     getStore: () => store(),
     warm: async (bbox) => { warmed.push(bbox); return { errors: 0, total: 4 } },
@@ -65,7 +65,7 @@ test('backs off after an all-errors warm', async () => {
 })
 
 test('passes both antimeridian boxes in one warm job', async () => {
-  let additional: Bbox | undefined
+  let additional: LngLatBbox | undefined
   const warmer = createPositionWarmer({
     getStore: () => store({ radiusMeters: 5000 }),
     warm: async (_bbox, _sources, _minzoom, _maxzoom, _regionId, additionalBbox) => {
@@ -78,4 +78,46 @@ test('passes both antimeridian boxes in one warm job', async () => {
   await Promise.resolve()
   assert.ok(additional)
   assert.equal(additional[0], -180)
+})
+
+test('does nothing when no position-warm sources are selected', async () => {
+  let calls = 0
+  const warmer = createPositionWarmer({
+    getStore: () => store({ sources: [] }),
+    warm: async () => { calls++; return { errors: 0, total: 0 } }
+  })
+  warmer.onPosition({ latitude: 37.5, longitude: -121.5 })
+  await Promise.resolve()
+  assert.equal(calls, 0)
+})
+
+test('retries a failed warm after backoff even when the vessel has not moved', async () => {
+  let clock = 1_000_000
+  let calls = 0
+  const warmer = createPositionWarmer({
+    getStore: () => store(),
+    warm: async () => { calls++; return calls === 1 ? null : { errors: 0, total: 1 } },
+    now: () => clock,
+    backoffSecs: 60
+  })
+  const position = { latitude: 37.5, longitude: -121.5 }
+  warmer.onPosition(position)
+  await Promise.resolve()
+  clock += 61_000
+  warmer.onPosition(position)
+  await Promise.resolve()
+  assert.equal(calls, 2)
+})
+
+test('ignores malformed and out-of-world positions', async () => {
+  let calls = 0
+  const warmer = createPositionWarmer({
+    getStore: () => store(),
+    warm: async () => { calls++; return { errors: 0, total: 1 } }
+  })
+  for (const position of [null, { latitude: Number.NaN, longitude: 0 }, { latitude: 91, longitude: 0 }, { latitude: 0, longitude: 181 }]) {
+    warmer.onPosition(position as never)
+  }
+  await Promise.resolve()
+  assert.equal(calls, 0)
 })

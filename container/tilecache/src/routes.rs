@@ -183,7 +183,41 @@ struct ConfigBody {
 /// evicts unpinned scroll tiles, so the pinned set can sit above the new R until a re-download or a
 /// per-region delete converges it. The physical total stays at or below the cap throughout. This is
 /// documented and acceptable, not a bug.
-async fn config(State(st): State<AppState>, Json(body): Json<ConfigBody>) -> StatusCode {
+async fn config(State(st): State<AppState>, Json(body): Json<ConfigBody>) -> Response {
+    let cap = body
+        .cap_bytes
+        .unwrap_or_else(|| st.live_cap_bytes.load(Ordering::Relaxed));
+    let regions = body
+        .regions_budget_bytes
+        .unwrap_or_else(|| st.live_regions_budget.load(Ordering::Relaxed));
+    let position = body
+        .position_warm_budget_bytes
+        .unwrap_or_else(|| st.live_position_warm_budget.load(Ordering::Relaxed));
+    let ttl = body
+        .scroll_ttl_secs
+        .unwrap_or_else(|| st.live_scroll_ttl_secs.load(Ordering::Relaxed));
+    let mut ids = std::collections::HashSet::new();
+    let invalid_sources = body.sources.iter().any(|source| {
+        !source.is_valid(st.knobs.allow_private_egress) || !ids.insert(source.id.as_str())
+    });
+    let invalid_public_base = body.public_base.as_ref().is_some_and(|base| {
+        !base.starts_with('/')
+            || base.starts_with("//")
+            || base.len() > 512
+            || base.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+            || base.contains(['\\', '?', '#'])
+    });
+    if invalid_sources
+        || invalid_public_base
+        || cap <= 0
+        || regions < 0
+        || regions > cap
+        || position < 0
+        || position > regions
+        || !(0..=365 * 86_400).contains(&ttl)
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     let source_count = body.sources.len();
     {
         let mut map = st.sources.write().await;
@@ -213,7 +247,7 @@ async fn config(State(st): State<AppState>, Json(body): Json<ConfigBody>) -> Sta
     st.configured.store(true, Ordering::Relaxed);
     st.config_pushes.fetch_add(1, Ordering::Relaxed);
     eprintln!("event=config_push_applied sources={source_count}");
-    StatusCode::NO_CONTENT
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Deserialize)]
@@ -225,6 +259,9 @@ struct ScrollTtlBody {
 /// POST /cache/scroll-ttl: set only the live scroll TTL. A dedicated route so a live TTL edit does
 /// not re-push the source allowlist or clear the learned style state, which POST /config does.
 async fn set_scroll_ttl(State(st): State<AppState>, Json(body): Json<ScrollTtlBody>) -> StatusCode {
+    if !(0..=365 * 86_400).contains(&body.ttl_secs) {
+        return StatusCode::BAD_REQUEST;
+    }
     st.live_scroll_ttl_secs
         .store(body.ttl_secs, Ordering::Relaxed);
     StatusCode::NO_CONTENT
@@ -304,6 +341,10 @@ async fn delete_region_route(
         || region_id == crate::state::BASEMAP_ASSETS_REGION_ID
     {
         return StatusCode::FORBIDDEN;
+    }
+    if !crate::warm::cancel_region_warms(&st, &region_id).await {
+        eprintln!("event=region_delete_cancel_timeout region_id={region_id}");
+        return StatusCode::CONFLICT;
     }
     let cache = st.cache.clone();
     let cap = st.live_cap_bytes.load(Ordering::Relaxed);
@@ -387,6 +428,7 @@ async fn warm_start(State(st): State<AppState>, Json(body): Json<WarmBody>) -> R
             maxzoom: body.maxzoom,
             vector_maxzoom: None,
             bounds: None,
+            coverage: None,
             attribution: String::new(),
         })
         .collect();
@@ -421,6 +463,11 @@ async fn warm_start(State(st): State<AppState>, Json(body): Json<WarmBody>) -> R
             st.warm_rejections.fetch_add(1, Ordering::Relaxed);
             eprintln!("event=warm_rejected reason=job_limit");
             StatusCode::TOO_MANY_REQUESTS.into_response()
+        }
+        Err(crate::warm::StartError::RegionBusy) => {
+            st.warm_rejections.fetch_add(1, Ordering::Relaxed);
+            eprintln!("event=warm_rejected reason=region_busy");
+            StatusCode::CONFLICT.into_response()
         }
     }
 }
@@ -512,6 +559,52 @@ mod tests {
         assert!(body.contains("\"status\":\"ok\""));
         assert!(body.contains("\"databaseReady\":true"));
         assert!(body.contains("\"configured\":false"));
+    }
+
+    #[tokio::test]
+    async fn config_rejects_invalid_sources_and_budget_relationships_without_mutating_state() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_stub(hits).await;
+        let db = NamedTempFile::new().unwrap();
+        let state = dev_state(&db);
+        let router = app(state.clone());
+        let valid = router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(valid.status(), StatusCode::NO_CONTENT);
+
+        let invalid_source = r#"{"sources":[{"id":"s","title":"S","tileSize":256,"minzoom":0,"maxzoom":18,"attribution":"","upstream":{"mode":"xyz","urlTemplate":"file:///tmp/{z}/{x}/{y}"}}}]}"#.to_string();
+        let invalid = [
+            r#"{"sources":[],"capBytes":0}"#.to_string(),
+            r#"{"sources":[],"capBytes":100,"regionsBudgetBytes":101}"#.to_string(),
+            r#"{"sources":[],"capBytes":100,"regionsBudgetBytes":90,"positionWarmBudgetBytes":91}"#
+                .to_string(),
+            r#"{"sources":[],"scrollTtlSecs":-1}"#.to_string(),
+            r#"{"sources":[],"publicBase":"https://example.test/plugins/p"}"#.to_string(),
+            invalid_source,
+        ];
+        for body in invalid {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post("/config")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        assert_eq!(state.config_pushes.load(Ordering::Relaxed), 1);
+        assert!(state.sources.read().await.contains_key("s"));
     }
 
     #[tokio::test]
@@ -639,14 +732,15 @@ mod tests {
             )
             .await
             .unwrap();
-        // Longitude-inverted bbox (west >= east) triggers BadBbox.
+        // Equal west and east has zero area and triggers BadBbox. West greater than east is a valid
+        // antimeridian-crossing box.
         let bad_bbox = router
             .clone()
             .oneshot(
                 Request::post("/warm")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"sources":["s"],"bbox":[10.0,-1.0,-10.0,1.0],"minzoom":0,"maxzoom":0}"#,
+                        r#"{"sources":["s"],"bbox":[10.0,-1.0,10.0,1.0],"minzoom":0,"maxzoom":0}"#,
                     ))
                     .unwrap(),
             )

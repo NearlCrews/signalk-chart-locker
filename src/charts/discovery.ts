@@ -3,7 +3,7 @@
  * it is decoded, so a symlink or a path that escapes the directory is rejected. */
 
 import { type FSWatcher, watch } from 'node:fs'
-import { readdir, realpath, stat } from 'node:fs/promises'
+import { mkdir, readdir, realpath, stat } from 'node:fs/promises'
 import { join, sep } from 'node:path'
 import { nameToId } from './chart-id.js'
 import { ChartRegistry, DEFAULT_SCALE } from './chart-registry.js'
@@ -73,16 +73,23 @@ async function performRescanCharts (deps: DiscoveryDeps): Promise<void> {
     // only re-run the namer, so a rescan (a watch event, or an override edit that renames without
     // touching the file) does not re-parse every unchanged archive.
     let mtimeMs: number | undefined
+    let mtimeNs: bigint | undefined
+    let device: bigint | undefined
+    let inode: bigint | undefined
     let bytes: number | undefined
     try {
-      const st = await stat(filePath)
-      mtimeMs = st.mtimeMs
-      bytes = st.size
+      const st = await stat(filePath, { bigint: true })
+      mtimeMs = Number(st.mtimeMs)
+      mtimeNs = st.mtimeNs
+      device = st.dev
+      inode = st.ino
+      bytes = Number(st.size)
     } catch { /* fall through to a fresh decode */ }
 
     const existing = deps.registry.record(id)
     let decoded: DecodedPmtiles
-    if (existing !== undefined && mtimeMs !== undefined && existing.mtimeMs === mtimeMs && existing.bytes === bytes) {
+    if (existing !== undefined && mtimeNs !== undefined && existing.mtimeNs === mtimeNs &&
+        existing.device === device && existing.inode === inode && existing.bytes === bytes) {
       decoded = existing.decoded
     } else {
       const result = await decode(filePath)
@@ -107,6 +114,9 @@ async function performRescanCharts (deps: DiscoveryDeps): Promise<void> {
       scale: naming.scale,
       decoded,
       mtimeMs,
+      mtimeNs,
+      device,
+      inode,
       bytes
     })
   }
@@ -136,21 +146,54 @@ export interface DiscoveryHandle {
 }
 
 export async function startDiscovery (deps: DiscoveryDeps): Promise<DiscoveryHandle> {
+  try {
+    await mkdir(deps.chartsDir, { recursive: true })
+  } catch (error) {
+    deps.onError?.(`cannot create ${deps.chartsDir}: ${error instanceof Error ? error.message : String(error)}`)
+  }
   await rescanCharts(deps)
   const debounceMs = deps.debounceMs ?? 300
   let timer: NodeJS.Timeout | undefined
+  let retryTimer: NodeJS.Timeout | undefined
   let watcher: FSWatcher | undefined
-  try {
-    watcher = watch(deps.chartsDir, () => {
-      if (timer) clearTimeout(timer)
-      timer = setTimeout(() => { rescanCharts(deps).catch(() => {}) }, debounceMs)
-    })
-  } catch (err) {
-    deps.onError?.(`cannot watch ${deps.chartsDir}: ${err instanceof Error ? err.message : String(err)}`)
+  let stopped = false
+  const scheduleRetry = (): void => {
+    if (stopped || retryTimer !== undefined) return
+    retryTimer = setTimeout(() => {
+      retryTimer = undefined
+      installWatcher()
+    }, 5000)
+    retryTimer.unref()
   }
+  const installWatcher = (): void => {
+    if (stopped || watcher !== undefined) return
+    try {
+      watcher = watch(deps.chartsDir, () => {
+        if (timer) clearTimeout(timer)
+        timer = setTimeout(() => {
+          rescanCharts(deps).catch((error: unknown) => {
+            deps.onError?.(`chart rescan failed: ${error instanceof Error ? error.message : String(error)}`)
+          })
+        }, debounceMs)
+      })
+      watcher.unref()
+      watcher.on('error', (error) => {
+        deps.onError?.(`chart directory watch failed: ${error.message}`)
+        watcher?.close()
+        watcher = undefined
+        scheduleRetry()
+      })
+    } catch (err) {
+      deps.onError?.(`cannot watch ${deps.chartsDir}: ${err instanceof Error ? err.message : String(err)}`)
+      scheduleRetry()
+    }
+  }
+  installWatcher()
   return {
     stop () {
+      stopped = true
       if (timer) clearTimeout(timer)
+      if (retryTimer) clearTimeout(retryTimer)
       watcher?.close()
     }
   }

@@ -7,7 +7,7 @@
 import { join } from 'node:path'
 import { statSync, watch, type FSWatcher } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import type { Bbox } from 'signalk-chart-sources'
+import type { LngLatBbox } from 'signalk-chart-sources'
 import { readJsonState, writeJsonState } from './json-state.js'
 import { nowUnixSecs } from '../shared/time.js'
 
@@ -25,7 +25,7 @@ export type RegionStatus = 'downloading' | 'ready' | 'capped' | 'error' | 'needs
 export interface SavedRegion {
   id: string
   name: string
-  bbox: Bbox
+  bbox: LngLatBbox
   sourceIds: string[]
   minzoom: number
   maxzoom: number
@@ -74,6 +74,85 @@ export function positionWarmBudgetBytes (regionsBudgetBytes: number): number {
 }
 
 const STORE_FILE = 'regions.json'
+const MAX_WARM_ZOOM = 24
+const MAX_SOURCE_IDS = 64
+const MAX_SOURCE_ID_LENGTH = 256
+const MAX_REGION_ID_LENGTH = 128
+const REGION_STATUSES = new Set<RegionStatus>(['downloading', 'ready', 'capped', 'error', 'needs-redownload'])
+
+function isRecord (value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function validBbox (value: unknown): value is LngLatBbox {
+  return Array.isArray(value) && value.length === 4 &&
+    value.every((coordinate) => typeof coordinate === 'number' && Number.isFinite(coordinate)) &&
+    value[0] >= -180 && value[0] <= 180 && value[2] >= -180 && value[2] <= 180 &&
+    value[1] >= -90 && value[1] <= 90 && value[3] >= -90 && value[3] <= 90 &&
+    value[0] !== value[2] && !(value[0] > value[2] && Math.abs(value[0] - value[2]) === 360) && value[1] < value[3]
+}
+
+function validSources (value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= MAX_SOURCE_IDS &&
+    value.every((source) => typeof source === 'string' && source.trim() === source && source.length > 0 && source.length <= MAX_SOURCE_ID_LENGTH) &&
+    new Set(value).size === value.length
+}
+
+function finiteBetween (value: unknown, min: number, max: number): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max
+}
+
+function normalizePositionWarm (value: unknown): PositionWarmSettings {
+  const raw = isRecord(value) ? value : {}
+  const defaults = DEFAULT_REGIONS_STORE.positionWarm
+  return {
+    enabled: typeof raw.enabled === 'boolean' ? raw.enabled : defaults.enabled,
+    radiusMeters: finiteBetween(raw.radiusMeters, 1, 100_000) ? raw.radiusMeters : defaults.radiusMeters,
+    moveThresholdMeters: finiteBetween(raw.moveThresholdMeters, 0, 100_000) ? raw.moveThresholdMeters : defaults.moveThresholdMeters,
+    intervalSecs: finiteBetween(raw.intervalSecs, 60, 86_400) ? raw.intervalSecs : defaults.intervalSecs,
+    baseZoom: typeof raw.baseZoom === 'number' && Number.isInteger(raw.baseZoom) && raw.baseZoom >= 0 && raw.baseZoom <= MAX_WARM_ZOOM
+      ? raw.baseZoom
+      : defaults.baseZoom,
+    sources: validSources(raw.sources) ? [...raw.sources] : [...defaults.sources]
+  }
+}
+
+function normalizeRegions (value: unknown): SavedRegion[] {
+  if (!Array.isArray(value)) return []
+  const ids = new Set<string>()
+  const regions: SavedRegion[] = []
+  for (const raw of value) {
+    if (!isRecord(raw) || typeof raw.id !== 'string' || raw.id.length === 0 || raw.id.length > MAX_REGION_ID_LENGTH || ids.has(raw.id) ||
+        typeof raw.name !== 'string' || raw.name.trim().length === 0 || raw.name.trim().length > 120 ||
+        !validBbox(raw.bbox) || !validSources(raw.sourceIds) || raw.sourceIds.length === 0 ||
+        typeof raw.minzoom !== 'number' || !Number.isInteger(raw.minzoom) || raw.minzoom < 0 || raw.minzoom > MAX_WARM_ZOOM ||
+        typeof raw.maxzoom !== 'number' || !Number.isInteger(raw.maxzoom) || raw.maxzoom < raw.minzoom || raw.maxzoom > MAX_WARM_ZOOM ||
+        !finiteBetween(raw.createdAt, 0, Number.MAX_SAFE_INTEGER) || !Number.isInteger(raw.createdAt) ||
+        !(raw.lastDownloadedAt === null || (finiteBetween(raw.lastDownloadedAt, 0, Number.MAX_SAFE_INTEGER) && Number.isInteger(raw.lastDownloadedAt))) ||
+        !finiteBetween(raw.bytes, 0, Number.MAX_SAFE_INTEGER) || !Number.isInteger(raw.bytes) ||
+        typeof raw.status !== 'string' || !REGION_STATUSES.has(raw.status as RegionStatus)) continue
+    ids.add(raw.id)
+    regions.push({
+      id: raw.id,
+      name: raw.name.trim(),
+      bbox: raw.bbox,
+      sourceIds: [...raw.sourceIds],
+      minzoom: raw.minzoom,
+      maxzoom: raw.maxzoom,
+      createdAt: raw.createdAt,
+      lastDownloadedAt: raw.lastDownloadedAt,
+      bytes: raw.bytes,
+      status: raw.status as RegionStatus
+    })
+  }
+  return regions
+}
+
+function normalizeTtlDays (value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 365
+    ? value
+    : DEFAULT_REGIONS_STORE.cacheScrollTtlDays
+}
 
 /** Detect a v2 shape (top-level `bbox` or `sources`), migrate to the regions list, write back, and
  * return the migrated store. Only called on first load of a v2 file; after write-back the file has
@@ -84,22 +163,19 @@ function migrateV2 (raw: Record<string, unknown>, dataDir: string): RegionsStore
   // existing regions array. The write-back stores only regions and positionWarm, so the top-level
   // bbox, sources, minzoom, and maxzoom are dropped either way.
   const hasRegions = Array.isArray(raw['regions'])
-  const regions: SavedRegion[] = hasRegions ? (raw['regions'] as SavedRegion[]) : []
+  const regions = hasRegions ? normalizeRegions(raw['regions']) : []
   const rawBbox = raw['bbox']
   if (
-    !hasRegions &&
-    Array.isArray(rawBbox) &&
-    rawBbox.length === 4 &&
-    rawBbox.every((n) => typeof n === 'number' && Number.isFinite(n))
+    !hasRegions && validBbox(rawBbox) && validSources(raw['sources']) && raw['sources'].length > 0
   ) {
-    const rawSources = Array.isArray(raw['sources']) ? (raw['sources'] as string[]) : []
-    const rawMinzoom = typeof raw['minzoom'] === 'number' ? raw['minzoom'] : 6
-    const rawMaxzoom = typeof raw['maxzoom'] === 'number' ? raw['maxzoom'] : 12
+    const rawSources = raw['sources']
+    const rawMinzoom = typeof raw['minzoom'] === 'number' && Number.isInteger(raw['minzoom']) && raw['minzoom'] >= 0 && raw['minzoom'] <= MAX_WARM_ZOOM ? raw['minzoom'] : 6
+    const rawMaxzoom = typeof raw['maxzoom'] === 'number' && Number.isInteger(raw['maxzoom']) && raw['maxzoom'] >= rawMinzoom && raw['maxzoom'] <= MAX_WARM_ZOOM ? raw['maxzoom'] : 12
     regions.push({
       id: randomUUID(),
       name: 'Downloaded region',
-      bbox: rawBbox as Bbox,
-      sourceIds: rawSources,
+      bbox: rawBbox,
+      sourceIds: [...rawSources],
       minzoom: rawMinzoom,
       maxzoom: rawMaxzoom,
       createdAt: nowUnixSecs(),
@@ -108,14 +184,10 @@ function migrateV2 (raw: Record<string, unknown>, dataDir: string): RegionsStore
       status: 'needs-redownload'
     })
   }
-  const rawPositionWarm = typeof raw['positionWarm'] === 'object' && raw['positionWarm'] !== null
-    ? raw['positionWarm'] as Partial<PositionWarmSettings>
-    : {}
-  const rawTtl = typeof raw['cacheScrollTtlDays'] === 'number' ? raw['cacheScrollTtlDays'] : DEFAULT_REGIONS_STORE.cacheScrollTtlDays
   const store: RegionsStore = {
     regions,
-    positionWarm: { ...DEFAULT_REGIONS_STORE.positionWarm, ...rawPositionWarm },
-    cacheScrollTtlDays: rawTtl
+    positionWarm: normalizePositionWarm(raw['positionWarm']),
+    cacheScrollTtlDays: normalizeTtlDays(raw['cacheScrollTtlDays'])
   }
   writeJsonState(join(dataDir, STORE_FILE), store)
   return store
@@ -128,15 +200,10 @@ export function loadRegionsStore (dataDir: string): RegionsStore {
   if ('bbox' in parsed || 'sources' in parsed) {
     return migrateV2(parsed, dataDir)
   }
-  const rawRegions = Array.isArray(parsed['regions']) ? (parsed['regions'] as SavedRegion[]) : []
-  const rawPositionWarm = typeof parsed['positionWarm'] === 'object' && parsed['positionWarm'] !== null
-    ? parsed['positionWarm'] as Partial<PositionWarmSettings>
-    : {}
-  const rawTtl = typeof parsed['cacheScrollTtlDays'] === 'number' ? parsed['cacheScrollTtlDays'] : DEFAULT_REGIONS_STORE.cacheScrollTtlDays
   return {
-    regions: rawRegions,
-    positionWarm: { ...DEFAULT_REGIONS_STORE.positionWarm, ...rawPositionWarm },
-    cacheScrollTtlDays: rawTtl
+    regions: normalizeRegions(parsed['regions']),
+    positionWarm: normalizePositionWarm(parsed['positionWarm']),
+    cacheScrollTtlDays: normalizeTtlDays(parsed['cacheScrollTtlDays'])
   }
 }
 

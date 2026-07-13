@@ -768,6 +768,63 @@ impl TileCache {
         Ok(())
     }
 
+    /// Atomically replace `target_region_id` with the fully downloaded staging region. Returns false
+    /// when the resulting pinned set would exceed `budget`; in that case the transaction is rolled back
+    /// and both regions remain unchanged. Tiles no longer referenced by any region are demoted to scroll.
+    pub fn promote_staged_region(
+        &self,
+        staging_region_id: &str,
+        target_region_id: &str,
+        budget: i64,
+    ) -> rusqlite::Result<bool> {
+        let mut inner = self.lock();
+        let pinned_base = inner.pinned_bytes;
+        let freed: i64;
+        {
+            let tx = inner.conn.unchecked_transaction()?;
+            freed = tx.query_row(
+                "SELECT COALESCE(SUM(t.bytes), 0)
+                 FROM region_tiles old JOIN tiles t
+                   ON old.source = t.source AND old.z = t.z AND old.x = t.x AND old.y = t.y
+                 WHERE old.region_id = ?1 AND t.pinned = 1 AND NOT EXISTS (
+                   SELECT 1 FROM region_tiles other
+                   WHERE other.source = old.source AND other.z = old.z
+                     AND other.x = old.x AND other.y = old.y AND other.region_id != ?1
+                 )",
+                params![target_region_id],
+                |row| row.get(0),
+            )?;
+            let projected = pinned_base - freed;
+            if projected > budget {
+                return Ok(false);
+            }
+            tx.execute(
+                "UPDATE tiles SET pinned = 0
+                 WHERE pinned = 1 AND (source, z, x, y) IN (
+                   SELECT old.source, old.z, old.x, old.y FROM region_tiles old
+                   WHERE old.region_id = ?1 AND NOT EXISTS (
+                     SELECT 1 FROM region_tiles other
+                     WHERE other.source = old.source AND other.z = old.z
+                       AND other.x = old.x AND other.y = old.y AND other.region_id != ?1
+                   )
+                 )",
+                params![target_region_id],
+            )?;
+            tx.execute(
+                "DELETE FROM region_tiles WHERE region_id = ?1",
+                params![target_region_id],
+            )?;
+            tx.execute(
+                "UPDATE region_tiles SET region_id = ?1 WHERE region_id = ?2",
+                params![target_region_id, staging_region_id],
+            )?;
+            tx.commit()?;
+        }
+        inner.pinned_bytes -= freed;
+        inner.regions_dirty = true;
+        Ok(true)
+    }
+
     /// The total stored bytes pinned by a region, summing only that region's join rows.
     pub fn region_bytes(&self, region_id: &str) -> rusqlite::Result<i64> {
         let inner = self.lock();
@@ -2057,6 +2114,58 @@ mod tests {
         assert_eq!(
             totals,
             vec![("a".to_string(), 140, 2), ("b".to_string(), 10, 1)]
+        );
+    }
+
+    #[test]
+    fn staged_region_promotion_is_atomic_and_respects_the_final_budget() {
+        let (_f, c) = open();
+        let old = WarmRow {
+            source: "s".into(),
+            z: 0,
+            x: 0,
+            y: 0,
+            tile: tile(10, 200, Some(vec![1; 10])),
+        };
+        let replacement = WarmRow {
+            source: "s".into(),
+            z: 0,
+            x: 0,
+            y: 1,
+            tile: tile(20, 200, Some(vec![2; 20])),
+        };
+        c.put_many_pinned(&[old], 100, 100, Some("region"), 1)
+            .unwrap();
+        c.put_many_pinned(&[replacement], 100, 100, Some("staging"), 2)
+            .unwrap();
+        c.put(
+            TileKey::new("s", 0, 0, 2),
+            &tile(5, 200, Some(vec![3; 5])),
+            true,
+            3,
+        )
+        .unwrap();
+
+        assert!(!c.promote_staged_region("staging", "region", 19).unwrap());
+        assert_eq!(c.region_bytes("region").unwrap(), 10);
+        assert_eq!(c.region_bytes("staging").unwrap(), 20);
+        assert!(c.get(TileKey::new("s", 0, 0, 0)).unwrap().is_some());
+
+        assert!(c.promote_staged_region("staging", "region", 25).unwrap());
+        assert_eq!(c.region_bytes("region").unwrap(), 20);
+        assert_eq!(c.region_bytes("staging").unwrap(), 0);
+        assert!(c.get(TileKey::new("s", 0, 0, 1)).unwrap().is_some());
+        let (_rows, _total, pinned) = c.stats().unwrap();
+        assert_eq!(pinned, 25);
+
+        c.evict_to(25).unwrap();
+        assert!(
+            c.get(TileKey::new("s", 0, 0, 0)).unwrap().is_none(),
+            "the replaced tile is demoted and can be evicted"
+        );
+        assert!(
+            c.get(TileKey::new("s", 0, 0, 2)).unwrap().is_some(),
+            "promotion must not demote an unrelated regionless pin"
         );
     }
 }

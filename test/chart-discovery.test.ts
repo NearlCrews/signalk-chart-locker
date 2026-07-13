@@ -127,3 +127,21 @@ test('startDiscovery picks up a file added after start, then stops watching', { 
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('startDiscovery creates a missing chart directory before watching it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'charts-root-'))
+  const dir = join(root, 'missing', 'pmtiles')
+  const registry = new ChartRegistry()
+  const handle = await startDiscovery({ chartsDir: dir, registry, debounceMs: 20 })
+  try {
+    await writeFile(join(dir, 'new.pmtiles'), buildPmtilesFixture())
+    const deadline = Date.now() + 5000
+    while (!registry.has('new-pmtiles') && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    assert.equal(registry.has('new-pmtiles'), true)
+  } finally {
+    handle.stop()
+    await rm(root, { recursive: true, force: true })
+  }
+})

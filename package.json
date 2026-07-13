@@ -1,6 +1,6 @@
 {
   "name": "signalk-chart-locker",
-  "version": "0.4.4",
+  "version": "0.5.0",
   "description": "Signal K plugin that runs a Rust container alongside the server for a boat-wide tile cache, a PMTiles chart provider, and saved downloadable map regions.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -55,7 +55,7 @@
     "signalk-container": ">=1.20.0"
   },
   "engines": {
-    "node": ">=20.3.0"
+    "node": ">=22.0.0"
   },
   "author": {
     "name": "Nearl Crews",
@@ -91,6 +91,6 @@
   },
   "dependencies": {
     "pmtiles": "^4.4.1",
-    "signalk-chart-sources": "^0.2.1"
+    "signalk-chart-sources": "^0.3.1"
   }
 }

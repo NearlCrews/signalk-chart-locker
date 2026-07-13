@@ -587,6 +587,7 @@ mod tests {
             maxzoom: 18,
             vector_maxzoom: None,
             bounds: None,
+            coverage: None,
             attribution: String::new(),
         }
     }

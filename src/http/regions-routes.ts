@@ -4,7 +4,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { ServerAPI } from '@signalk/server-api'
-import { estimateBytes, type Bbox } from 'signalk-chart-sources'
+import type { ChartSource, LngLatBbox } from 'signalk-chart-sources'
 import { ensureApiAdminGate } from '../shared/admin-gate.js'
 import { CONTAINER_FETCH_TIMEOUT_MS } from '../runtime/container-fetch.js'
 import {
@@ -13,6 +13,9 @@ import {
   type SavedRegion, type RegionStatus
 } from '../runtime/regions-store.js'
 import { nowUnixSecs } from '../shared/time.js'
+
+// The plugin compiles to CommonJS, while chart-sources 0.3.x exposes an ESM-only runtime.
+const chartSources = import('signalk-chart-sources')
 
 export interface RegionsRequest {
   params: Record<string, string>
@@ -71,25 +74,57 @@ const CONTAINER_REGION_PATH = '/cache/region'
 const CONTAINER_REGIONS_PATH = '/cache/regions'
 const CONTAINER_WARM_PATH = '/warm'
 
-/** A finite, correctly ordered lon/lat bbox: [minLng, minLat, maxLng, maxLat]. */
-function isValidBbox (value: unknown): value is Bbox {
+/** A finite lon/lat bbox. West greater than east means the box crosses the antimeridian. */
+function isValidBbox (value: unknown): value is LngLatBbox {
   return Array.isArray(value) && value.length === 4 &&
     value.every((n) => typeof n === 'number' && Number.isFinite(n)) &&
-    value[0] >= -180 && value[2] <= 180 && value[1] >= -90 && value[3] <= 90 &&
-    value[0] < value[2] && value[1] < value[3]
+    value[0] >= -180 && value[0] <= 180 && value[2] >= -180 && value[2] <= 180 &&
+    value[1] >= -90 && value[1] <= 90 && value[3] >= -90 && value[3] <= 90 &&
+    value[0] !== value[2] && !(value[0] > value[2] && Math.abs(value[0] - value[2]) === 360) && value[1] < value[3]
 }
 
 function isRecord (value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function validSourceIds (value: unknown, allowEmpty: boolean): value is string[] {
-  if (!Array.isArray(value) || value.length > MAX_SOURCE_IDS || (!allowEmpty && value.length === 0)) return false
-  if (!value.every((source) => typeof source === 'string' && source.length > 0 && source.length <= MAX_SOURCE_ID_LENGTH)) return false
-  return new Set(value).size === value.length
+function isNonnegativeFinite (value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
 }
 
-function readPositionWarmPatch (value: unknown): Partial<PositionWarmSettings> | string {
+function isNonnegativeInteger (value: unknown): value is number {
+  return isNonnegativeFinite(value) && Number.isSafeInteger(value)
+}
+
+function readContainerStats (value: unknown): ContainerStats | undefined {
+  if (!isRecord(value) || !isNonnegativeInteger(value.regionsFreeBytes)) return undefined
+  const averages: Record<string, number> = {}
+  if (value.perSourceAvgBytes !== undefined) {
+    if (!isRecord(value.perSourceAvgBytes)) return undefined
+    for (const [source, bytes] of Object.entries(value.perSourceAvgBytes)) {
+      if (!isNonnegativeInteger(bytes) || bytes === 0) return undefined
+      averages[source] = bytes
+    }
+  }
+  return { regionsFreeBytes: value.regionsFreeBytes, perSourceAvgBytes: averages }
+}
+
+const WARM_STATES = new Set<WarmSnapshot['state']>(['running', 'done', 'cancelled', 'capped', 'error'])
+
+function isWarmSnapshot (value: unknown): value is WarmSnapshot {
+  if (!isRecord(value) || typeof value.state !== 'string' || !WARM_STATES.has(value.state as WarmSnapshot['state'])) return false
+  const { total, done, skipped, bytes, errors } = value
+  if (!isNonnegativeInteger(total) || !isNonnegativeInteger(done) || !isNonnegativeInteger(skipped) ||
+      !isNonnegativeInteger(bytes) || !isNonnegativeInteger(errors)) return false
+  return value.state !== 'done' || errors !== 0 || done + skipped === total
+}
+
+function validSourceIds (value: unknown, allowEmpty: boolean, sourceById: (id: string) => ChartSource | undefined): value is string[] {
+  if (!Array.isArray(value) || value.length > MAX_SOURCE_IDS || (!allowEmpty && value.length === 0)) return false
+  if (!value.every((source) => typeof source === 'string' && source.length > 0 && source.length <= MAX_SOURCE_ID_LENGTH)) return false
+  return new Set(value).size === value.length && value.every((source) => sourceById(source) !== undefined)
+}
+
+function readPositionWarmPatch (value: unknown, sourceById: (id: string) => ChartSource | undefined): Partial<PositionWarmSettings> | string {
   if (!isRecord(value)) return 'positionWarm must be an object'
   const patch: Partial<PositionWarmSettings> = {}
   if ('enabled' in value) {
@@ -116,7 +151,7 @@ function readPositionWarmPatch (value: unknown): Partial<PositionWarmSettings> |
     patch.baseZoom = value.baseZoom
   }
   if ('sources' in value) {
-    if (!validSourceIds(value.sources, true)) return 'sources must be a unique array of valid source IDs'
+    if (!validSourceIds(value.sources, true, sourceById)) return 'sources must be a unique array of valid source IDs'
     patch.sources = value.sources
   }
   return patch
@@ -172,7 +207,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
       const r = await fetchImpl(`http://${address}${CONTAINER_REGION_PATH}/${encodeURIComponent(regionId)}`)
       if (!r.ok) return fallback
       const data = (await r.json()) as { bytes?: number }
-      return typeof data.bytes === 'number' ? data.bytes : fallback
+      return isNonnegativeInteger(data.bytes) ? data.bytes : fallback
     } catch {
       return fallback
     }
@@ -186,7 +221,8 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
       if (!isRecord(body.regions)) return null
       const totals: Record<string, number> = {}
       for (const [id, bytes] of Object.entries(body.regions)) {
-        if (typeof bytes === 'number' && Number.isFinite(bytes) && bytes >= 0) totals[id] = bytes
+        if (!isNonnegativeInteger(bytes)) return null
+        totals[id] = bytes
       }
       return totals
     } catch {
@@ -194,9 +230,9 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     }
   }
 
-  const statusFromState = (state: WarmSnapshot['state']): RegionStatus => {
-    if (state === 'done') return 'ready'
-    if (state === 'capped') return 'capped'
+  const statusFromSnapshot = (snapshot: WarmSnapshot): RegionStatus => {
+    if (snapshot.state === 'done' && snapshot.errors === 0) return 'ready'
+    if (snapshot.state === 'capped') return 'capped'
     return 'error'
   }
 
@@ -206,7 +242,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     if (snapshot.state === 'running') return
     const bytes = await regionBytes(address, regionId, snapshot.bytes)
     updateRegion(dataDir, regionId, {
-      status: statusFromState(snapshot.state),
+      status: statusFromSnapshot(snapshot),
       lastDownloadedAt: nowUnixSecs(),
       bytes
     })
@@ -227,11 +263,12 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     res.status(200).json(loadRegionsStore(dataDir).positionWarm)
   })
 
-  router.post('/api/position-warm/config', (req, res) => {
+  router.post('/api/position-warm/config', async (req, res) => {
     if (!isRecord(req.body) || !('positionWarm' in req.body)) {
       res.status(400).json({ error: 'positionWarm is required' }); return
     }
-    const patch = readPositionWarmPatch(req.body.positionWarm)
+    const { chartSourceById } = await chartSources
+    const patch = readPositionWarmPatch(req.body.positionWarm, chartSourceById)
     if (typeof patch === 'string') { res.status(400).json({ error: patch }); return }
     mutateRegionsStore(dataDir, (store) => {
       store.positionWarm = { ...store.positionWarm, ...patch }
@@ -299,11 +336,12 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
   })
 
   router.post('/api/regions', async (req, res) => {
+    const { chartSourceById, estimateBytes } = await chartSources
     const b = (req.body ?? {}) as { bbox?: unknown, sourceIds?: unknown, minzoom?: unknown, maxzoom?: unknown, name?: unknown }
     const { bbox, sourceIds, minzoom, maxzoom, name } = b
     // Validate BEFORE touching the container so an invalid body is a 400 even with no address.
     if (!isValidBbox(bbox) ||
-        !validSourceIds(sourceIds, false) ||
+        !validSourceIds(sourceIds, false, chartSourceById) ||
         typeof minzoom !== 'number' || !Number.isInteger(minzoom) || minzoom < 0 || minzoom > MAX_WARM_ZOOM ||
         typeof maxzoom !== 'number' || !Number.isInteger(maxzoom) || maxzoom < 0 || maxzoom > MAX_WARM_ZOOM || minzoom > maxzoom ||
         typeof name !== 'string' || name.trim().length === 0 || name.trim().length > MAX_REGION_NAME_LENGTH) {
@@ -318,11 +356,23 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
       if (!statsResponse.ok) {
         res.status(statsResponse.status).json({ error: 'tilecache statistics unavailable' }); return
       }
-      stats = (await statsResponse.json()) as ContainerStats
+      const parsed = readContainerStats(await statsResponse.json())
+      if (parsed === undefined) {
+        res.status(502).json({ error: 'tilecache returned malformed statistics' }); return
+      }
+      stats = parsed
     } catch {
       res.status(502).json({ error: 'tilecache unreachable' }); return
     }
-    const estimate = estimateBytes(sourceIds, bbox, [minzoom, maxzoom], stats.perSourceAvgBytes ?? {})
+    let estimate: number
+    try {
+      estimate = estimateBytes(sourceIds, bbox, [minzoom, maxzoom], stats.perSourceAvgBytes ?? {})
+    } catch (error) {
+      if (error instanceof TypeError || error instanceof RangeError) {
+        res.status(400).json({ error: 'invalid region estimate inputs' }); return
+      }
+      throw error
+    }
     if (estimate > Math.max(0, stats.regionsFreeBytes ?? 0)) {
       res.status(400).json({ error: 'exceeds regions budget' }); return
     }
@@ -341,9 +391,18 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     addRegion(dataDir, region)
     try {
       const warmResp = await fetchImpl(`http://${address}${CONTAINER_WARM_PATH}`, warmInit({ sources: sourceIds, bbox, minzoom, maxzoom, regionId: region.id }))
-      if (!warmResp.ok) throw new Error('warm start rejected')
+      if (!warmResp.ok) {
+        const body = await warmResp.json().catch(() => ({}))
+        removeRegion(dataDir, region.id)
+        res.status(warmResp.status).json(isRecord(body) ? body : { error: 'tilecache rejected warm start' })
+        return
+      }
       const warmBody = (await warmResp.json()) as { jobId?: unknown }
-      if (typeof warmBody.jobId !== 'string' || warmBody.jobId.length === 0) throw new Error('invalid warm job')
+      if (typeof warmBody.jobId !== 'string' || warmBody.jobId.length === 0) {
+        removeRegion(dataDir, region.id)
+        res.status(502).json({ error: 'tilecache returned an invalid warm job' })
+        return
+      }
       const jobId = warmBody.jobId
       regionJobs.set(region.id, jobId)
       res.status(200).json({ region, jobId })
@@ -357,20 +416,21 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
 
   router.delete('/api/regions/:id', async (req, res) => {
     const id = req.params.id
+    if (!listRegions(dataDir).some((region) => region.id === id)) {
+      res.status(404).json({ error: 'no such region' }); return
+    }
     // Drop the container pins FIRST, then remove the region from the store only when that succeeds. The
     // container delete is idempotent, so a region that was never downloaded still succeeds. If the
     // container address is absent or the delete fails, return 503 and leave the region in the store so
     // the user can retry: removing it first would orphan its region_tiles pins and permanently shrink
     // regionsFreeBytes.
     const address = withAddress(res); if (address === null) return
-    let ok: boolean
     try {
       const r = await fetchImpl(`http://${address}${CONTAINER_REGION_PATH}/${encodeURIComponent(id)}`, { method: 'DELETE' })
-      ok = r.ok
+      if (!r.ok) { res.status(r.status).end(); return }
     } catch {
-      ok = false
+      res.status(503).end(); return
     }
-    if (!ok) { res.status(503).end(); return }
     removeRegion(dataDir, id)
     regionJobs.delete(id)
     res.status(204).end()
@@ -390,7 +450,16 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
         reconcileLostJob(id)
         res.status(404).json({ error: 'job gone' }); return
       }
-      const snapshot = (await r.json()) as WarmSnapshot
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}))
+        res.status(r.status).json(isRecord(body) ? body : { error: 'tilecache status unavailable' })
+        return
+      }
+      const body = await r.json()
+      if (!isWarmSnapshot(body)) {
+        res.status(502).json({ error: 'tilecache returned a malformed warm status' }); return
+      }
+      const snapshot = body
       await reconcile(address, id, snapshot)
       res.status(r.status).json(snapshot)
     } catch {
@@ -403,13 +472,10 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     const region = listRegions(dataDir).find((r) => r.id === id)
     if (!region) { res.status(404).json({ error: 'no such region' }); return }
     const address = withAddress(res); if (address === null) return
-    // No upfront budget gate here, unlike POST /api/regions: a redownload re-warms an EXISTING region
-    // under the same id, so the container clears that region's prior pins first and the re-warm replaces
-    // its own tiles rather than pinning a second copy. The region already fit the budget once, and the
-    // server-side pin gate still refuses anything that no longer fits.
+    // No upfront estimate gate here, unlike POST /api/regions. The container stages the replacement
+    // under a temporary id, credits the target's current bytes during the download, and atomically
+    // swaps the pins only when the final set fits the live budget.
     try {
-      // Same region.id: the container clears that region's prior pins at warm start, so the re-warm
-      // replaces tiles and creates no duplicate region.
       const warmResp = await fetchImpl(`http://${address}${CONTAINER_WARM_PATH}`, warmInit({
         sources: region.sourceIds, bbox: region.bbox, minzoom: region.minzoom, maxzoom: region.maxzoom, regionId: region.id
       }))

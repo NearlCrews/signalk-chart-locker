@@ -56,10 +56,15 @@ export function registerChartManagementRoutes (
   app: ServerAPI,
   registry: ChartRegistry,
   overrides: OverrideStore,
-  onRescan: () => void | Promise<void>
+  onRescan: () => void | Promise<void>,
+  isEnabled: () => boolean = () => true
 ): boolean {
   if (!ensureApiAdminGate(app)) return false
   router.get('/api/charts', (_req, res) => {
+    if (!isEnabled()) {
+      res.status(409).json({ error: 'PMTiles management is disabled while pmtiles-chart-provider is enabled' })
+      return
+    }
     res.json({
       charts: registry.records().map((record) => ({
         ...chartResource(record),
@@ -71,7 +76,11 @@ export function registerChartManagementRoutes (
     })
   })
 
-  router.post('/api/charts/:id/override', (req, res) => {
+  router.post('/api/charts/:id/override', async (req, res) => {
+    if (!isEnabled()) {
+      res.status(409).json({ error: 'PMTiles management is disabled while pmtiles-chart-provider is enabled' })
+      return
+    }
     if (!registry.has(req.params.id)) {
       res.status(404).json({ error: `Unknown chart: ${req.params.id}` })
       return
@@ -82,11 +91,19 @@ export function registerChartManagementRoutes (
       return
     }
     overrides.set(req.params.id, override)
-    Promise.resolve(onRescan()).catch(() => {})
-    // Return the merged stored override, not just the posted patch, so the caller sees the effective value.
-    res.json({ identifier: req.params.id, override: overrides.get(req.params.id) ?? {} })
+    try {
+      await onRescan()
+      // Return the merged stored override, not just the posted patch, so the caller sees the effective value.
+      res.json({ identifier: req.params.id, override: overrides.get(req.params.id) ?? {} })
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) })
+    }
   })
   router.post('/api/charts/rescan', async (_req, res) => {
+    if (!isEnabled()) {
+      res.status(409).json({ error: 'PMTiles management is disabled while pmtiles-chart-provider is enabled' })
+      return
+    }
     try {
       await onRescan()
       res.json({ discovery: registry.discoveryStatus() })

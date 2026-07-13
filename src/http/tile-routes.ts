@@ -1,6 +1,7 @@
 /** Streams browser tile and style requests to the tilecache container, the only path browsers reach it by. */
 
 import { Readable, type Writable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { CONTAINER_FETCH_TIMEOUT_MS } from '../runtime/container-fetch.js'
 import { PLUGIN_MOUNT_PATH } from '../shared/plugin-id.js'
 
@@ -12,6 +13,8 @@ export interface ProxyRequest {
   headers: Record<string, HeaderValue>
   /** Express resolves this (honoring trust-proxy), used only as a scheme fallback for the style rewrite. */
   protocol?: string
+  /** Express derives this through its trust-proxy setting. */
+  hostname?: string
   on(event: 'close', listener: () => void): void
 }
 
@@ -83,6 +86,28 @@ function firstToken (value: HeaderValue): string | undefined {
   return token !== undefined && token !== '' ? token : undefined
 }
 
+function publicOrigin (req: ProxyRequest): string {
+  const protocol = req.protocol === 'https' ? 'https' : 'http'
+  const trustedHostname = req.hostname
+  const hostHeader = firstToken(req.headers.host)
+  if (hostHeader !== undefined) {
+    try {
+      const parsed = new URL(`${protocol}://${hostHeader}`)
+      const hostMatches = trustedHostname === undefined || parsed.hostname === trustedHostname
+      if (hostMatches && parsed.username === '' && parsed.password === '' && parsed.pathname === '/') {
+        return `${protocol}://${parsed.host}`
+      }
+    } catch {}
+  }
+  if (trustedHostname !== undefined && trustedHostname !== '') {
+    const host = trustedHostname.includes(':') && !trustedHostname.startsWith('[')
+      ? `[${trustedHostname}]`
+      : trustedHostname
+    return `${protocol}://${host}`
+  }
+  return `${protocol}://localhost`
+}
+
 /** Serve GET /style/:source: rewrite the sprite to an absolute same-origin URL so MapLibre accepts it
  * (it rejects a path-absolute sprite at parse time) and the existing /style/:source/* proxy serves the
  * cached sprite offline. Everything but the sprite field is passed through unchanged. */
@@ -112,11 +137,26 @@ async function rewriteStyleSprite (req: ProxyRequest, res: ProxyResponse, addres
       res.end()
       return
     }
-    Readable.fromWeb(upstream.body as unknown as Parameters<typeof Readable.fromWeb>[0]).pipe(res as unknown as Writable)
+    try {
+      await pipeline(
+        Readable.fromWeb(upstream.body as unknown as Parameters<typeof Readable.fromWeb>[0]),
+        res as unknown as Writable
+      )
+    } catch {
+      if (!res.headersSent) res.status(502)
+      res.end()
+    }
     return
   }
 
-  const text = await upstream.text()
+  let text: string
+  try {
+    text = await upstream.text()
+  } catch {
+    if (!res.headersSent) res.status(502)
+    res.end()
+    return
+  }
   let style: { sprite?: unknown }
   try {
     style = JSON.parse(text) as { sprite?: unknown }
@@ -131,10 +171,8 @@ async function rewriteStyleSprite (req: ProxyRequest, res: ProxyResponse, addres
   }
 
   if (typeof style.sprite === 'string') {
-    const proto = firstToken(req.headers['x-forwarded-proto']) ?? req.protocol ?? 'http'
-    const host = firstToken(req.headers['x-forwarded-host']) ?? firstToken(req.headers.host) ?? ''
     const path = req.url.split('?')[0]
-    style.sprite = `${proto}://${host}${publicBase}${path}/sprite`
+    style.sprite = `${publicOrigin(req)}${publicBase}${path}/sprite`
   }
   res.status(upstream.status)
   res.setHeader('content-type', 'application/json')
@@ -169,7 +207,10 @@ async function streamToContainer (req: ProxyRequest, res: ProxyResponse, address
     // The casts bridge two type-system gaps the runtime handles fine: the web ReadableStream from fetch
     // is not the node:stream/web type Readable.fromWeb is declared with, and the express Response is a
     // Writable structurally but not nominally. They are load-bearing; do not remove them.
-    Readable.fromWeb(upstream.body as unknown as Parameters<typeof Readable.fromWeb>[0]).pipe(res as unknown as Writable)
+    await pipeline(
+      Readable.fromWeb(upstream.body as unknown as Parameters<typeof Readable.fromWeb>[0]),
+      res as unknown as Writable
+    )
   } catch {
     if (!res.headersSent) {
       res.status(502)

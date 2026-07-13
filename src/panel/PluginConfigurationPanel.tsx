@@ -313,7 +313,7 @@ export default function PluginConfigurationPanel ({ configuration, save }: Props
             <>
               A ceiling on how much of the cache saved regions may pin. Leave 0 to reserve half the
               cache cap. This is not space taken from the scroll cache until a region is actually
-              saved. A value above the cache cap is clamped to the cap.
+              saved. The value must not exceed the cache cap.
             </>
           }
         />

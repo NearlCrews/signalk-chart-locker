@@ -46,6 +46,7 @@ pub struct WarmJob {
     pub state: WarmState,
     pub cancel: Arc<AtomicBool>,
     pub finished_at: Option<i64>,
+    pub region_id: Option<String>,
 }
 
 pub struct WarmRequest {
@@ -66,6 +67,7 @@ pub enum StartError {
     BadZoom(String),
     TooMany(u64),
     TooManyJobs,
+    RegionBusy,
 }
 
 /// Validate the request, create the job, spawn the warm driver, and return the job id.
@@ -86,10 +88,15 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
     if bboxes.iter().any(|b| {
         !b.iter().all(|v| v.is_finite())
             || b[0] < -180.0
+            || b[0] > 180.0
+            || b[2] < -180.0
             || b[2] > 180.0
             || b[1] < -90.0
+            || b[1] > 90.0
+            || b[3] < -90.0
             || b[3] > 90.0
-            || b[0] >= b[2]
+            || b[0] == b[2]
+            || (b[0] > b[2] && (b[0] - b[2]).abs() == 360.0)
             || b[1] >= b[3]
     }) {
         return Err(StartError::BadBbox(format!("invalid bbox set {bboxes:?}")));
@@ -124,8 +131,20 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
             }
         }
     }
+    if total == 0 {
+        return Err(StartError::BadBbox(
+            "bbox does not intersect the selected sources".into(),
+        ));
+    }
     if total > WARM_TILE_HARD_CAP {
         return Err(StartError::TooMany(total));
+    }
+
+    if let Some(region_id) = req.region_id.as_ref() {
+        let mut active = state.active_warm_regions.lock().await;
+        if !active.insert(region_id.clone()) {
+            return Err(StartError::RegionBusy);
+        }
     }
 
     let id = format!("warm-{}", state.warm_seq.fetch_add(1, Ordering::Relaxed));
@@ -139,6 +158,7 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
         state: WarmState::Running,
         cancel: cancel.clone(),
         finished_at: None,
+        region_id: req.region_id.clone(),
     }));
     {
         let mut jobs = state.warm_jobs.write().await;
@@ -155,6 +175,9 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
             })
             .count();
         if active >= MAX_ACTIVE_WARM_JOBS {
+            if let Some(region_id) = req.region_id.as_ref() {
+                state.active_warm_regions.lock().await.remove(region_id);
+            }
             return Err(StartError::TooManyJobs);
         }
         jobs.insert(id.clone(), job.clone());
@@ -171,11 +194,14 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
     tokio::spawn(run(
         st,
         job,
-        resolved,
-        bboxes,
-        req.minzoom,
-        req.maxzoom,
-        req.region_id,
+        RunSpec {
+            sources: resolved,
+            bboxes,
+            zmin: req.minzoom,
+            zmax: req.maxzoom,
+            region_id: req.region_id,
+            job_id: id.clone(),
+        },
     ));
     Ok(id)
 }
@@ -201,6 +227,50 @@ pub async fn cancel_warm(state: &AppState, job_id: &str) -> bool {
     }
 }
 
+/// Cancel every running warm for a logical region and wait until its driver has stopped writing.
+/// Returns false if cancellation does not drain within the bounded wait.
+pub async fn cancel_region_warms(state: &AppState, region_id: &str) -> bool {
+    let jobs: Vec<Arc<tokio::sync::Mutex<WarmJob>>> =
+        state.warm_jobs.read().await.values().cloned().collect();
+    for job in jobs {
+        let guard = job.lock().await;
+        if guard.region_id.as_deref() == Some(region_id) && guard.state == WarmState::Running {
+            guard.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+    // Return before the plugin's eight-second container request timeout. The driver normally drains
+    // in one polling interval; the bounded wait covers slow SQLite cleanup without leaving the HTTP
+    // caller hanging indefinitely.
+    for _ in 0..120 {
+        if !state.active_warm_regions.lock().await.contains(region_id) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    false
+}
+
+async fn acquire_warm_permit(
+    state: &AppState,
+    cancel: &AtomicBool,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            state.warm_semaphore.clone().acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => return Some(permit),
+            Ok(Err(_)) => return None,
+            Err(_) => {}
+        }
+    }
+}
+
 // Drop finished jobs older than the TTL so the in-memory registry does not grow without bound.
 fn reap(jobs: &mut std::collections::HashMap<String, Arc<tokio::sync::Mutex<WarmJob>>>) {
     let now = now_secs();
@@ -220,6 +290,22 @@ enum Fetched {
     Error,
 }
 
+struct RunSpec {
+    sources: Vec<ChartSource>,
+    bboxes: Vec<[f64; 4]>,
+    zmin: u32,
+    zmax: u32,
+    region_id: Option<String>,
+    job_id: String,
+}
+
+#[derive(Clone)]
+struct WarmRegionContext {
+    target: Option<Arc<str>>,
+    storage: Option<Arc<str>>,
+    replacement_credit: i64,
+}
+
 // The effective pinned budget for a warm: R for the position-warm pseudo-region, R - P for a real
 // region (and for a region-less warm). Clamped to the live cap so R <= cap holds inside the container
 // regardless of what POST /config delivered, and floored at 0. Read live so a POST /config retune
@@ -234,6 +320,12 @@ fn effective_budget(st: &AppState, region_id: Option<&str>) -> i64 {
         r - p
     };
     raw.min(cap).max(0)
+}
+
+fn replacement_budget(st: &AppState, region_id: Option<&str>, credit: i64) -> i64 {
+    effective_budget(st, region_id)
+        .saturating_add(credit.max(0))
+        .min(st.live_cap_bytes.load(Ordering::Relaxed).max(0))
 }
 
 // Expand a style source into one synthetic XYZ sub-source per learned in-style source, keyed
@@ -286,7 +378,8 @@ async fn expand_warm_sources(st: &AppState, sources: Vec<ChartSource>) -> (Vec<C
                 minzoom: source.minzoom,
                 maxzoom: registry_max.min(native),
                 vector_maxzoom: None,
-                bounds: None,
+                bounds: source.bounds,
+                coverage: source.coverage.clone(),
                 attribution: source.attribution.clone(),
             });
         }
@@ -523,7 +616,7 @@ async fn warm_one(
     z: u32,
     x: u32,
     y: u32,
-    region_id: Option<&str>,
+    region: &WarmRegionContext,
 ) -> Fetched {
     let now = now_secs();
     // pin_if_fresh does the freshness check, the budget gate, and the pin under one lock, closing the
@@ -531,10 +624,10 @@ async fn warm_one(
     // runs on the blocking pool so the warm's synchronous SQLite does not stall the async reactor.
     let cache = st.cache.clone();
     let source_id = source.id.clone();
-    let region_owned = region_id.map(str::to_string);
+    let region_owned = region.storage.as_deref().map(str::to_string);
     let fresh_secs = st.knobs.fresh_secs;
     let neg_ttl = st.knobs.negative_ttl_secs;
-    let budget = effective_budget(st, region_id);
+    let budget = replacement_budget(st, region.target.as_deref(), region.replacement_credit);
     let pinned = tokio::task::spawn_blocking(move || {
         cache.pin_if_fresh(
             TileKey::new(&source_id, z, x, y),
@@ -591,31 +684,33 @@ async fn warm_one(
 
 // The warm driver: enumerate lazily, bound in-flight fetches to WARM_CONCURRENCY via owned permits and a
 // JoinSet, drain results into a batch, and flush each batch pinned with the pre-store budget check.
-async fn run(
-    st: AppState,
-    job: Arc<tokio::sync::Mutex<WarmJob>>,
-    sources: Vec<ChartSource>,
-    bboxes: Vec<[f64; 4]>,
-    zmin: u32,
-    zmax: u32,
-    region_id: Option<String>,
-) {
-    // Clear this region's prior pins so a re-download or a position-warm re-pin replaces the prior tile
-    // set with no orphan join rows (a narrower box leaves nothing pinned outside the new set).
-    if let Some(rid) = region_id.clone() {
+async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, spec: RunSpec) {
+    let RunSpec {
+        sources,
+        bboxes,
+        zmin,
+        zmax,
+        region_id,
+        job_id,
+    } = spec;
+    // A replacement downloads into a job-specific staging region. The last known-good target remains
+    // pinned until every requested tile has completed and the staging set can be promoted atomically.
+    let staging_region_id = region_id
+        .as_ref()
+        .map(|_| format!("__warm_staging__{job_id}"));
+    let replacement_credit = if let Some(rid) = region_id.clone() {
         let cache = st.cache.clone();
-        match tokio::task::spawn_blocking(move || {
-            let result = cache.delete_region(&rid);
-            crate::fetcher::log_cache_err(&cache, "cache_region_delete_failed", result);
-        })
-        .await
-        {
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!("event=cache_task_failed operation=warm_region_delete error={e}")
-            }
-        }
-    }
+        tokio::task::spawn_blocking(move || cache.region_bytes(&rid).unwrap_or(0))
+            .await
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let region_context = WarmRegionContext {
+        target: region_id.as_deref().map(Arc::from),
+        storage: staging_region_id.as_deref().map(Arc::from),
+        replacement_credit,
+    };
     // Capture the style source (if any) before expansion replaces it with synthetic XYZ sub-sources,
     // so the folded assets warm can look up the learned glyph template, fontstacks, and sprite base.
     let style_source_id: Option<String> = sources
@@ -649,6 +744,10 @@ async fn run(
         j.total = expanded_total;
         j.state = WarmState::Error;
         j.finished_at = Some(now_secs());
+        drop(j);
+        if let Some(region_id) = region_id.as_ref() {
+            st.active_warm_regions.lock().await.remove(region_id);
+        }
         return;
     }
     job.lock().await.total = expanded_total;
@@ -657,11 +756,10 @@ async fn run(
     let mut batch: Vec<WarmRow> = Vec::with_capacity(WARM_BATCH);
     let mut final_state = WarmState::Done;
 
-    // Enumerate tiles lazily via tiles_iter (zero extra allocation beyond the iterator struct) and
+    // Enumerate tiles lazily via tiles_iter, with only the disjoint coverage ranges allocated, and
     // spawn bounded tasks. The cancel check between tiles keeps the cooperative cancel responsive.
     // The source and region_id are shared through an Arc so each of the up-to-WARM_TILE_HARD_CAP spawns
     // costs a refcount bump, not a full ChartSource plus String clone per tile.
-    let region_arc: Option<Arc<str>> = region_id.as_deref().map(Arc::from);
     'outer: for source in &sources {
         let source_arc = Arc::new(source.clone());
         for bbox in &bboxes {
@@ -670,32 +768,29 @@ async fn run(
                     final_state = WarmState::Cancelled;
                     break 'outer;
                 }
-                let permit = match st.warm_semaphore.clone().acquire_owned().await {
-                    Ok(p) => p,
-                    Err(_) => {
-                        final_state = WarmState::Error;
+                let permit = match acquire_warm_permit(&st, &cancel).await {
+                    Some(permit) => permit,
+                    None => {
+                        final_state = if cancel.load(Ordering::Relaxed) {
+                            WarmState::Cancelled
+                        } else {
+                            WarmState::Error
+                        };
                         break 'outer;
                     }
                 };
                 let st2 = st.clone();
                 let source2 = source_arc.clone();
-                let rid = region_arc.clone();
+                let region = region_context.clone();
                 set.spawn(async move {
                     let _permit = permit;
-                    warm_one(&st2, &source2, z, x, y, rid.as_deref()).await
+                    warm_one(&st2, &source2, z, x, y, &region).await
                 });
                 // Drain any finished tasks without blocking, keeping memory flat.
                 while let Some(done) = set.try_join_next() {
                     if let Ok(f) = done {
-                        if !accumulate(
-                            &st,
-                            &job,
-                            &mut batch,
-                            f,
-                            region_id.as_deref(),
-                            &mut final_state,
-                        )
-                        .await
+                        if !accumulate(&st, &job, &mut batch, f, &region_context, &mut final_state)
+                            .await
                         {
                             // capped: stop spawning and draining.
                             cancel.store(true, Ordering::Relaxed);
@@ -706,39 +801,94 @@ async fn run(
             }
         }
     }
+    if final_state != WarmState::Done {
+        set.abort_all();
+    }
     // Join remaining in-flight tasks.
-    while let Some(done) = set.join_next().await {
+    loop {
+        if cancel.load(Ordering::Relaxed) && final_state == WarmState::Done {
+            final_state = WarmState::Cancelled;
+            set.abort_all();
+        }
+        let done = match tokio::time::timeout(std::time::Duration::from_millis(50), set.join_next())
+            .await
+        {
+            Ok(Some(done)) => done,
+            Ok(None) => break,
+            Err(_) => continue,
+        };
         if let Ok(f) = done {
             if final_state == WarmState::Done
-                && !accumulate(
-                    &st,
-                    &job,
-                    &mut batch,
-                    f,
-                    region_id.as_deref(),
-                    &mut final_state,
-                )
-                .await
+                && !accumulate(&st, &job, &mut batch, f, &region_context, &mut final_state).await
             {
                 break;
             }
         }
     }
+    if final_state == WarmState::Done && job.lock().await.errors > 0 {
+        final_state = WarmState::Error;
+    }
     // Flush the tail.
-    if !batch.is_empty() {
+    if final_state == WarmState::Done && !batch.is_empty() {
         flush(
             &st,
             &job,
             &mut batch,
-            region_id.as_deref(),
+            region_context.target.as_deref(),
+            region_context.storage.as_deref(),
+            region_context.replacement_credit,
             &mut final_state,
         )
         .await;
+    }
+    if final_state == WarmState::Done && job.lock().await.errors > 0 {
+        final_state = WarmState::Error;
+    }
+
+    // Promote only a complete staging set. Every other outcome removes staging pins and leaves the
+    // target region untouched, so a failed re-download cannot destroy working offline coverage.
+    if let (Some(staging), Some(target)) = (staging_region_id.as_deref(), region_id.as_deref()) {
+        if final_state == WarmState::Done {
+            let cache = st.cache.clone();
+            let staging = staging.to_string();
+            let target = target.to_string();
+            let budget = effective_budget(&st, Some(&target));
+            match tokio::task::spawn_blocking(move || {
+                cache.promote_staged_region(&staging, &target, budget)
+            })
+            .await
+            {
+                Ok(Ok(true)) => {}
+                Ok(Ok(false)) => final_state = WarmState::Capped,
+                Ok(Err(e)) => {
+                    eprintln!("event=cache_region_promote_failed error={e}");
+                    final_state = WarmState::Error;
+                }
+                Err(e) => {
+                    eprintln!("event=cache_task_failed operation=region_promote error={e}");
+                    final_state = WarmState::Error;
+                }
+            }
+        }
+        if final_state != WarmState::Done {
+            let cache = st.cache.clone();
+            let staging = staging.to_string();
+            match tokio::task::spawn_blocking(move || cache.delete_region(&staging)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => eprintln!("event=cache_staging_cleanup_failed error={e}"),
+                Err(e) => {
+                    eprintln!("event=cache_task_failed operation=staging_cleanup error={e}")
+                }
+            }
+        }
     }
     {
         let mut j = job.lock().await;
         j.state = final_state;
         j.finished_at = Some(now_secs());
+    }
+    if let Some(region_id) = region_id.as_ref() {
+        st.active_warm_regions.lock().await.remove(region_id);
     }
     // Fold the one-time global assets warm in after a successful basemap region warm. The job is
     // already marked Done so the panel shows the region complete; the assets warm runs on this task
@@ -756,14 +906,23 @@ async fn accumulate(
     job: &Arc<tokio::sync::Mutex<WarmJob>>,
     batch: &mut Vec<WarmRow>,
     f: Fetched,
-    region_id: Option<&str>,
+    region: &WarmRegionContext,
     final_state: &mut WarmState,
 ) -> bool {
     match f {
         Fetched::Tile(row) | Fetched::Negative(row) => {
             batch.push(row);
             if batch.len() >= WARM_BATCH {
-                return flush(st, job, batch, region_id, final_state).await;
+                return flush(
+                    st,
+                    job,
+                    batch,
+                    region.target.as_deref(),
+                    region.storage.as_deref(),
+                    region.replacement_credit,
+                    final_state,
+                )
+                .await;
             }
             true
         }
@@ -783,7 +942,9 @@ async fn flush(
     st: &AppState,
     job: &Arc<tokio::sync::Mutex<WarmJob>>,
     batch: &mut Vec<WarmRow>,
-    region_id: Option<&str>,
+    budget_region_id: Option<&str>,
+    storage_region_id: Option<&str>,
+    replacement_credit: i64,
     final_state: &mut WarmState,
 ) -> bool {
     let now = now_secs();
@@ -791,9 +952,9 @@ async fn flush(
     // synchronous SQLite does not stall the async reactor.
     let cache = st.cache.clone();
     let rows = std::mem::take(batch);
-    let budget = effective_budget(st, region_id);
+    let budget = replacement_budget(st, budget_region_id, replacement_credit);
     let cap = st.live_cap_bytes.load(Ordering::Relaxed);
-    let region_owned = region_id.map(str::to_string);
+    let region_owned = storage_region_id.map(str::to_string);
     let result = tokio::task::spawn_blocking(move || {
         cache.put_many_pinned(&rows, budget, cap, region_owned.as_deref(), now)
     })
@@ -844,6 +1005,10 @@ mod tests {
             .route(
                 "/missing/{z}/{x}/{y}",
                 get(|| async { axum::http::StatusCode::NOT_FOUND }),
+            )
+            .route(
+                "/error/{z}/{x}/{y}",
+                get(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
             );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -866,6 +1031,7 @@ mod tests {
             maxzoom: 4,
             vector_maxzoom: None,
             bounds: None,
+            coverage: None,
             attribution: String::new(),
         }
     }
@@ -1087,6 +1253,28 @@ mod tests {
             .await,
             Err(StartError::BadBbox(_))
         ));
+        let mut outside = known.clone();
+        outside.id = "outside".into();
+        outside.coverage = Some(vec![[100.0, 40.0, 110.0, 50.0]]);
+        st.sources
+            .write()
+            .await
+            .insert(outside.id.clone(), outside.clone());
+        assert!(matches!(
+            start_warm(
+                &st,
+                WarmRequest {
+                    sources: vec![outside],
+                    bbox: [-1.0, -1.0, 1.0, 1.0],
+                    additional_bbox: None,
+                    minzoom: 0,
+                    maxzoom: 0,
+                    region_id: Some("region".into())
+                }
+            )
+            .await,
+            Err(StartError::BadBbox(_))
+        ));
         // A source with a deep max zoom over the whole world projects past WARM_TILE_HARD_CAP (2_000_000):
         // zoom 11 alone is 4^11 = 4_194_304 tiles, so start_warm rejects it upfront with TooMany. Replace
         // the stored "s" with a deep-zoom copy so start_warm resolves the real (deep) source for the count.
@@ -1252,6 +1440,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn overlapping_warms_for_the_same_region_are_rejected_and_cancel_cleanly() {
+        let app = axum::Router::new().route(
+            "/slow/{z}/{x}/{y}",
+            get(|| async {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                ([(header::CONTENT_TYPE, "image/png")], vec![1u8, 2, 3, 4])
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let db = NamedTempFile::new().unwrap();
+        let st = state(&db, dev(), xyz(addr, "slow")).await;
+        let source = st.sources.read().await["s"].clone();
+        let request = || WarmRequest {
+            sources: vec![source.clone()],
+            bbox: [-1.0, -1.0, 1.0, 1.0],
+            additional_bbox: None,
+            minzoom: 0,
+            maxzoom: 0,
+            region_id: Some("region".into()),
+        };
+        let first = start_warm(&st, request()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let second = start_warm(&st, request()).await;
+        assert!(matches!(second, Err(StartError::RegionBusy)));
+
+        assert!(cancel_region_warms(&st, "region").await);
+        let snap = wait_done(&st, &first).await;
+        assert_eq!(snap["state"], "cancelled");
+        assert!(!st.active_warm_regions.lock().await.contains("region"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_replacement_preserves_the_last_good_region() {
+        let addr = stub().await;
+        let db = NamedTempFile::new().unwrap();
+        let st = state(&db, dev(), xyz(addr, "img")).await;
+        let source = st.sources.read().await["s"].clone();
+        let initial = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![source],
+                bbox: [-1.0, -1.0, 1.0, 1.0],
+                additional_bbox: None,
+                minzoom: 1,
+                maxzoom: 1,
+                region_id: Some("region".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(wait_done(&st, &initial).await["state"], "done");
+        let before = st.cache.region_bytes("region").unwrap();
+        assert!(before > 0);
+
+        {
+            let mut sources = st.sources.write().await;
+            sources.insert("s".into(), xyz(addr, "error"));
+        }
+        let replacement = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![st.sources.read().await["s"].clone()],
+                bbox: [-1.0, -1.0, 1.0, 1.0],
+                additional_bbox: None,
+                minzoom: 0,
+                maxzoom: 0,
+                region_id: Some("region".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let snap = wait_done(&st, &replacement).await;
+        assert_eq!(snap["state"], "error");
+        assert!(snap["errors"].as_u64().unwrap() > 0);
+        assert_eq!(st.cache.region_bytes("region").unwrap(), before);
+        assert_eq!(
+            st.cache
+                .region_bytes(&format!("__warm_staging__{replacement}"))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn warm_cancel_stops_between_tiles() {
         let addr = stub().await;
         let db = NamedTempFile::new().unwrap();
@@ -1307,6 +1583,7 @@ mod tests {
             maxzoom: 20,
             vector_maxzoom: Some(14),
             bounds: None,
+            coverage: None,
             attribution: String::new(),
         }
     }

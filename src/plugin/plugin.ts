@@ -1,7 +1,6 @@
 /** The plugin factory: lifecycle that launches the tilecache container and registers chart providers. */
 
 import type { Plugin, ServerAPI } from '@signalk/server-api'
-import type { Position } from '../shared/types.js'
 import { PLUGIN_ID, PLUGIN_NAME, PLUGIN_DESCRIPTION, PLUGIN_MOUNT_PATH } from '../shared/plugin-id.js'
 import { requireContainerManager, getContainerManager, ensureRuntimeReady } from '../runtime/container-manager.js'
 import { TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT, DEFAULT_TILECACHE_TAG, DEFAULT_CACHE_CAP_GIB, PLUGIN_VERSION, buildTilecacheConfig, probeTilecacheHealth, registerTilecacheUpdates, unregisterTilecacheUpdates } from '../runtime/tilecache-container.js'
@@ -21,6 +20,7 @@ import { CACHE_CAP_MAX_GIB, CACHE_CAP_MIN_GIB, deriveDefaultCapGiB } from '../sh
 import { createPositionWarmer, type PositionWarmer } from '../runtime/position-warmer.js'
 import { loadRegionsStore, updateRegion, createCachedRegionsLoader, POSITION_WARM_REGION_ID, positionWarmBudgetBytes } from '../runtime/regions-store.js'
 import { getRegionByteTotals, warmRegion } from '../runtime/tilecache-client.js'
+import { isValidPosition } from '../runtime/position-warm.js'
 
 interface ChartLockerConfig {
   // Sectioned to match how the admin form groups the fields: nested objects render as titled
@@ -70,6 +70,7 @@ export function createPlugin (app: ServerAPI): Plugin {
     return overridesInstance
   }
   let discovery: DiscoveryHandle | undefined
+  let pmtilesEnabled = false
   // The charts directory resolved from the active config, captured so the override re-apply closure
   // rescans the configured directory, not the default. Set in setupCharts.
   let activeChartsDir: string | undefined
@@ -133,8 +134,12 @@ export function createPlugin (app: ServerAPI): Plugin {
 
   async function setupCharts (config: ChartLockerConfig): Promise<void> {
     if (isThirdPartyPmtilesEnabled(configPath)) {
+      pmtilesEnabled = false
+      activeChartsDir = undefined
+      registry.clear()
       return
     }
+    pmtilesEnabled = true
     activeChartsDir = chartsDirFor(config)
     const overrides = getOverrides()
     overrides.load()
@@ -151,6 +156,7 @@ export function createPlugin (app: ServerAPI): Plugin {
     discovery?.stop()
     discovery = undefined
     registry.clear()
+    pmtilesEnabled = false
   }
 
   async function doStart (rawConfig: ChartLockerConfig): Promise<void> {
@@ -160,14 +166,25 @@ export function createPlugin (app: ServerAPI): Plugin {
     tilecacheHealthy = false
     tilecacheConfigured = false
     configuredCachePath = config.advanced?.cacheVolumeSource?.trim() || null
-    const manager = requireContainerManager(app)
-    if (!manager) return
-    if (!(await ensureRuntimeReady(app, manager))) return
 
-    // Chart discovery has no data dependency on the container, so start it now and await it at the end;
-    // it overlaps the container launch instead of running strictly after it. A rejection still surfaces
-    // through the await below into start()'s error handler.
+    // PMTiles discovery is independent of the container. Start it before checking the optional
+    // tilecache runtime so local charts remain available when signalk-container is absent or offline.
     const chartsReady = setupCharts(config)
+    const manager = requireContainerManager(app)
+    if (!manager) {
+      await chartsReady
+      app.setPluginStatus(pmtilesEnabled
+        ? 'PMTiles charts ready; tile caching is disabled because signalk-container is unavailable.'
+        : 'Tile caching unavailable. PMTiles charts disabled while pmtiles-chart-provider is enabled.')
+      return
+    }
+    if (!(await ensureRuntimeReady(app, manager))) {
+      await chartsReady
+      app.setPluginStatus(pmtilesEnabled
+        ? 'PMTiles charts ready; tile caching is disabled because no container runtime is available.'
+        : 'Tile caching unavailable. PMTiles charts disabled while pmtiles-chart-provider is enabled.')
+      return
+    }
 
     // The tilecache is non-fatal: a failure here disables tile caching but leaves the PMTiles chart
     // provider and the plugin serve routes fully working.
@@ -216,7 +233,7 @@ export function createPlugin (app: ServerAPI): Plugin {
         // whole scroll cache and the pinned bytes could exceed the cap.
         const regionsBudgetBytes = Math.min(rawR, capBytes)
         const pBudget = positionWarmBudgetBytes(regionsBudgetBytes)
-        const pushed = await pushTilecacheConfig(tcAddress, buildSourcePayload(capBytes, regionsBudgetBytes, pBudget, scrollTtlSecs))
+        const pushed = await pushTilecacheConfig(tcAddress, await buildSourcePayload(capBytes, regionsBudgetBytes, pBudget, scrollTtlSecs))
         tilecacheConfigured = pushed
         if (!pushed) {
           app.debug('event=tilecache_config_push_failed state=unconfigured')
@@ -258,7 +275,9 @@ export function createPlugin (app: ServerAPI): Plugin {
       }
     })
     positionUnsub = app.streambundle.getSelfBus('navigation.position' as unknown as Parameters<typeof app.streambundle.getSelfBus>[0])
-      .onValue((delta: { value: unknown }) => { warmer?.onPosition(delta.value as Position) })
+      .onValue((delta: { value: unknown }) => {
+        if (isValidPosition(delta.value)) warmer?.onPosition(delta.value)
+      })
 
     await chartsReady
 
@@ -269,7 +288,7 @@ export function createPlugin (app: ServerAPI): Plugin {
           : !tilecacheHealthy
               ? `Tilecache at ${tilecacheAddress}; startup health is still pending.`
               : `Tilecache at ${tilecacheAddress}; ready.`
-    if (isThirdPartyPmtilesEnabled(configPath)) {
+    if (!pmtilesEnabled) {
       app.setPluginStatus(`${tcStatus} PMTiles charts disabled: signalk-pmtiles-plugin is enabled, disable it to use the Chart Locker chart provider.`)
     } else {
       app.setPluginStatus(tcStatus)
@@ -398,7 +417,7 @@ export function createPlugin (app: ServerAPI): Plugin {
         },
         regionsBudgetGiB: {
           'ui:widget': 'updown',
-          'ui:help': 'This is not space taken from the scroll cache until a region is actually saved. A value above the cache cap is clamped to the cap.'
+          'ui:help': 'This is not space taken from the scroll cache until a region is actually saved. The value must not exceed the cache cap.'
         }
       },
       charts: {
@@ -434,7 +453,7 @@ export function createPlugin (app: ServerAPI): Plugin {
       registerTileRoutes(router as unknown as TileRouter, () => tilecacheAddress, undefined, PLUGIN_MOUNT_PATH)
       registerRegionsRoutes(router as unknown as RegionsRouter, app, () => tilecacheAddress)
       registerCacheInfoRoute(router as unknown as CacheInfoRouter, app, { cachePath: () => configuredCachePath })
-      registerPmtilesServeRoute(router as unknown as ServeRouter, registry)
+      registerPmtilesServeRoute(router as unknown as ServeRouter, registry, () => pmtilesEnabled)
       registerChartManagementRoutes(
         router as unknown as ManagementRouter,
         app,
@@ -445,7 +464,8 @@ export function createPlugin (app: ServerAPI): Plugin {
           registry,
           namer: getOverrides().namer(),
           onError: (message) => app.debug(`Chart discovery: ${message}`)
-        })
+        }),
+        () => pmtilesEnabled
       )
     }
   }

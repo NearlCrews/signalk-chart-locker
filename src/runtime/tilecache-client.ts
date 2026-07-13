@@ -2,7 +2,7 @@
  * position-warm loop uses it so the warm POST and the status poll are spelled once, not re-rolled inline.
  * Returns the terminal { errors, total }, or null on any failure or a job the container no longer has. */
 
-import type { Bbox } from 'signalk-chart-sources'
+import type { LngLatBbox } from 'signalk-chart-sources'
 import { CONTAINER_FETCH_TIMEOUT_MS } from './container-fetch.js'
 
 export interface WarmResult {
@@ -21,7 +21,8 @@ export async function getRegionByteTotals (address: string, fetchImpl: typeof fe
     if (typeof body.regions !== 'object' || body.regions === null || Array.isArray(body.regions)) return null
     const totals: Record<string, number> = {}
     for (const [id, bytes] of Object.entries(body.regions)) {
-      if (typeof bytes === 'number' && Number.isFinite(bytes) && bytes >= 0) totals[id] = bytes
+      if (!isNonnegativeInteger(bytes)) return null
+      totals[id] = bytes
     }
     return totals
   } catch {
@@ -33,6 +34,7 @@ const POLL_ATTEMPTS = 20
 const POLL_INTERVAL_MS = 500
 const MAX_RETRIES = 3
 const RETRY_DELAY_MS = 1000
+const WARM_STATES = new Set(['running', 'done', 'cancelled', 'capped', 'error'])
 
 // Each attempt gets its own timeout signal, so a slow attempt's timeout does not eat into the
 // budget of the retries that follow it.
@@ -57,22 +59,28 @@ async function fetchWithRetry (url: string, options: RequestInit, fetchImpl: typ
 
 export async function warmRegion (
   address: string,
-  req: { bbox: Bbox, sources: string[], minzoom: number, maxzoom: number, regionId?: string, additionalBbox?: Bbox },
+  req: { bbox: LngLatBbox, sources: string[], minzoom: number, maxzoom: number, regionId?: string, additionalBbox?: LngLatBbox },
   fetchImpl: typeof fetch = fetch
 ): Promise<WarmResult | null> {
   try {
-    const start = await fetchWithRetry(`http://${address}/warm`, {
+    // Starting a warm is not idempotent. Never retry this POST because a lost response can still mean
+    // the container accepted the first job; retrying would create a second job for the same region.
+    const start = await fetchImpl(`http://${address}/warm`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(req)
-    }, fetchImpl)
+      body: JSON.stringify(req),
+      signal: AbortSignal.timeout(CONTAINER_FETCH_TIMEOUT_MS)
+    })
     if (!start.ok) return null
-    const { jobId } = (await start.json()) as { jobId: string }
+    const body = (await start.json()) as { jobId?: unknown }
+    if (typeof body.jobId !== 'string' || body.jobId.length === 0) return null
+    const jobId = body.jobId
     // Poll briefly so the caller learns whether the warm was all-errors (offline) for its backoff decision.
     for (let i = 0; i < POLL_ATTEMPTS; i++) {
       const status = await fetchWithRetry(`http://${address}/warm/${encodeURIComponent(jobId)}`, {}, fetchImpl)
       if (status.status === 404) return null
-      const snap = (await status.json()) as { errors: number, total: number, state: string }
+      const snap = (await status.json()) as { errors?: unknown, total?: unknown, state?: unknown }
+      if (typeof snap.state !== 'string' || !WARM_STATES.has(snap.state) || !isNonnegativeInteger(snap.errors) || !isNonnegativeInteger(snap.total)) return null
       if (snap.state !== 'running') return { errors: snap.errors, total: snap.total }
       await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
     }
@@ -80,4 +88,8 @@ export async function warmRegion (
   } catch {
     return null
   }
+}
+
+function isNonnegativeInteger (value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }

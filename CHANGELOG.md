@@ -4,6 +4,38 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<a id="v050"></a>
+
+## [0.5.0] - 2026-07-13
+
+### Changed
+
+- Upgrade `signalk-chart-sources` to 0.3.1 and raise the supported Node.js floor to 22.
+- Treat the shared chart-source catalog and geographic tuples as readonly, use the unit-specific
+  `LngLatBbox` type, and carry disjoint source coverage into the tile-cache warm enumerator.
+- Use source-specific and mode-specific first-download planning estimates from the shared catalog.
+
+### Fixed
+
+- Accept saved regions and PMTiles bounds that cross the antimeridian, detect positions inside those
+  regions, and deduplicate overlapping warm coverage in the container.
+- Reject unknown source identifiers and invalid estimate statistics with bounded client errors before
+  a region is persisted or a warm begins.
+- Keep PMTiles discovery and serving available when the container manager or runtime is unavailable,
+  disable every PMTiles management and serving route during a provider conflict, create missing chart
+  directories, recover failed directory watches, and detect same-size file replacements reliably.
+- Serve PMTiles through a validated no-follow file descriptor so a path swap cannot redirect an
+  in-progress request, and stream proxied responses with backpressure and cancellation handling.
+- Download region replacements into job-specific staging pins, atomically promote only complete
+  successful sets, preserve the last good region on every failed attempt, and serialize warm and
+  delete operations for each logical region.
+- Validate persisted region data, live positions, container configuration, statistics, and warm-job
+  responses before they affect runtime state. Failed position warms now retry after backoff even when
+  the vessel remains stationary, and warm-start requests are never replayed automatically.
+- Restrict database recreation to confirmed SQLite corruption, reject invalid environment values,
+  validate trusted source definitions and budget relationships, and report completed jobs with tile
+  errors as failures instead of ready regions.
+
 <a id="v044"></a>
 
 ## [0.4.4] - 2026-07-13

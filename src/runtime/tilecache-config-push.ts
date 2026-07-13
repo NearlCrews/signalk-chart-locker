@@ -1,6 +1,6 @@
 /** Builds the tilecache POST /config payload from the shared source registry and pushes it to the container. */
 
-import { CHART_SOURCES, type ChartSource } from 'signalk-chart-sources'
+import type { ChartSource } from 'signalk-chart-sources'
 import type { FetchResponse } from '../shared/types.js'
 import { CONTAINER_FETCH_TIMEOUT_MS } from './container-fetch.js'
 import { PLUGIN_MOUNT_PATH } from '../shared/plugin-id.js'
@@ -8,8 +8,12 @@ import { PLUGIN_MOUNT_PATH } from '../shared/plugin-id.js'
 /** The Signal K server route base the browser reaches the proxy through (for the container style rewrite). */
 export const PLUGIN_PUBLIC_BASE = PLUGIN_MOUNT_PATH
 
+// Chart Locker is a CommonJS Signal K plugin, while chart-sources 0.3.x intentionally exposes an
+// ESM-only runtime. Dynamic import is preserved by the NodeNext build and crosses that boundary.
+const chartSources = import('signalk-chart-sources')
+
 export interface TilecacheConfigPayload {
-  sources: ChartSource[]
+  sources: readonly ChartSource[]
   publicBase: string
   capBytes: number
   regionsBudgetBytes: number
@@ -27,13 +31,14 @@ export interface TilecacheConfigPayload {
  * two-budget accounting is non-zero. Without this push the container's regions budget stays 0 and every
  * region warm immediately caps.
  */
-export function buildSourcePayload (
+export async function buildSourcePayload (
   capBytes: number,
   regionsBudgetBytes: number,
   positionWarmBudgetBytes: number,
   scrollTtlSecs: number,
   publicBase: string = PLUGIN_PUBLIC_BASE
-): TilecacheConfigPayload {
+): Promise<TilecacheConfigPayload> {
+  const { CHART_SOURCES } = await chartSources
   return { sources: CHART_SOURCES, publicBase, capBytes, regionsBudgetBytes, positionWarmBudgetBytes, scrollTtlSecs }
 }
 

@@ -28,6 +28,15 @@ function collect (): { routes: Record<string, (req: ServeRequest, res: FakeRes) 
   return { routes, registry }
 }
 
+test('the serve route returns 409 while PMTiles support is disabled', async () => {
+  const routes: Record<string, (req: ServeRequest, res: FakeRes) => void> = {}
+  registerPmtilesServeRoute({ get (p, h) { routes[p] = h as never } }, new ChartRegistry(), () => false)
+  const res = new FakeRes()
+  routes['/pmtiles/:file'](req('sf.pmtiles'), res)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(res.statusCode, 409)
+})
+
 async function fixtureRecord (): Promise<{ record: ChartRecord, cleanup: () => Promise<void>, size: number }> {
   const dir = await mkdtemp(join(tmpdir(), 'serve-'))
   const file = join(dir, 'sf.pmtiles')
@@ -80,7 +89,7 @@ test('a full GET returns 200 with a strong ETag and Accept-Ranges', async () => 
     const body = await finished(res)
     assert.equal(res.statusCode, 200)
     assert.equal(res.outHeaders['accept-ranges'], 'bytes')
-    assert.match(res.outHeaders.etag, /^"\d+-\d+"$/)
+    assert.match(res.outHeaders.etag, /^"\d+-\d+-\d+-\d+"$/)
     assert.equal(res.outHeaders.etag.startsWith('"W/'), false)
     assert.equal(body.length, size)
   } finally {

@@ -1,10 +1,11 @@
 /** Serve a discovered PMTiles archive over a Range-capable route with a strong ETag minted from file
- * identity (size and mtime in nanoseconds), so the browser HTTP cache and the pmtiles library work
+ * identity (device, inode, size, and mtime in nanoseconds), so the browser HTTP cache and the
+ * pmtiles library work
  * without the cache: 'no-store' workaround. The ETag is never a hash of the 127-byte header: a
  * re-exported archive with a byte-identical header must still get a new ETag. The route is open
  * read-only; an unknown id returns 404, and an id can never reach a file outside the discovered set. */
 
-import { createReadStream, realpathSync, statSync } from 'node:fs'
+import { closeSync, constants, createReadStream, fstatSync, openSync } from 'node:fs'
 import { type Writable } from 'node:stream'
 import { nameToId } from '../charts/chart-id.js'
 import type { ChartRegistry } from '../charts/chart-registry.js'
@@ -54,8 +55,12 @@ function parseRange (raw: string | undefined, size: number): { start: number, en
   return { start, end }
 }
 
-export function registerPmtilesServeRoute (router: ServeRouter, registry: ChartRegistry): void {
+export function registerPmtilesServeRoute (router: ServeRouter, registry: ChartRegistry, isEnabled: () => boolean = () => true): void {
   router.get(PMTILES_SERVE_PATH, (req, res) => {
+    if (!isEnabled()) {
+      res.status(409).end('PMTiles serving is disabled while pmtiles-chart-provider is enabled')
+      return
+    }
     serve(req, res, registry)
   })
 }
@@ -66,33 +71,20 @@ function serve (req: ServeRequest, res: ServeResponse, registry: ChartRegistry):
     res.status(404).end('Not found')
     return
   }
-  // Re-validate containment at serve time: the registry stored the realpath at discovery, so if a symlink
-  // swap or a file replacement between the debounced rescan and now changed where the path resolves, the
-  // realpath no longer matches the stored one and we reject. This closes the rescan-to-serve TOCTOU window.
-  // Synchronous so the check and the stream open happen atomically within the same event loop turn, preventing
-  // a TOCTOU race where an async gap would let an attacker swap the file between check and open.
-  let resolvedPath: string
-  try {
-    // Intentionally synchronous: the check and stream-open happen in the same event loop turn, minimizing
-    // the TOCTOU window; the per-request stat and realpath cost is sub-millisecond on local filesystem.
-    resolvedPath = realpathSync(filePath)
-  } catch {
-    res.status(404).end('Not found')
-    return
-  }
-  if (resolvedPath !== filePath) {
-    res.status(404).end('Not found')
-    return
-  }
+  // Open with O_NOFOLLOW, then validate the opened descriptor. createReadStream receives this descriptor,
+  // so the file that was checked is exactly the file that is streamed even if the path is replaced later.
+  let fd: number | undefined
   let size: number
   let etag: string
   try {
-    // Intentionally synchronous: the check and stream-open happen in the same event loop turn, minimizing
-    // the TOCTOU window; the per-request stat and realpath cost is sub-millisecond on local filesystem.
-    const info = statSync(filePath, { bigint: true })
+    fd = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const info = fstatSync(fd, { bigint: true })
+    if (!info.isFile()) throw new Error('not a regular file')
     size = Number(info.size)
-    etag = `"${info.size}-${info.mtimeNs}"`
+    if (!Number.isSafeInteger(size) || size < 0) throw new Error('file is too large')
+    etag = `"${info.dev}-${info.ino}-${info.size}-${info.mtimeNs}"`
   } catch {
+    if (fd !== undefined) closeSync(fd)
     res.status(404).end('Not found')
     return
   }
@@ -106,6 +98,7 @@ function serve (req: ServeRequest, res: ServeResponse, registry: ChartRegistry):
   const rangeHeader = header(req.headers.range)
   const ifNoneMatch = header(req.headers['if-none-match'])
   if (ifNoneMatch === '*' || ifNoneMatch === etag) {
+    closeSync(fd)
     res.status(304).end()
     return
   }
@@ -117,6 +110,7 @@ function serve (req: ServeRequest, res: ServeResponse, registry: ChartRegistry):
   const range = honorRange ? parseRange(rangeHeader, size) : null
 
   if (range === 'unsatisfiable') {
+    closeSync(fd)
     res.setHeader('Content-Range', `bytes */${size}`)
     res.status(416).end()
     return
@@ -126,13 +120,13 @@ function serve (req: ServeRequest, res: ServeResponse, registry: ChartRegistry):
     res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${size}`)
     res.setHeader('Content-Length', String(range.end - range.start + 1))
     res.status(206)
-    pipeStream(createReadStream(filePath, { start: range.start, end: range.end }), res)
+    pipeStream(createReadStream(filePath, { fd, autoClose: true, start: range.start, end: range.end }), res)
     return
   }
 
   res.setHeader('Content-Length', String(size))
   res.status(200)
-  pipeStream(createReadStream(filePath), res)
+  pipeStream(createReadStream(filePath, { fd, autoClose: true }), res)
 }
 
 function pipeStream (stream: NodeJS.ReadableStream, res: ServeResponse): void {

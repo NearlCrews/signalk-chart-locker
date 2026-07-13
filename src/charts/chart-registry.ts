@@ -4,7 +4,7 @@
  * so teardown clears the map: the provider then serves an empty set. */
 
 import type { ResourceProvider } from '@signalk/server-api'
-import type { Bbox } from 'signalk-chart-sources'
+import type { LngLatBbox } from 'signalk-chart-sources'
 import type { DecodedPmtiles } from './pmtiles-metadata.js'
 import { PLUGIN_MOUNT_PATH } from '../shared/plugin-id.js'
 
@@ -27,6 +27,9 @@ export interface ChartRecord {
   decoded: DecodedPmtiles
   /** File identity captured at decode time, so a rescan can skip re-decoding an unchanged file. */
   mtimeMs?: number
+  mtimeNs?: bigint
+  device?: bigint
+  inode?: bigint
   bytes?: number
 }
 
@@ -36,7 +39,7 @@ export interface ChartResource {
   description: string
   type: 'tilelayer'
   scale: number
-  bounds?: Bbox
+  bounds?: LngLatBbox
   minzoom: number
   maxzoom: number
   format: string

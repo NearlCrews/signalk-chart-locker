@@ -23,29 +23,45 @@ pub fn tile_for_lng_lat(lng: f64, lat: f64, z: u32) -> (u32, u32) {
     (xi, yi)
 }
 
-// Clip the request bbox to the source bounds and the Mercator latitude limit. Returns the clipped bbox,
-// or None if the box is non-finite, degenerate, antimeridian-crossing (min_lng > max_lng), or wholly
-// outside the source bounds.
-fn clip(source: &ChartSource, bbox: [f64; 4]) -> Option<[f64; 4]> {
-    let [mut min_lng, mut min_lat, mut max_lng, mut max_lat] = bbox;
-    if !bbox.iter().all(|v| v.is_finite()) {
-        return None;
+fn split_bbox([west, south, east, north]: [f64; 4]) -> Vec<[f64; 4]> {
+    if west < east {
+        vec![[west, south, east, north]]
+    } else if west > east {
+        vec![[west, south, 180.0, north], [-180.0, south, east, north]]
+    } else {
+        Vec::new()
     }
-    if min_lng > max_lng {
-        return None;
+}
+
+fn intersect(left: [f64; 4], right: [f64; 4]) -> Option<[f64; 4]> {
+    let west = left[0].max(right[0]);
+    let south = left[1].max(right[1]).max(-MAX_MERCATOR_LAT);
+    let east = left[2].min(right[2]);
+    let north = left[3].min(right[3]).min(MAX_MERCATOR_LAT);
+    (west < east && south < north).then_some([west, south, east, north])
+}
+
+// Split antimeridian-crossing request and source boxes, intersect them with the source's disjoint
+// coverage (or its display bounds), and clamp latitude to Web Mercator.
+fn clips(source: &ChartSource, bbox: [f64; 4]) -> Vec<[f64; 4]> {
+    if !bbox.iter().all(|v| v.is_finite()) || bbox[0] == bbox[2] || bbox[1] >= bbox[3] {
+        return Vec::new();
     }
-    if let Some([b0, b1, b2, b3]) = source.bounds {
-        min_lng = min_lng.max(b0);
-        min_lat = min_lat.max(b1);
-        max_lng = max_lng.min(b2);
-        max_lat = max_lat.min(b3);
-    }
-    min_lat = min_lat.max(-MAX_MERCATOR_LAT);
-    max_lat = max_lat.min(MAX_MERCATOR_LAT);
-    if min_lng >= max_lng || min_lat >= max_lat {
-        return None;
-    }
-    Some([min_lng, min_lat, max_lng, max_lat])
+    let requested = split_bbox(bbox);
+    let coverage = source
+        .coverage
+        .clone()
+        .or_else(|| source.bounds.map(|bounds| vec![bounds]))
+        .unwrap_or_else(|| vec![[-180.0, -90.0, 180.0, 90.0]]);
+    let source_boxes: Vec<[f64; 4]> = coverage.into_iter().flat_map(split_bbox).collect();
+    requested
+        .into_iter()
+        .flat_map(|request| {
+            source_boxes
+                .iter()
+                .filter_map(move |source_box| intersect(request, *source_box))
+        })
+        .collect()
 }
 
 /// The effective zoom ceiling for any warm or enumeration: the source maxzoom capped at 24 so
@@ -67,15 +83,100 @@ fn tile_rect(clip: [f64; 4], z: u32) -> (u32, u32, u32, u32) {
     (x0, x1, y0, y1)
 }
 
+#[derive(Clone, Copy)]
+struct TileRange {
+    z: u32,
+    x0: u32,
+    x1: u32,
+    y0: u32,
+    y1: u32,
+}
+
+// Convert possibly overlapping rectangles into disjoint x slabs with merged y intervals. This keeps
+// overlapping coverage boxes and antimeridian edge tiles from being counted or fetched twice.
+fn disjoint_ranges(ranges: Vec<TileRange>) -> Vec<TileRange> {
+    let mut out = Vec::new();
+    let mut zooms: Vec<u32> = ranges.iter().map(|range| range.z).collect();
+    zooms.sort_unstable();
+    zooms.dedup();
+    for z in zooms {
+        let zoom_ranges: Vec<TileRange> = ranges
+            .iter()
+            .copied()
+            .filter(|range| range.z == z)
+            .collect();
+        let mut boundaries: Vec<u32> = zoom_ranges
+            .iter()
+            .flat_map(|range| [range.x0, range.x1 + 1])
+            .collect();
+        boundaries.sort_unstable();
+        boundaries.dedup();
+        for pair in boundaries.windows(2) {
+            let x0 = pair[0];
+            let x_end = pair[1];
+            if x0 >= x_end {
+                continue;
+            }
+            let mut intervals: Vec<(u32, u32)> = zoom_ranges
+                .iter()
+                .filter(|range| range.x0 <= x0 && range.x1 >= x_end - 1)
+                .map(|range| (range.y0, range.y1))
+                .collect();
+            intervals.sort_unstable_by_key(|interval| interval.0);
+            let mut current: Option<(u32, u32)> = None;
+            for interval in intervals {
+                current = match current {
+                    None => Some(interval),
+                    Some((start, end)) if interval.0 <= end.saturating_add(1) => {
+                        Some((start, end.max(interval.1)))
+                    }
+                    Some((start, end)) => {
+                        out.push(TileRange {
+                            z,
+                            x0,
+                            x1: x_end - 1,
+                            y0: start,
+                            y1: end,
+                        });
+                        Some(interval)
+                    }
+                };
+            }
+            if let Some((y0, y1)) = current {
+                out.push(TileRange {
+                    z,
+                    x0,
+                    x1: x_end - 1,
+                    y0,
+                    y1,
+                });
+            }
+        }
+    }
+    out.sort_unstable_by_key(|range| (range.z, range.x0, range.y0));
+    out
+}
+
+fn covered_ranges(source: &ChartSource, bbox: [f64; 4], zmin: u32, zmax: u32) -> Vec<TileRange> {
+    let clips = clips(source, bbox);
+    let (zmin, zmax) = zoom_bounds(source, zmin, zmax);
+    if zmin > zmax || clips.is_empty() {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    for z in zmin..=zmax {
+        for clip in &clips {
+            let (x0, x1, y0, y1) = tile_rect(*clip, z);
+            ranges.push(TileRange { z, x0, x1, y0, y1 });
+        }
+    }
+    disjoint_ranges(ranges)
+}
+
 /// The number of tiles a warm over this bbox and zoom range would touch.
 pub fn tile_count_in_bbox(source: &ChartSource, bbox: [f64; 4], zmin: u32, zmax: u32) -> u64 {
-    let Some(c) = clip(source, bbox) else {
-        return 0;
-    };
-    let (zmin, zmax) = zoom_bounds(source, zmin, zmax);
-    let mut count = 0u64;
-    for z in zmin..=zmax {
-        let (x0, x1, y0, y1) = tile_rect(c, z);
+    let mut count = 0;
+    for TileRange { x0, x1, y0, y1, .. } in covered_ranges(source, bbox, zmin, zmax) {
         // Widen to u64 BEFORE subtracting so a high-zoom source cannot wrap in u32.
         count += (u64::from(x1) - u64::from(x0) + 1) * (u64::from(y1) - u64::from(y0) + 1);
     }
@@ -83,24 +184,25 @@ pub fn tile_count_in_bbox(source: &ChartSource, bbox: [f64; 4], zmin: u32, zmax:
 }
 
 /// An iterator over (z, x, y) for every tile a warm over this bbox and zoom range would touch.
-/// Allocates one Box (the trait object); the tile tuples are produced lazily.
+/// Allocates the small set of disjoint coverage ranges and one Box; tile tuples are produced lazily.
 pub fn tiles_iter(
     source: &ChartSource,
     bbox: [f64; 4],
     zmin: u32,
     zmax: u32,
 ) -> Box<dyn Iterator<Item = (u32, u32, u32)> + Send + '_> {
-    let Some(c) = clip(source, bbox) else {
-        return Box::new(std::iter::empty());
-    };
-    let (zmin, zmax) = zoom_bounds(source, zmin, zmax);
-    Box::new((zmin..=zmax).flat_map(move |z| {
-        let (x0, x1, y0, y1) = tile_rect(c, z);
-        (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (z, x, y)))
-    }))
+    Box::new(
+        covered_ranges(source, bbox, zmin, zmax)
+            .into_iter()
+            .flat_map(|range| {
+                (range.x0..=range.x1)
+                    .flat_map(move |x| (range.y0..=range.y1).map(move |y| (range.z, x, y)))
+            }),
+    )
 }
 
-/// Call `f(z, x, y)` for every tile a warm over this bbox and zoom range would touch, allocating nothing.
+/// Call `f(z, x, y)` for every tile a warm over this bbox and zoom range would touch without
+/// collecting the tile tuples.
 #[cfg(test)]
 pub fn for_tiles_in_bbox(
     source: &ChartSource,
@@ -109,13 +211,10 @@ pub fn for_tiles_in_bbox(
     zmax: u32,
     mut f: impl FnMut(u32, u32, u32),
 ) {
-    let Some(c) = clip(source, bbox) else { return };
-    let (zmin, zmax) = zoom_bounds(source, zmin, zmax);
-    for z in zmin..=zmax {
-        let (x0, x1, y0, y1) = tile_rect(c, z);
-        for x in x0..=x1 {
-            for y in y0..=y1 {
-                f(z, x, y);
+    for range in covered_ranges(source, bbox, zmin, zmax) {
+        for x in range.x0..=range.x1 {
+            for y in range.y0..=range.y1 {
+                f(range.z, x, y);
             }
         }
     }
@@ -138,6 +237,7 @@ mod tests {
             maxzoom,
             vector_maxzoom: None,
             bounds,
+            coverage: None,
             attribution: String::new(),
         }
     }
@@ -209,17 +309,27 @@ mod tests {
     }
 
     #[test]
-    fn bounds_clip_and_antimeridian_and_degenerate_are_rejected() {
+    fn bounds_clip_antimeridian_and_invalid_boxes() {
         let bounded = src(0, 18, Some([0.0, 0.0, 5.0, 5.0]));
         let unbounded = src(0, 18, None);
         assert!(
             tile_count_in_bbox(&bounded, [-20.0, -20.0, 20.0, 20.0], 6, 6)
                 < tile_count_in_bbox(&unbounded, [-20.0, -20.0, 20.0, 20.0], 6, 6)
         );
+        let crossing = [170.0, -10.0, -170.0, 10.0];
+        let crossing_tiles: Vec<_> = tiles_iter(&unbounded, crossing, 3, 3).collect();
         assert_eq!(
-            tile_count_in_bbox(&unbounded, [170.0, -10.0, -170.0, 10.0], 3, 3),
-            0
-        ); // antimeridian
+            tile_count_in_bbox(&unbounded, crossing, 3, 3),
+            crossing_tiles.len() as u64
+        );
+        assert!(!crossing_tiles.is_empty());
+        assert_eq!(
+            crossing_tiles
+                .iter()
+                .map(|(_, x, _)| *x)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([0, 7])
+        );
         assert_eq!(
             tile_count_in_bbox(&unbounded, [5.0, 5.0, 5.0, 5.0], 2, 2),
             0
@@ -228,5 +338,24 @@ mod tests {
             tile_count_in_bbox(&unbounded, [f64::NAN, 0.0, 1.0, 1.0], 2, 2),
             0
         ); // non-finite
+    }
+
+    #[test]
+    fn disjoint_coverage_is_clipped_and_deduplicated() {
+        let mut source = src(0, 18, None);
+        source.coverage = Some(vec![
+            [160.0, -15.0, 180.0, 15.0],
+            [-180.0, -15.0, -160.0, 15.0],
+            [170.0, -10.0, -170.0, 10.0],
+        ]);
+        let bbox = [150.0, -20.0, -150.0, 20.0];
+        let tiles: Vec<_> = tiles_iter(&source, bbox, 2, 2).collect();
+        assert_eq!(tile_count_in_bbox(&source, bbox, 2, 2), tiles.len() as u64);
+        let unique: std::collections::HashSet<_> = tiles.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            tiles.len(),
+            "overlapping coverage must not duplicate tiles"
+        );
     }
 }

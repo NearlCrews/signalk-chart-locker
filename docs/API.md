@@ -80,7 +80,7 @@ Create request:
 {
   "name": "North Channel",
   "bbox": [-84.9, 45.7, -84.1, 46.2],
-  "sourceIds": ["openstreetmap"],
+  "sourceIds": ["seamark"],
   "minzoom": 6,
   "maxzoom": 14
 }
@@ -88,12 +88,14 @@ Create request:
 
 Validation rules:
 
-- `bbox` is `[minLongitude, minLatitude, maxLongitude, maxLatitude]`, finite, ordered, and within
-  longitude -180 through 180 and latitude -90 through 90.
-- `sourceIds` contains 1 through 64 unique, non-empty identifiers, each no longer than 256 characters.
+- `bbox` is `[west, south, east, north]`, finite, and within longitude -180 through 180 and latitude
+  -90 through 90. West greater than east represents an antimeridian-crossing region.
+- `sourceIds` contains 1 through 64 unique identifiers from the shared chart-source catalog, each no
+  longer than 256 characters.
 - Zooms are integers from 0 through 24, and `minzoom` cannot exceed `maxzoom`.
 - The trimmed name contains 1 through 120 characters.
-- The server estimate must fit `regionsFreeBytes` before the region is persisted.
+- The server planning estimate must fit `regionsFreeBytes` before the region is persisted. The
+  container also enforces actual tile-count and transferred-byte limits while downloading.
 
 A successful create response contains `{ "region": ..., "jobId": "..." }`. A successful re-download
 contains `{ "jobId": "..." }`. The plugin does not mark a re-download active until the container
@@ -138,9 +140,9 @@ Override bodies may contain:
 - `description`: trimmed, up to 1,000 characters
 - `scale`: finite, positive, and no greater than `Number.MAX_SAFE_INTEGER`
 
-At least one recognized field is required. A successful override is persisted immediately, and its
-rescan is queued without delaying the response. Use `/api/charts/rescan` when the caller must wait for
-the completed discovery result.
+At least one recognized field is required. A successful override is persisted, then the route waits
+for the serialized rescan that applies it. A rescan failure returns 500 instead of reporting stale
+chart metadata as a successful update.
 
 ## Reverse geocoding
 
@@ -152,8 +154,9 @@ coordinates needed to name a region.
 
 | Status | Meaning |
 | ------ | ------- |
-| 400 | Malformed input, invalid bounds, invalid zooms, or a region estimate above budget |
+| 400 | Malformed input, invalid bounds, unknown sources, invalid estimate data, invalid zooms, or a region estimate above budget |
 | 404 | Unknown chart, region, source, or warm job |
+| 409 | PMTiles management is disabled by a provider conflict, a region warm is already active, or deletion could not stop an active warm |
 | 429 | The container warm-job limit is active |
 | 502 | The container request failed or returned an invalid response |
-| 503 | The container address or required internal service is unavailable |
+| 503 | The tile-cache container, its address, or a required internal service is temporarily unavailable |

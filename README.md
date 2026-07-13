@@ -4,7 +4,7 @@
 [![npm downloads](https://img.shields.io/npm/dm/signalk-chart-locker.svg)](https://www.npmjs.com/package/signalk-chart-locker)
 [![CI](https://github.com/NearlCrews/signalk-chart-locker/actions/workflows/ci.yml/badge.svg)](https://github.com/NearlCrews/signalk-chart-locker/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/NearlCrews/signalk-chart-locker/blob/main/LICENSE)
-[![node](https://img.shields.io/badge/node-%3E%3D20.3-brightgreen.svg)](https://nodejs.org)
+[![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://www.buymeacoffee.com/nearlcrews)
 
 A Signal K plugin that runs a Rust container alongside the server to host a shared tile cache
@@ -14,22 +14,27 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.4.4
+## What's new in 0.5.0
 
-Version 0.4.4 restores the React 19 configuration panel by pinning its production JSX runtime and
-migrates cache limits accepted by earlier releases into the current safe range during startup. Panel
-builds now execute the federated bundle against the Signal K React share-scope contract so this class
-of runtime failure cannot pass the release gate again.
+Version 0.5.0 adopts `signalk-chart-sources` 0.3.1, including disjoint source coverage and
+source-specific download estimates. Saved regions and PMTiles charts now work across the
+antimeridian, region replacements are staged and promoted atomically, and overlapping source
+coverage is deduplicated before download.
 
-See the [0.4.4 changelog](CHANGELOG.md#v044) for the full list.
+PMTiles discovery and serving now remain available without the container runtime, directory watches
+recover from failures, and chart responses are protected against path swaps. Runtime validation,
+retry behavior, cache database recovery, and warm-job status reporting are also stricter. This
+release requires Node.js 22 or newer.
+
+See the [0.5.0 changelog](CHANGELOG.md#v050) for the full list.
 
 ## What it does
 
 Chart Locker is a Signal K server plugin. It manages a container (via the
 [signalk-container](https://github.com/dirkwa/signalk-container) plugin) that runs a Rust service
-alongside the server. That service handles workloads the Node.js plugin process cannot: a shared
-tile cache that every device on the boat reads from and local `.pmtiles` chart serving with proper
-HTTP caching semantics.
+alongside the server. That service handles the shared tile cache that every device on the boat reads
+from. The Node.js plugin discovers and serves local `.pmtiles` charts with proper HTTP caching
+semantics, independently of the container runtime.
 
 The plugin side is thin by design. It resolves the `signalk-container` manager, starts the
 tilecache container, and exposes the regions and chart-management HTTP routes. All tile-cache
@@ -74,11 +79,12 @@ tiles. A standalone install of Binnacle is unaffected.
 ## Requirements
 
 - Signal K server 2.x.
-- Node.js >= 20.3.
-- [signalk-container](https://www.npmjs.com/package/signalk-container) >= 1.20.2, installed and
-  running. The companion delegates all container lifecycle to it. Versions before 1.20.2 still
-  run the plugin, just without the Container Manager update badge.
-- A container runtime (Podman or Docker) accessible to the Signal K server process.
+- Node.js >= 22.
+- [signalk-container](https://www.npmjs.com/package/signalk-container) >= 1.20.2 and a container
+  runtime (Podman or Docker) accessible to Signal K are required for tile caching, saved-region
+  downloads, position warming, and reverse geocoding. Local PMTiles discovery and serving continue
+  without them. Versions of `signalk-container` before 1.20.2 still run the tile cache, just without
+  the Container Manager update badge.
 - The [Binnacle Chartplotter](https://www.npmjs.com/package/signalk-binnacle) for the regions
   and chart-management panels.
 
@@ -96,7 +102,7 @@ npm install signalk-chart-locker
 
 ## Configuration
 
-After installation, enable the plugin in the Signal K plugin configuration panel. The companion
+After installation, enable the plugin in the Signal K plugin configuration panel. Chart Locker
 starts the tilecache container automatically when Signal K restarts. No further configuration is
 required for the tile cache or the PMTiles provider.
 
@@ -166,7 +172,7 @@ and structured log events. See [HTTP API](docs/API.md) for the plugin routes and
 
 ## Development
 
-This project targets Node.js 20.3 or newer. The Rust container is a Cargo workspace under
+This project targets Node.js 22 or newer. The Rust container is a Cargo workspace under
 `container/`.
 
 ```bash

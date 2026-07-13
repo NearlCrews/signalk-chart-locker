@@ -51,6 +51,23 @@ test('doStart discovers charts and registers the provider when the third-party p
   }
 })
 
+test('doStart discovers PMTiles charts when the container manager is unavailable', async () => {
+  const root = await configRoot()
+  await writeFile(join(root, 'charts', 'pmtiles', 'good.pmtiles'), buildPmtilesFixture())
+  clearGlobals()
+  const { app, providers } = chartApp(root)
+  const plugin = createPlugin(app as never)
+  try {
+    await plugin.start({}, () => {})
+    assert.equal(providers.length, 1)
+    assert.ok(app.status.some((status) => status.includes('PMTiles charts ready')))
+  } finally {
+    await plugin.stop()
+    clearGlobals()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('doStart does not register charts when the third-party plugin is enabled, and surfaces the conflict', async () => {
   const root = await configRoot()
   await mkdir(join(root, 'plugin-config-data'), { recursive: true })

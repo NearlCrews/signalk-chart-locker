@@ -55,6 +55,19 @@ test('a corrupt file falls back to an empty store rather than throwing', () => {
   assert.equal(store.positionWarm.enabled, true)
 })
 
+test('semantically malformed state is normalized without reaching runtime consumers', () => {
+  const dir = tmp()
+  writeFileSync(join(dir, 'regions.json'), JSON.stringify({
+    regions: [null, { id: 'bad', name: 'Bad', bbox: [180, 0, -180, 1], sourceIds: ['seamark'], minzoom: 1, maxzoom: 2, createdAt: 1, lastDownloadedAt: null, bytes: 0, status: 'ready' }],
+    positionWarm: { enabled: 'yes', radiusMeters: -1, moveThresholdMeters: null, intervalSecs: 1, baseZoom: 99, sources: ['same', 'same'] },
+    cacheScrollTtlDays: -4
+  }))
+  const store = loadRegionsStore(dir)
+  assert.deepEqual(store.regions, [])
+  assert.deepEqual(store.positionWarm, DEFAULT_REGIONS_STORE.positionWarm)
+  assert.equal(store.cacheScrollTtlDays, DEFAULT_REGIONS_STORE.cacheScrollTtlDays)
+})
+
 test('fresh directory returns empty regions list and default position-warm', () => {
   const store = loadRegionsStore(tmp())
   assert.deepEqual(store.regions, [])
@@ -142,6 +155,17 @@ test('a null bbox in a v2 file yields an empty regions list', () => {
   }))
   const store = loadRegionsStore(dir)
   assert.deepEqual(store.regions, [], 'null bbox produces no regions')
+})
+
+test('a v2 bbox without any valid sources does not create an unusable region', () => {
+  const dir = tmp()
+  writeFileSync(join(dir, 'regions.json'), JSON.stringify({
+    bbox: [-10, 50, 10, 60],
+    sources: [],
+    minzoom: 6,
+    maxzoom: 12
+  }))
+  assert.deepEqual(loadRegionsStore(dir).regions, [])
 })
 
 test('a second load of a migrated file does not create a duplicate region', () => {

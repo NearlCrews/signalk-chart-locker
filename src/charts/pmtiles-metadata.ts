@@ -2,7 +2,7 @@
  * zoom, the tile format, and the vector layers are always present. Mirrors the webapp
  * src/shared/map/pmtiles-metadata.ts so the two stay in step. */
 
-import type { Bbox } from 'signalk-chart-sources'
+import type { LngLatBbox } from 'signalk-chart-sources'
 import { open } from 'node:fs/promises'
 import { type Header, PMTiles, TileType } from 'pmtiles'
 import { PmtilesFileSource } from './pmtiles-file-source.js'
@@ -12,7 +12,7 @@ type PmtilesFormat = 'mvt' | 'png' | 'jpg' | 'webp' | 'avif'
 export interface DecodedPmtiles {
   minzoom: number
   maxzoom: number
-  bounds?: Bbox
+  bounds?: LngLatBbox
   format: PmtilesFormat
   vectorLayers: string[]
   name?: string
@@ -33,10 +33,10 @@ const FORMAT_BY_TILE_TYPE: Partial<Record<TileType, PmtilesFormat>> = {
 // The header packs lon and lat as int32 over 1e7; the library has already divided by 1e7, so these
 // are WGS84 degrees [west, south, east, north]. Omit a zero-area or inverted box rather than emit a
 // degenerate rectangle a caller would treat as a real extent.
-function boundsFromHeader (header: Header): Bbox | undefined {
+function boundsFromHeader (header: Header): LngLatBbox | undefined {
   const { minLon, minLat, maxLon, maxLat } = header
   if (![minLon, minLat, maxLon, maxLat].every(Number.isFinite)) return undefined
-  if (minLon >= maxLon || minLat >= maxLat) return undefined
+  if (minLon === maxLon || minLat >= maxLat) return undefined
   return [minLon, minLat, maxLon, maxLat]
 }
 

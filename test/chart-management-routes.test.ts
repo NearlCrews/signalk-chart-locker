@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ServerAPI } from '@signalk/server-api'
-import type { Bbox } from 'signalk-chart-sources'
+import type { LngLatBbox } from 'signalk-chart-sources'
 import { ChartRegistry, type ChartRecord } from '../src/charts/chart-registry.js'
 import { OverrideStore } from '../src/charts/overrides.js'
 import {
@@ -29,7 +29,7 @@ function record (): ChartRecord {
     decoded: {
       minzoom: 0,
       maxzoom: 14,
-      bounds: [-122, 37, -121, 38] as Bbox,
+      bounds: [-122, 37, -121, 38] as LngLatBbox,
       format: 'mvt' as const,
       vectorLayers: ['water']
     }
@@ -173,4 +173,44 @@ test('routes are not mounted without a security strategy (fail closed)', () => {
   assert.equal(mounted, false)
   assert.equal(Object.keys(get).length, 0)
   assert.equal(Object.keys(post).length, 0)
+})
+
+test('management routes return 409 while third-party PMTiles support is enabled', async () => {
+  const get: Record<string, (req: ManagementRequest, res: FakeRes) => void | Promise<void>> = {}
+  const post: Record<string, (req: ManagementRequest, res: FakeRes) => void | Promise<void>> = {}
+  registerChartManagementRoutes(
+    { get (p, h) { get[p] = h }, post (p, h) { post[p] = h } },
+    securedApp(),
+    new ChartRegistry(),
+    new OverrideStore('/dev/null'),
+    () => {},
+    () => false
+  )
+  const listRes = new FakeRes()
+  await get['/api/charts']!({ params: {}, body: null }, listRes)
+  assert.equal(listRes.statusCode, 409)
+  const scanRes = new FakeRes()
+  await post['/api/charts/rescan']!({ params: {}, body: null }, scanRes)
+  assert.equal(scanRes.statusCode, 409)
+})
+
+test('an override reports a rescan failure instead of returning stale success', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'mgmt-'))
+  try {
+    const post: Record<string, (req: ManagementRequest, res: FakeRes) => void | Promise<void>> = {}
+    const registry = new ChartRegistry()
+    registry.set(record())
+    const overrides = new OverrideStore(join(dir, 'overrides.json'))
+    overrides.load()
+    registerChartManagementRoutes(
+      { get () {}, post (path, handler) { post[path] = handler } },
+      securedApp(), registry, overrides, async () => { throw new Error('scan failed') }
+    )
+    const res = new FakeRes()
+    await post['/api/charts/:id/override']!({ params: { id: 'sf-pmtiles' }, body: { name: 'Renamed' } }, res)
+    assert.equal(res.statusCode, 500)
+    assert.deepEqual(res.body, { error: 'scan failed' })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })

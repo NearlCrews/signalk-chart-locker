@@ -17,7 +17,19 @@ async fn main() {
     let port = tilecache_port();
     let db = std::env::var("TILECACHE_DB").unwrap_or_else(|_| "/data/tilecache.sqlite".to_string());
     let cap = env_parsed("TILECACHE_CAP_BYTES", 2_147_483_648i64);
+    let cap = if cap > 0 {
+        cap
+    } else {
+        eprintln!("event=invalid_environment key=TILECACHE_CAP_BYTES using_default=true");
+        2_147_483_648
+    };
     let scroll_ttl_secs = env_parsed("TILECACHE_SCROLL_TTL_SECS", 0i64);
+    let scroll_ttl_secs = if (0..=365 * 86_400).contains(&scroll_ttl_secs) {
+        scroll_ttl_secs
+    } else {
+        eprintln!("event=invalid_environment key=TILECACHE_SCROLL_TTL_SECS using_default=true");
+        0
+    };
     // Production never sets this; it exists for a same-host dev or test against a private upstream.
     let allow_private = std::env::var("TILECACHE_ALLOW_PRIVATE").as_deref() == Ok("1");
 
@@ -60,6 +72,19 @@ fn open_or_recreate(path: &Path) -> TileCache {
     match TileCache::open(path) {
         Ok(c) => c,
         Err(e) => {
+            let corrupt = matches!(
+                &e,
+                rusqlite::Error::SqliteFailure(sqlite, _)
+                    if matches!(
+                        sqlite.code,
+                        rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+                    )
+            );
+            if !corrupt {
+                panic!(
+                    "open tile cache database without deleting it after a non-corruption error: {e}"
+                );
+            }
             eprintln!(
                 "event=cache_database_recreating path={} error={e}",
                 path.display()

@@ -1001,11 +1001,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_style_url_off_the_allowed_hosts_is_rejected() {
+    async fn config_rejects_a_style_url_off_the_allowed_hosts() {
         let addr = spawn_upstream().await;
         let db = NamedTempFile::new().unwrap();
         let router = app(dev_state(&db));
-        router
+        let config = router
             .clone()
             .oneshot(
                 Request::post("/config")
@@ -1015,14 +1015,15 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(config.status(), StatusCode::BAD_REQUEST);
         let resp = router
             .oneshot(Request::get("/style/basemap").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(
             resp.status(),
-            StatusCode::BAD_GATEWAY,
-            "the style host is not in allowedHosts"
+            StatusCode::NOT_FOUND,
+            "the rejected source never enters the allowlist"
         );
     }
 }

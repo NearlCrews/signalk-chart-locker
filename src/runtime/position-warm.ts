@@ -2,7 +2,7 @@
  * keep a small radius around it warm, throttled and offline-aware. The Signal K read stays in the plugin;
  * this module decides, the caller performs the warm. */
 
-import type { Bbox } from 'signalk-chart-sources'
+import type { LngLatBbox } from 'signalk-chart-sources'
 import type { Position } from '../shared/types.js'
 import type { PositionWarmSettings, SavedRegion } from './regions-store.js'
 
@@ -12,11 +12,24 @@ export interface WarmTrigger {
   backoffUntilMs: number
 }
 
+/** Validate the live Signal K position before any geometry or distance calculation. */
+export function isValidPosition (value: unknown): value is Position {
+  if (typeof value !== 'object' || value === null) return false
+  const position = value as Partial<Position>
+  return typeof position.latitude === 'number' && Number.isFinite(position.latitude) &&
+    typeof position.longitude === 'number' && Number.isFinite(position.longitude) &&
+    position.latitude >= -90 && position.latitude <= 90 &&
+    position.longitude >= -180 && position.longitude <= 180
+}
+
 /** Whether the position is within the box (a null box is never inside). */
-export function insideBox (pos: Position, bbox: Bbox | null): boolean {
+export function insideBox (pos: Position, bbox: LngLatBbox | null): boolean {
   if (!Number.isFinite(pos.latitude) || !Number.isFinite(pos.longitude)) return false
   if (bbox === null) return false
-  return pos.longitude >= bbox[0] && pos.longitude <= bbox[2] && pos.latitude >= bbox[1] && pos.latitude <= bbox[3]
+  const longitudeInside = bbox[0] <= bbox[2]
+    ? pos.longitude >= bbox[0] && pos.longitude <= bbox[2]
+    : pos.longitude >= bbox[0] || pos.longitude <= bbox[2]
+  return longitudeInside && pos.latitude >= bbox[1] && pos.latitude <= bbox[3]
 }
 
 /** Whether the position is inside any of the saved regions. An empty list is never inside. */
@@ -38,7 +51,7 @@ export function haversineMeters (a: Position, b: Position): number {
 }
 
 /** A small bbox of `radiusMeters` around the position. Longitude degrees shrink with latitude. */
-export function bboxAround (pos: Position, radiusMeters: number): Bbox {
+export function bboxAround (pos: Position, radiusMeters: number): LngLatBbox {
   const dLat = radiusMeters / 111_320
   const dLng = radiusMeters / (111_320 * Math.max(0.01, Math.cos((pos.latitude * Math.PI) / 180)))
   return [
@@ -53,7 +66,7 @@ export function bboxAround (pos: Position, radiusMeters: number): Bbox {
  * One or two world-bounded boxes around a position. A radius crossing the antimeridian is split so the
  * tile enumerator warms both sides of the date line without interpreting it as an almost-global box.
  */
-export function bboxesAround (pos: Position, radiusMeters: number): Bbox[] {
+export function bboxesAround (pos: Position, radiusMeters: number): LngLatBbox[] {
   const dLat = radiusMeters / 111_320
   const dLng = Math.min(180, radiusMeters / (111_320 * Math.max(0.01, Math.cos((pos.latitude * Math.PI) / 180))))
   const south = Math.max(-90, pos.latitude - dLat)
@@ -76,6 +89,7 @@ export const MIN_WARM_INTERVAL_SECS = 60
 /** Decide whether to warm now: enabled, outside all regions, off backoff, past the interval, and moved
  * past the threshold, unless this is the first fix (lastPos is null). */
 export function shouldWarm (pos: Position, regions: SavedRegion[], settings: PositionWarmSettings, trigger: WarmTrigger, nowMs: number): boolean {
+  if (!isValidPosition(pos)) return false
   if (!settings.enabled) return false
   if (insideAnyRegion(pos, regions)) return false
   if (nowMs < trigger.backoffUntilMs) return false

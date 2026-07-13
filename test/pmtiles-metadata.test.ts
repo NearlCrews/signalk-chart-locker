@@ -60,6 +60,16 @@ test('a degenerate bounds box is dropped, not an error', async () => {
   })
 })
 
+test('an antimeridian-crossing bounds box is retained', async () => {
+  const crossing = buildPmtilesFixture({ minLonE7: 1_700_000_000, minLatE7: -100_000_000, maxLonE7: -1_700_000_000, maxLatE7: 100_000_000 })
+  await withFixture(crossing, async (file) => {
+    const result = await decodePmtilesArchive(file)
+    assert.equal(result.ok, true)
+    if (!result.ok) return
+    assert.deepEqual(result.decoded.bounds, [170, -10, -170, 10])
+  })
+})
+
 test('a truncated file is rejected with a clear error message', async () => {
   const truncated = Buffer.alloc(4)
   await withFixture(truncated, async (file) => {

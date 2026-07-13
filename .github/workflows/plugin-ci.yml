@@ -6,8 +6,7 @@ name: SignalK Plugin CI
 # exists on the published version's commit; without one it applies a scoring
 # penalty. The tag trigger guarantees a run exists on the exact commit each
 # release is published from. The reusable workflow runs npm ci, the build, the
-# tests, and npm pack across Linux, macOS, and Windows on Node 22 and 24, plus
-# the armv7 Cerbo GX lane on Node 20 (supported here: engines.node is >=20.3.0).
+# tests, and npm pack across its supported platform and Node.js matrix.
 # This covers only the npm plugin; the Rust container has its own job in ci.yml.
 
 on:

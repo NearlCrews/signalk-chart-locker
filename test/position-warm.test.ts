@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import type { Bbox } from 'signalk-chart-sources'
+import type { LngLatBbox } from 'signalk-chart-sources'
 import { insideBox, haversineMeters, bboxAround, bboxesAround, shouldWarm, insideAnyRegion, type WarmTrigger } from '../src/runtime/position-warm.js'
 import { DEFAULT_REGIONS_STORE } from '../src/runtime/regions-store.js'
 import type { SavedRegion } from '../src/runtime/regions-store.js'
@@ -9,7 +9,7 @@ const here = { latitude: 37.8, longitude: -122.4 }
 const settings = { ...DEFAULT_REGIONS_STORE.positionWarm, enabled: true, sources: ['seamark'] }
 const fresh: WarmTrigger = { lastPos: null, lastWarmMs: 0, backoffUntilMs: 0 }
 
-function region (bbox: Bbox): SavedRegion {
+function region (bbox: LngLatBbox): SavedRegion {
   return { id: 'r1', name: 'Test', bbox, sourceIds: [], minzoom: 6, maxzoom: 12, createdAt: 0, lastDownloadedAt: null, bytes: 0, status: 'ready' }
 }
 
@@ -17,6 +17,13 @@ test('insideBox is true only within the box', () => {
   assert.equal(insideBox(here, [-123, 37, -122, 38]), true)
   assert.equal(insideBox(here, [-122, 37, -121, 38]), false)
   assert.equal(insideBox(here, null), false)
+})
+
+test('insideBox recognizes both sides of an antimeridian-crossing box', () => {
+  const crossing: LngLatBbox = [170, -10, -170, 10]
+  assert.equal(insideBox({ latitude: 0, longitude: 175 }, crossing), true)
+  assert.equal(insideBox({ latitude: 0, longitude: -175 }, crossing), true)
+  assert.equal(insideBox({ latitude: 0, longitude: 0 }, crossing), false)
 })
 
 test('haversine is roughly a nautical mile for a minute of latitude', () => {

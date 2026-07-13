@@ -124,6 +124,9 @@ pub struct AppState {
     pub inflight: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// In-memory warm-job registry, keyed by job id and reaped after a TTL once finished.
     pub warm_jobs: Arc<RwLock<HashMap<String, Arc<Mutex<crate::warm::WarmJob>>>>>,
+    /// Logical region ids with a running warm. Prevents two jobs from clearing or promoting the same
+    /// durable region concurrently, and lets deletion wait until cancellation has fully drained.
+    pub active_warm_regions: Arc<Mutex<HashSet<String>>>,
     /// Bounds warm fan-out strictly below `EGRESS_CONCURRENCY` so a warm cannot starve live reads.
     pub warm_semaphore: Arc<Semaphore>,
     /// Monotonic source of warm job ids.
@@ -182,6 +185,7 @@ impl AppState {
             egress: Arc::new(Semaphore::new(EGRESS_CONCURRENCY)),
             inflight: Arc::new(Mutex::new(HashMap::new())),
             warm_jobs: Arc::new(RwLock::new(HashMap::new())),
+            active_warm_regions: Arc::new(Mutex::new(HashSet::new())),
             warm_semaphore: Arc::new(Semaphore::new(crate::warm::WARM_CONCURRENCY)),
             warm_seq: Arc::new(AtomicU64::new(0)),
             live_cap_bytes: Arc::new(AtomicI64::new(cap_bytes)),

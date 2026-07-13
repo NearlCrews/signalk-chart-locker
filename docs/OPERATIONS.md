@@ -66,8 +66,11 @@ If a `ready` or `capped` region previously recorded bytes but now has no pinned 
 `needs-redownload`.
 
 A re-download does not change the stored state until the container accepts the warm and returns a
-non-empty job identifier. A rejected request therefore preserves the previous usable state. Deleting
-a region removes container pins first and removes metadata only after that succeeds.
+non-empty job identifier. The container downloads replacements into a temporary region and swaps the
+pins only after every tile succeeds and the final set fits the budget. Rejected, capped, cancelled, or
+failed replacements therefore preserve the previous usable pins. Only one warm may target a region
+at a time. Deleting a region first cancels and drains its active warm, then removes container pins,
+and removes metadata only after that succeeds.
 
 ## Position warming
 
@@ -98,9 +101,12 @@ manual rescans, and override reapplication. The panel reports:
 - Last completed scan time
 - Manual Rescan charts action
 
-Removed files and removed invalid archives are pruned on the next scan. The chart directory must stay
-inside the Signal K configuration directory. PMTiles files are served only after discovery and their
-real path is rechecked for containment at request time.
+Removed files and removed invalid archives are pruned on the next scan. A failed directory watcher is
+reported and retried. The chart directory must stay inside the Signal K configuration directory.
+Discovery rejects symlinks outside that directory. PMTiles serving opens the discovered path without
+following a final symlink, verifies the opened descriptor is a regular file, and streams from that
+same descriptor so a path swap cannot redirect a request after validation. PMTiles discovery and
+serving remain available when the tile-cache container or its runtime is unavailable.
 
 ## Diagnostics
 
