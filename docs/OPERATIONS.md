@@ -103,8 +103,8 @@ manual rescans, and override reapplication. The panel reports:
 
 Removed files and removed invalid archives are pruned on the next scan. A failed directory watcher is
 reported and retried. The chart directory must stay inside the Signal K configuration directory.
-Discovery rejects symlinks outside that directory. PMTiles serving opens the discovered path without
-following a final symlink, verifies the opened descriptor is a regular file, and streams from that
+Discovery rejects symlinks outside that directory. PMTiles serving opens the discovered path, checks
+the opened descriptor against the file identity captured during discovery, and streams from that
 same descriptor so a path swap cannot redirect a request after validation. PMTiles discovery and
 serving remain available when the tile-cache container or its runtime is unavailable.
 

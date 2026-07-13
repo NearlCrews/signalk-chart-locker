@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { PassThrough } from 'node:stream'
-import { mkdtemp, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, realpath, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ChartRegistry, type ChartRecord } from '../src/charts/chart-registry.js'
@@ -42,6 +42,7 @@ async function fixtureRecord (): Promise<{ record: ChartRecord, cleanup: () => P
   const file = join(dir, 'sf.pmtiles')
   const bytes = buildPmtilesFixture()
   await writeFile(file, bytes)
+  const info = await stat(file, { bigint: true })
   return {
     size: bytes.length,
     record: {
@@ -54,7 +55,12 @@ async function fixtureRecord (): Promise<{ record: ChartRecord, cleanup: () => P
       description: '',
       type: 'tilelayer',
       scale: 250000,
-      decoded: { minzoom: 0, maxzoom: 14, format: 'mvt', vectorLayers: [] }
+      decoded: { minzoom: 0, maxzoom: 14, format: 'mvt', vectorLayers: [] },
+      mtimeMs: Number(info.mtimeMs),
+      mtimeNs: info.mtimeNs,
+      device: info.dev,
+      inode: info.ino,
+      bytes: Number(info.size)
     },
     cleanup: () => rm(dir, { recursive: true, force: true })
   }
@@ -169,6 +175,7 @@ test('a path swapped to a symlink escaping the directory after registration retu
   const outside = await mkdtemp(join(tmpdir(), 'outside-'))
   const file = join(dir, 'sf.pmtiles')
   await writeFile(file, buildPmtilesFixture())
+  const info = await stat(file, { bigint: true })
   const secret = join(outside, 'secret.pmtiles')
   await writeFile(secret, buildPmtilesFixture())
   registry.set({
@@ -179,11 +186,16 @@ test('a path swapped to a symlink escaping the directory after registration retu
     description: '',
     type: 'tilelayer',
     scale: 250000,
-    decoded: { minzoom: 0, maxzoom: 14, format: 'mvt', vectorLayers: [] }
+    decoded: { minzoom: 0, maxzoom: 14, format: 'mvt', vectorLayers: [] },
+    mtimeMs: Number(info.mtimeMs),
+    mtimeNs: info.mtimeNs,
+    device: info.dev,
+    inode: info.ino,
+    bytes: Number(info.size)
   })
   try {
-    // Swap the discovered real file for a symlink pointing outside the directory; the serve realpath check
-    // sees the changed resolution and rejects it.
+    // Swap the discovered real file for a symlink pointing outside the directory; the opened
+    // descriptor no longer matches the identity captured during discovery and is rejected.
     await unlink(file)
     await symlink(secret, file)
     const res = new FakeRes()

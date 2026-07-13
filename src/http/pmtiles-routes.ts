@@ -66,13 +66,16 @@ export function registerPmtilesServeRoute (router: ServeRouter, registry: ChartR
 }
 
 function serve (req: ServeRequest, res: ServeResponse, registry: ChartRegistry): void {
-  const filePath = registry.filePathFor(nameToId(req.params.file))
-  if (!filePath) {
+  const record = registry.record(nameToId(req.params.file))
+  if (!record) {
     res.status(404).end('Not found')
     return
   }
-  // Open with O_NOFOLLOW, then validate the opened descriptor. createReadStream receives this descriptor,
-  // so the file that was checked is exactly the file that is streamed even if the path is replaced later.
+  const { filePath } = record
+  // Open with O_NOFOLLOW where the platform supports it, then require the descriptor to have the
+  // identity captured during discovery. Windows does not enforce O_NOFOLLOW, so the identity check
+  // also prevents a replaced path or symlink target from being served there. createReadStream receives
+  // this descriptor, so the file that was checked is exactly the file that is streamed.
   let fd: number | undefined
   let size: number
   let etag: string
@@ -80,6 +83,11 @@ function serve (req: ServeRequest, res: ServeResponse, registry: ChartRegistry):
     fd = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW)
     const info = fstatSync(fd, { bigint: true })
     if (!info.isFile()) throw new Error('not a regular file')
+    if (record.device === undefined || record.inode === undefined || record.bytes === undefined ||
+        record.mtimeNs === undefined || info.dev !== record.device || info.ino !== record.inode ||
+        info.size !== BigInt(record.bytes) || info.mtimeNs !== record.mtimeNs) {
+      throw new Error('file identity changed after discovery')
+    }
     size = Number(info.size)
     if (!Number.isSafeInteger(size) || size < 0) throw new Error('file is too large')
     etag = `"${info.dev}-${info.ino}-${info.size}-${info.mtimeNs}"`
