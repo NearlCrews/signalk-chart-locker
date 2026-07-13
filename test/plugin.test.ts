@@ -37,6 +37,14 @@ test('start sets a plugin error and does nothing when the container manager is m
   assert.equal(app.errors.length, 1)
 })
 
+test('start rejects configuration that bypasses the panel validation', async () => {
+  setContainerManager(fakeManager())
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  await plugin.start({ tileCache: { cacheCapGiB: 8, regionsBudgetGiB: 9 } }, () => {})
+  assert.ok(app.errors.some((message) => message.includes('regionsBudgetGiB')))
+})
+
 test('stop with no prior start and a manager present is a clean no-op', async () => {
   const record = managerRecord()
   setContainerManager(fakeManager({ record }))
@@ -164,4 +172,35 @@ test('stop without a prior start does not unregister', async () => {
   const plugin = createPlugin(app as never)
   await plugin.stop()
   assert.deepEqual(updates.unregistered, [])
+})
+
+test('startup marks a saved region for re-download when its cache pins disappeared', async (t) => {
+  setContainerManager(fakeManager())
+  const app = fakeApp()
+  const { addRegion, loadRegionsStore } = await import('../src/runtime/regions-store.js')
+  addRegion(app.getDataDirPath(), {
+    id: 'region-1',
+    name: 'Offline area',
+    bbox: [-1, -1, 1, 1],
+    sourceIds: ['source'],
+    minzoom: 1,
+    maxzoom: 2,
+    createdAt: 1,
+    lastDownloadedAt: 2,
+    bytes: 100,
+    status: 'ready'
+  })
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+    const url = String(input)
+    if (url.endsWith('/health')) return new Response(JSON.stringify({ status: 'ok' }), { status: 200 })
+    if (url.endsWith('/config')) return new Response(null, { status: 204 })
+    if (url.endsWith('/cache/regions')) return new Response(JSON.stringify({ regions: {} }), { status: 200 })
+    throw new Error(`unexpected fetch ${url}`)
+  })
+  const plugin = createPlugin(app as never)
+  await plugin.start({}, () => {})
+  const region = loadRegionsStore(app.getDataDirPath()).regions[0]!
+  assert.equal(region.status, 'needs-redownload')
+  assert.equal(region.bytes, 0)
+  await plugin.stop()
 })

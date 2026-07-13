@@ -54,6 +54,8 @@ body:
         - Saved regions and region download
         - Auto-cache around the boat
         - PMTiles chart provider
+        - Configuration panel and cache operations
+        - Disk usage, readiness, or diagnostics
         - Container lifecycle
         - Other
     validations:
@@ -63,7 +65,7 @@ body:
     id: plugin-version
     attributes:
       label: Plugin version
-      placeholder: 0.1.0
+      placeholder: 0.4.2
     validations:
       required: true
 
@@ -138,7 +140,7 @@ body:
     id: logs
     attributes:
       label: Logs
-      description: Paste relevant Signal K server or container log output.
+      description: Paste relevant Signal K server or container log output. Include structured event names and the panel diagnostics counts when available. Redact credentials and private host paths.
       render: text
 
   - type: textarea

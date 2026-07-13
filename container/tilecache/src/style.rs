@@ -325,6 +325,8 @@ async fn glyphs(
         if tile.status == 200 {
             if now_secs() - tile.last_access >= crate::fetcher::TOUCH_THROTTLE_SECS {
                 crate::fetcher::log_cache_err(
+                    &state.cache,
+                    "cache_touch_failed",
                     state
                         .cache
                         .touch(TileKey::new(&cache_source, 0, range_start, 0), now_secs()),
@@ -487,6 +489,8 @@ async fn vector_tile(
         if tile.status == 200 {
             if now_secs() - tile.last_access >= crate::fetcher::TOUCH_THROTTLE_SECS {
                 crate::fetcher::log_cache_err(
+                    &state.cache,
+                    "cache_touch_failed",
                     state
                         .cache
                         .touch(TileKey::new(&cache_source, z, x, y), now_secs()),
@@ -589,13 +593,12 @@ async fn store_and_evict(
     let cap = state.live_cap_bytes.load(Ordering::Relaxed);
     let cache_source = cache_source.to_string();
     if let Err(e) = tokio::task::spawn_blocking(move || {
-        crate::fetcher::log_cache_err(cache.put(
-            TileKey::new(&cache_source, z, x, y),
-            &tile,
-            false,
-            now,
-        ));
-        crate::fetcher::log_cache_err(cache.evict_to(cap));
+        crate::fetcher::log_cache_err(
+            &cache,
+            "cache_write_failed",
+            cache.put(TileKey::new(&cache_source, z, x, y), &tile, false, now),
+        );
+        crate::fetcher::log_cache_err(&cache, "cache_eviction_failed", cache.evict_to(cap));
     })
     .await
     {

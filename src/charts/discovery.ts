@@ -6,7 +6,7 @@ import { type FSWatcher, watch } from 'node:fs'
 import { readdir, realpath, stat } from 'node:fs/promises'
 import { join, sep } from 'node:path'
 import { nameToId } from './chart-id.js'
-import { type ChartRegistry, DEFAULT_SCALE } from './chart-registry.js'
+import { ChartRegistry, DEFAULT_SCALE } from './chart-registry.js'
 import { type DecodeResult, decodePmtilesArchive, type DecodedPmtiles } from './pmtiles-metadata.js'
 
 export interface ChartNamer {
@@ -41,7 +41,7 @@ async function containedRealPath (dirReal: string, fileName: string, chartsDir: 
   }
 }
 
-export async function rescanCharts (deps: DiscoveryDeps): Promise<void> {
+async function performRescanCharts (deps: DiscoveryDeps): Promise<void> {
   const decode = deps.decode ?? decodePmtilesArchive
   const namer = deps.namer ?? defaultNamer
   let dirReal: string | undefined
@@ -63,6 +63,7 @@ export async function rescanCharts (deps: DiscoveryDeps): Promise<void> {
   }
 
   const seen = new Set<string>()
+  const activeErrors = new Set<string>()
   for (const fileName of entries) {
     if (!dirReal) continue
     const filePath = await containedRealPath(dirReal, fileName, deps.chartsDir)
@@ -87,6 +88,7 @@ export async function rescanCharts (deps: DiscoveryDeps): Promise<void> {
       const result = await decode(filePath)
       if (!result.ok) {
         deps.registry.setError(fileName, result.error)
+        activeErrors.add(fileName)
         deps.onError?.(`${fileName}: ${result.error}`)
         continue
       }
@@ -112,6 +114,21 @@ export async function rescanCharts (deps: DiscoveryDeps): Promise<void> {
   for (const record of deps.registry.records()) {
     if (!seen.has(record.identifier)) deps.registry.delete(record.identifier)
   }
+  deps.registry.retainErrors(activeErrors)
+  deps.registry.markScanned()
+}
+
+// One queue per registry. Watch events, manual rescans, and override re-application all converge here,
+// so a slow archive decode cannot overlap another scan and publish an older snapshot last.
+const scanQueues = new WeakMap<ChartRegistry, Promise<void>>()
+
+export function rescanCharts (deps: DiscoveryDeps): Promise<void> {
+  const previous = scanQueues.get(deps.registry) ?? Promise.resolve()
+  const next = previous.catch(() => {}).then(() => performRescanCharts(deps))
+  scanQueues.set(deps.registry, next)
+  return next.finally(() => {
+    if (scanQueues.get(deps.registry) === next) scanQueues.delete(deps.registry)
+  })
 }
 
 export interface DiscoveryHandle {

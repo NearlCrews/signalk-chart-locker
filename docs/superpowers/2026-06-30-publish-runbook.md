@@ -1,113 +1,150 @@
-# Publish runbook: chart-sources, the container image, and the plugin
+# Chart Locker publish runbook
 
-The repos build and test locally against a `file:` link to the shared package, which cannot ship. This
-runbook is the ordered, owner-run sequence to publish. Run the steps in order; each depends on the one
-before it.
+This is the maintained owner-run sequence for publishing the coordinated npm plugin and tile-cache
+container image. Do not publish to npm or create a release tag without explicit final owner approval.
 
-## 0. Preconditions
+## 1. Prepare the release commit
 
-- Working trees clean, gates green in all three repos (`signalk-chart-sources`, `signalk-chart-locker`,
-  `signalk-binnacle`).
-- Logged in to npm as the publishing account (`npm whoami`).
-- The `signalk-chart-locker` repo on GitHub has a `GITHUB_TOKEN` with `packages: write` (the default
-  Actions token already has it through the workflow `permissions` block), and the npm publish
-  credential for the plugin is set per the standing SignalK release checklist.
+1. Confirm the working tree contains only intended release changes.
+2. Choose the release version and update `package.json` and `package-lock.json` together.
+3. Convert the `CHANGELOG.md` Unreleased section into a dated version section and add its anchor.
+4. Update the README What's new section and every maintained documentation surface affected by the
+   release.
+5. Confirm package metadata, requirements, repository links, keywords, screenshots, and App Store
+   categories describe the current project.
+6. If the configuration panel changed materially, update all three screenshots:
+   `config-panel.png`, `config-panel-dark.png`, and `config-panel-night.png`.
 
-## 1. Publish the shared package
+Any change under `container/` requires a plugin version bump. The plugin pins the image tag to its own
+version, and `signalk-container` recreates the container only when that tag changes.
 
-The shared package `signalk-chart-sources` is currently unpublished (`npm view signalk-chart-sources
-version` returns E404), and both consumers depend on it through `file:../signalk-chart-sources`.
+## 2. Run the complete local gates
 
-```sh
-cd ~/src/signalk-chart-sources
-npm publish --access public
+Node plugin and panel:
+
+```bash
+npm ci
+npm run typecheck
+npm run lint
+npm test
+npm run build
+npm run check:package
+npm audit --omit=dev
 ```
 
-Confirm it resolves: `npm view signalk-chart-sources version` returns `0.1.0`.
+Rust container:
 
-## 2. Pin both consumers to the published version
-
-Until this flip the consumer `package.json` files keep the `file:` link so local development works; they
-are not publishable as-is, because a published package cannot carry a `file:` dependency.
-
-In `~/src/signalk-chart-locker/package.json` and `~/src/signalk-binnacle/package.json`, change the
-dependency value from the local link to the published range. The ready-to-paste line for both:
-
-```json
-    "signalk-chart-sources": "^0.1.0",
+```bash
+cd container
+cargo fmt -- --check
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo build --release --bin tilecache
+cargo install cargo-audit --locked
+cargo audit --file Cargo.lock
+cd ..
 ```
 
-(In `signalk-chart-locker` the entry has no trailing comma if it is the last dependency; keep the file
-valid JSON.)
+Inspect the release tarball report from `npm pack --dry-run --json --ignore-scripts`. The automated
+package check requires the plugin entry point, types, panel remote, README, and changelog, and rejects
+retired `dist/bridge`, `prewarm`, and `route-draft` output.
 
-Then refresh each lockfile and re-run the gates:
+## 3. Verify the user experience
 
-```sh
-cd ~/src/signalk-chart-locker && npm install && npm run typecheck && npm run lint && npm test && npm run build
-cd ~/src/signalk-binnacle && npm install && npm run check && npm run lint && npm test && npm run build
+1. Load the actual federated configuration panel in a real browser.
+2. Check light, dark, and night-red themes at desktop and narrow widths.
+3. Exercise cache refresh, retention changes, clear confirmation, chart rescan, validation errors,
+   unsaved-change protection, and the Advanced disclosure.
+4. Confirm the panel reports container unavailable, health pending, unconfigured, disk pressure, slow
+   upstream, and ready states clearly.
+5. Confirm the external cache path reports the correct filesystem or an explicit fallback warning.
+6. On a test Signal K installation, verify PMTiles serving, saved-region creation, re-download,
+   deletion, and recovery after a tile-cache database recreation.
+
+## 4. Commit and push without publishing
+
+Commit the complete release candidate and push its branch. Wait for all repository checks on that
+commit:
+
+- TypeScript type-check, ESLint, Node tests, build, package-content check, and npm runtime audit
+- Rust tests, strict Clippy, release build, and RustSec audit
+- Signal K plugin compliance and install simulation
+
+Fix failures on the branch and repeat the local gates. Do not tag a different commit from the one that
+passed CI.
+
+## 5. Obtain final approval
+
+Present the proposed version, release commit, changelog, local verification, CI result, npm package
+contents, audit results, and container-image plan to the owner. Stop here until the owner explicitly
+approves npm publication and creation of the version tag.
+
+## 6. Publish the container image
+
+The image must exist before the npm package reaches users. The tag must be exactly `v` plus the
+`package.json` version.
+
+```bash
+version="$(node -p "require('./package.json').version")"
+git tag "v${version}"
+git push origin "v${version}"
 ```
 
-Commit the dependency and lockfile change in each repo.
+The tag starts `.github/workflows/container-image.yml`, which builds the linux/amd64 and linux/arm64
+images and publishes:
 
-## 3. Publish the container image
+- `ghcr.io/NearlCrews/signalk-chart-locker-tilecache:v${version}`
+- `ghcr.io/NearlCrews/signalk-chart-locker-tilecache:latest`
 
-The plugin requests `ghcr.io/<owner>/signalk-chart-locker-tilecache:v${version}`, pinned to the plugin
-version, so each release changes the requested tag and forces signalk-container to recreate the
-container with the new binary. That makes the image-before-plugin ordering mandatory.
+Wait for the workflow to finish, then verify the versioned image is public and pullable:
 
-Rules that follow from the pinned tag:
+```bash
+podman pull "ghcr.io/nearlcrews/signalk-chart-locker-tilecache:v${version}"
+```
 
-- The image is born from the `v*` tag push, not from a `workflow_dispatch`. On a manual dispatch
-  `github.ref_name` is the branch, so it would push `:latest` and `:main`, never `:v${version}`. Push
-  the tag to get the versioned image.
-- The git tag must be exactly `v` + the `package.json` version (for example version `0.3.0` and tag
-  `v0.3.0`). The workflow asserts this and fails on a mismatch, but get it right so the build is not
-  wasted.
-- Only Docker-tag-safe versions work: a prerelease suffix like `-rc.1` is fine, a build-metadata
-  suffix like `+build.5` is not.
-- Any container code change requires a plugin version bump. The tag string is the only recreate
-  trigger, so a container fix shipped without a version bump never reaches existing installs.
-- A failed pull of a missing or mis-tagged image leaves no running container (the recreate removes the
-  old one first), so the image must be live on ghcr before the plugin reaches installs.
+If the image workflow fails, do not publish the npm package. Fix the release on a new version rather
+than moving an already-published version tag.
 
-Sequence:
+## 7. Publish the npm plugin
 
-1. Push the version tag, which runs `.github/workflows/container-image.yml` and builds and pushes
-   `:v${version}` (and `:latest`) for linux/amd64 and linux/arm64:
+After the image is pullable, create the GitHub release for the same version tag. The `release:
+created` event starts `.github/workflows/publish.yml`, verifies the tag against `package.json`, repeats
+the package gates, and publishes to npm with provenance.
 
-   ```sh
-   git tag "v$(node -p "require('./package.json').version")"
-   git push origin "v$(node -p "require('./package.json').version")"
-   ```
+Wait for that workflow, then verify:
 
-2. Wait for the workflow to finish, then verify the image is pullable:
+```bash
+npm view signalk-chart-locker version
+npm view signalk-chart-locker dist.tarball
+```
 
-   ```sh
-   podman pull ghcr.io/<owner>/signalk-chart-locker-tilecache:v${version}
-   ```
+Install the published version in a clean Signal K test environment and confirm the plugin pulls the
+matching image tag.
 
-3. On the first publish only, make the ghcr package public (ghcr packages are private by default), so a
-   fresh install can pull without credentials: GitHub package settings for
-   `signalk-chart-locker-tilecache`, change visibility to public. New tags under an already-public
-   package stay public.
+## 8. Complete the release
 
-A developer running an unpublished local version sets the schema field `tilecacheImageTag` back to
-`latest` (or a hand-built tag) so the plugin does not try to pull a `:v${version}` that was never
-published.
+1. Confirm the GitHub release uses the versioned changelog section as its release notes, edited only
+   for concise presentation.
+2. Confirm both container-image architectures and all plugin CI checks passed on the published commit.
+3. Confirm the npm package and GHCR image are publicly accessible.
+4. Confirm the App Store entry displays the current description, screenshots, version, and links.
+5. Install the App Store package once its listing updates.
+6. Start a new empty Unreleased section in `CHANGELOG.md` when further development begins.
 
-## 4. Publish the plugin
+## Rollback guidance
 
-Only after the image for this version is live and pullable on ghcr (step 3 above), follow the standing
-SignalK plugin pre-push release checklist for `signalk-chart-locker`: bring deps current, reach plugin
-compliance, bring docs current (version bump, dated CHANGELOG entry, README "What's New"), prove the
-pipeline is green, confirm the npm publish credential, then publish. Do not let the npm publish race
-ahead of the image: a plugin on npm whose `:v${version}` image is not yet on ghcr fails to start on
-fresh installs.
+Do not replace an npm version or move a version tag. If a released plugin or image is defective:
+
+1. Document the impact.
+2. Prepare a new patch version.
+3. Repeat every gate and approval step.
+4. Publish the new image before the new npm package.
+
+An npm package whose matching image is missing cannot start cleanly on a fresh install, so the
+image-first ordering is mandatory.
 
 ## Reverse-proxy note
 
-The basemap sprite URL is built server-side from the request scheme and host so MapLibre accepts an
-absolute, same-origin sprite that the cache can serve offline. A reverse proxy that terminates TLS in
-front of Signal K must set `x-forwarded-proto: https` (and `x-forwarded-host`), or the sprite URL is
-built as `http://` on an `https` page and the browser mixed-content blocks it. Plain LAN http needs no
-configuration.
+The vector-style sprite URL is built from the request scheme and host. A reverse proxy that terminates
+TLS in front of Signal K must set `x-forwarded-proto: https` and `x-forwarded-host`. Without those
+headers, an HTTPS browser can reject the generated HTTP sprite URL as mixed content.

@@ -7,6 +7,8 @@
 use bytes::Bytes;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 /// The cache schema version. A mismatch drops and recreates the `tiles` table (the cache is
@@ -60,6 +62,9 @@ pub enum PutOutcome {
     Degraded,
 }
 
+/// Filesystem space kept outside the cache cap for SQLite WAL growth and other host writes.
+pub const MIN_FREE_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
+
 /// A cache row key: the source id plus the z, x, and y tile coordinates. Passed by value (Copy) to the
 /// cache methods so the four fields travel together and cannot be transposed positionally.
 #[derive(Clone, Copy)]
@@ -93,6 +98,14 @@ pub struct PutManyOutcome {
     pub capped: bool,
 }
 
+/// One source's aggregate cache statistics, produced in a single table scan.
+pub struct SourceStats {
+    pub source: String,
+    pub average_bytes: Option<f64>,
+    pub scroll_bytes: i64,
+    pub scroll_rows: i64,
+}
+
 struct Inner {
     conn: Connection,
     total_bytes: i64,
@@ -107,6 +120,9 @@ struct Inner {
 /// The disk tile cache, opened at a path on the mounted cache volume.
 pub struct TileCache {
     inner: Mutex<Inner>,
+    db_path: PathBuf,
+    disk_pressure_events: AtomicU64,
+    operation_error_events: AtomicU64,
 }
 
 impl TileCache {
@@ -140,7 +156,46 @@ impl TileCache {
                 real_region_cache: 0,
                 regions_dirty: true,
             }),
+            db_path: path.to_path_buf(),
+            disk_pressure_events: AtomicU64::new(0),
+            operation_error_events: AtomicU64::new(0),
         })
+    }
+
+    /// A cheap database probe used by the HTTP and container healthchecks.
+    pub fn probe(&self) -> rusqlite::Result<()> {
+        let inner = self.lock();
+        inner.conn.query_row("SELECT 1", [], |_row| Ok(()))
+    }
+
+    /// Available bytes on the filesystem containing the cache database.
+    pub fn available_bytes(&self) -> std::io::Result<u64> {
+        fs2::available_space(self.db_path.parent().unwrap_or(Path::new("/")))
+    }
+
+    fn has_disk_headroom(&self, additional_bytes: i64) -> bool {
+        if additional_bytes <= 0 {
+            return true;
+        }
+        self.available_bytes()
+            .map(|available| {
+                available >= MIN_FREE_HEADROOM_BYTES.saturating_add(additional_bytes as u64)
+            })
+            // If the platform cannot report free space, retain SQLite's existing DiskFull fallback.
+            .unwrap_or(true)
+    }
+
+    pub fn disk_pressure_events(&self) -> u64 {
+        self.disk_pressure_events.load(Ordering::Relaxed)
+    }
+
+    pub fn operation_error_events(&self) -> u64 {
+        self.operation_error_events.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn record_operation_error(&self, event: &str, error: &dyn std::fmt::Display) {
+        self.operation_error_events.fetch_add(1, Ordering::Relaxed);
+        eprintln!("event={event} error={error}");
     }
 
     /// Take the connection lock, recovering the guard on a poisoned mutex so a single panic under the
@@ -202,7 +257,7 @@ impl TileCache {
     pub fn get(&self, key: TileKey) -> rusqlite::Result<Option<CachedTile>> {
         let TileKey { source, z, x, y } = key;
         let inner = self.lock();
-        inner
+        let result = inner
             .conn
             .query_row(
                 "SELECT content_type, strong_etag, upstream_validator, status, fetched_at, last_access, bytes, blob
@@ -222,7 +277,11 @@ impl TileCache {
                     })
                 },
             )
-            .optional()
+            .optional();
+        if let Err(ref error) = result {
+            self.record_operation_error("cache_read_failed", error);
+        }
+        result
     }
 
     /// Insert or replace a tile, keeping the running byte total in sync. Returns `Degraded` on a
@@ -249,6 +308,10 @@ impl TileCache {
             Some((b, p)) => (b, p == 1),
             None => (0, false),
         };
+        if !self.has_disk_headroom(tile.bytes - old_bytes) {
+            self.disk_pressure_events.fetch_add(1, Ordering::Relaxed);
+            return Ok(PutOutcome::Degraded);
+        }
         // A live-proxy refresh passes pinned = false, but pinning is cleared only by delete_region, so a
         // row that is already pinned must stay pinned. Without this, a 304 or 200 revalidation of a
         // region-pinned or basemap-asset tile after fresh_secs would flip pinned 1 to 0 and silently drop
@@ -277,6 +340,7 @@ impl TileCache {
             Err(rusqlite::Error::SqliteFailure(e, _))
                 if e.code == rusqlite::ErrorCode::DiskFull =>
             {
+                self.disk_pressure_events.fetch_add(1, Ordering::Relaxed);
                 Ok(PutOutcome::Degraded)
             }
             Err(e) => Err(e),
@@ -442,6 +506,15 @@ impl TileCache {
         region_id: Option<&str>,
         now: i64,
     ) -> rusqlite::Result<PutManyOutcome> {
+        let requested_growth: i64 = rows.iter().map(|row| row.tile.bytes.max(0)).sum();
+        if !self.has_disk_headroom(requested_growth) {
+            self.disk_pressure_events.fetch_add(1, Ordering::Relaxed);
+            return Ok(PutManyOutcome {
+                stored: 0,
+                bytes_added: 0,
+                capped: true,
+            });
+        }
         let mut inner = self.lock();
         let base = inner.total_bytes;
         let pinned_base = inner.pinned_bytes;
@@ -705,6 +778,20 @@ impl TileCache {
         )
     }
 
+    /// Byte totals for every persisted region in one grouped query. This backs the plugin's regions list
+    /// and startup reconciliation without one HTTP request and one SQLite query per saved region.
+    pub fn all_region_bytes(&self) -> rusqlite::Result<Vec<(String, i64)>> {
+        let inner = self.lock();
+        let mut stmt = inner.conn.prepare(
+            "SELECT rt.region_id, COALESCE(SUM(t.bytes), 0)
+             FROM region_tiles rt JOIN tiles t
+             ON rt.source = t.source AND rt.z = t.z AND rt.x = t.x AND rt.y = t.y
+             GROUP BY rt.region_id",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
+    }
+
     /// The total stored bytes pinned by at least one NON-position-warm region, counting a shared tile
     /// once. A tile pinned ONLY by the position-warm pseudo-region is excluded, and a tile shared
     /// between a real region and position-warm still counts once toward the real-region usage. This is
@@ -757,6 +844,27 @@ impl TileCache {
                 r.get::<_, i64>(1)?,
                 r.get::<_, i64>(2)?,
             ))
+        })?;
+        rows.collect()
+    }
+
+    /// Average real-tile size plus unpinned totals in one table scan for `/cache/stats`.
+    pub fn per_source_stats(&self) -> rusqlite::Result<Vec<SourceStats>> {
+        let inner = self.lock();
+        let mut stmt = inner.conn.prepare(
+            "SELECT source,
+                    AVG(CASE WHEN status = 200 AND blob IS NOT NULL THEN bytes END),
+                    COALESCE(SUM(CASE WHEN pinned = 0 THEN bytes ELSE 0 END), 0),
+                    SUM(CASE WHEN pinned = 0 THEN 1 ELSE 0 END)
+             FROM tiles GROUP BY source ORDER BY source",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(SourceStats {
+                source: r.get(0)?,
+                average_bytes: r.get(1)?,
+                scroll_bytes: r.get(2)?,
+                scroll_rows: r.get(3)?,
+            })
         })?;
         rows.collect()
     }

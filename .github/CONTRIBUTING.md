@@ -29,12 +29,16 @@ serves, and any implementation ideas you have.
 2. Install dependencies with `npm install`.
 3. Make focused commits with clear messages (see below).
 4. Add tests for any new functionality and keep the existing suites green.
-5. Run `npm run lint`, `npm run typecheck`, `npm test`, and `npm run build`
-   before pushing. For container changes, run `cargo test --workspace`,
-   `cargo clippy --workspace --all-targets -- -D warnings`, and
-   `cargo build --release --bin tilecache` from `container/`.
-6. Update documentation (`README.md`, `CHANGELOG.md`) as needed.
-7. Open a pull request with a clear description of the change.
+5. Run `npm run lint`, `npm run typecheck`, `npm test`, `npm run build`, and
+   `npm run check:package` before pushing. Run `npm audit --omit=dev` for dependency changes.
+6. For container changes, run `cargo test --workspace --all-features`,
+   `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
+   `cargo build --release --bin tilecache`, and `cargo audit --file Cargo.lock` from `container/`.
+7. Exercise panel layout and interaction changes in a real browser in light, dark, and night-red
+   themes. Update the App Store screenshots when the visible panel changes materially.
+8. Update the maintained documentation surfaces that apply: `README.md`, `CHANGELOG.md`,
+   `docs/OPERATIONS.md`, `docs/API.md`, `.github/SECURITY.md`, and the publish runbook.
+9. Open a pull request with a clear description of the change.
 
 ## Code style
 
@@ -47,6 +51,8 @@ serves, and any implementation ideas you have.
   (`npm run lint`, or `npm run lint:fix` to auto-fix). Lint the Rust with
   `cargo clippy`.
 - Do not edit `dist/`; it is generated build output.
+- Do not add generated files under retired paths such as `dist/bridge`, `prewarm`, or `route-draft`.
+  `npm run check:package` verifies the publication allowlist and rejects retired output.
 - Default to no comments. Add one only when the WHY is non-obvious (a hidden
   constraint, a subtle invariant, or a workaround).
 
@@ -63,13 +69,16 @@ Any change under `container/` requires a plugin version bump: the container
 image tag is pinned to the plugin version, so an unchanged tag leaves existing
 installs on the stale image.
 
-See [CLAUDE.md](../CLAUDE.md) for the full set of project conventions.
+See the [README](../README.md), [operations guide](../docs/OPERATIONS.md), and
+[HTTP API reference](../docs/API.md) for current project behavior and conventions. Files under
+`docs/superpowers/` are historical design and implementation records unless explicitly identified as
+a maintained runbook.
 
 ## Commit messages
 
 Use conventional-commit prefixes that match the actual diff scope:
 
-```
+```text
 feat: add a basemap source to the saved-region picker
 fix: correct the tile budget check before a region download
 docs: update installation instructions

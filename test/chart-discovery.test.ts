@@ -45,6 +45,47 @@ test('rescanCharts drops a record whose file has been removed', async () => {
   }
 })
 
+test('rescanCharts drops a decode error whose file has been removed', async () => {
+  const dir = await chartsDir()
+  const file = join(dir, 'bad.pmtiles')
+  await writeFile(file, buildPmtilesFixture({ magic: 'XXXXXXX' }))
+  const registry = new ChartRegistry()
+  try {
+    await rescanCharts({ chartsDir: dir, registry })
+    assert.equal(registry.errors().length, 1)
+    await rm(file)
+    await rescanCharts({ chartsDir: dir, registry })
+    assert.equal(registry.errors().length, 0)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('rescanCharts serializes overlapping scans for one registry', async () => {
+  const dir = await chartsDir()
+  await writeFile(join(dir, 'one.pmtiles'), buildPmtilesFixture())
+  const registry = new ChartRegistry()
+  let active = 0
+  let maximum = 0
+  const decode = async () => {
+    active++
+    maximum = Math.max(maximum, active)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    active--
+    return { ok: true as const, decoded: { minzoom: 0, maxzoom: 1, format: 'mvt' as const, vectorLayers: [] } }
+  }
+  try {
+    await Promise.all([
+      rescanCharts({ chartsDir: dir, registry, decode }),
+      rescanCharts({ chartsDir: dir, registry, decode })
+    ])
+    assert.equal(maximum, 1)
+    assert.equal(registry.discoveryStatus().valid, 1)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 // Skipped on Windows: fs.symlink needs elevated privilege there (and on Windows CI), so the setup
 // throws EPERM before the assertion runs. The realpath containment this guards is platform-independent
 // and is exercised on Linux and macOS.

@@ -4,6 +4,66 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<a id="v043"></a>
+
+## [0.4.3] - 2026-07-13
+
+### Added
+
+- Live cache operations in the plugin panel, including usage and disk headroom, per-source state,
+  retention controls, scroll-cache clearing, diagnostics, chart discovery results, and manual rescans.
+- Database-aware container health, batched saved-region byte totals, proactive filesystem headroom,
+  and operator-facing failure counters.
+- Antimeridian-aware position warming that covers both sides of the date line in one warm job.
+- Readiness messages for container availability, startup health, and configuration-push state.
+- Restart-impact guidance and inline configuration validation in the plugin panel.
+- Structured operational events for cache failures, warm rejections, configuration pushes, and
+  database recreation.
+- Package-content verification that rejects stale retired modules before publication.
+
+### Changed
+
+- Cache free-space guidance now measures the configured external cache filesystem when it is
+  available and explicitly reports a fallback to the Signal K data filesystem.
+- Cache statistics compute per-source averages, bytes, and row counts in one grouped table scan.
+- The saved-regions list obtains every region byte total through one container request instead of one
+  request per region.
+- The container healthcheck now performs an HTTP request and verifies SQLite instead of checking only
+  whether the TCP port accepts a connection.
+- Security and release documentation now use the current 0.4 support line and include the npm and
+  Rust audit commands.
+
+### Fixed
+
+- Re-download failures now retain the prior region state and relay the container response instead of
+  reporting a successful job with an invalid identifier.
+- Saved regions whose cache pins disappear after database recreation are marked for re-download.
+- Region, position-warm, chart override, and plugin configuration inputs now reject invalid values.
+- State files are replaced atomically, deleted invalid charts no longer remain in discovery results,
+  and chart rescans are serialized.
+- Plugin builds clean `dist` before compilation, preventing retired modules from entering packages.
+- Cache-retention and saved-region estimate requests now relay container failures instead of
+  reporting success from rejected upstream operations.
+- Warm responses are required to contain a non-empty job identifier before a region is marked as
+  downloading.
+- Saved-region names, coordinates, source identifiers, and zooms are validated against bounded
+  server-side limits before container access.
+- Position-warm settings now reject malformed booleans, distances, intervals, zooms, and source lists
+  without changing persisted state.
+- Chart overrides now reject empty names, oversized text, invalid scales, and bodies without a
+  recognized field.
+- Concurrent region-store mutations now share one synchronous read-modify-write path, preventing one
+  update from overwriting another with a stale snapshot.
+- The configuration panel disables Save while settings are invalid and reports missing cache
+  readiness, disk pressure, and slow upstream sources.
+
+### Security
+
+- CI now audits production npm dependencies and the Rust lockfile. The security support table now
+  identifies the current 0.4 release line.
+- Direct plugin startup validates cache limits, chart-path containment, external-path form, and OCI
+  image tags even when configuration bypasses the panel.
+
 <a id="v042"></a>
 
 ## [0.4.2] - 2026-07-07

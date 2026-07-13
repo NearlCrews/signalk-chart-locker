@@ -51,6 +51,8 @@ pub struct WarmJob {
 pub struct WarmRequest {
     pub sources: Vec<ChartSource>,
     pub bbox: [f64; 4],
+    /// A second box used only when a position-radius crosses the antimeridian.
+    pub additional_bbox: Option<[f64; 4]>,
     pub minzoom: u32,
     pub maxzoom: u32,
     /// The region to pin under (real region, or the position-warm pseudo-region), or None.
@@ -77,9 +79,20 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
             req.minzoom, req.maxzoom
         )));
     }
-    let b = req.bbox;
-    if !b.iter().all(|v| v.is_finite()) || b[0] >= b[2] || b[1] >= b[3] {
-        return Err(StartError::BadBbox(format!("invalid bbox {b:?}")));
+    let mut bboxes = vec![req.bbox];
+    if let Some(bbox) = req.additional_bbox {
+        bboxes.push(bbox);
+    }
+    if bboxes.iter().any(|b| {
+        !b.iter().all(|v| v.is_finite())
+            || b[0] < -180.0
+            || b[2] > 180.0
+            || b[1] < -90.0
+            || b[3] > 90.0
+            || b[0] >= b[2]
+            || b[1] >= b[3]
+    }) {
+        return Err(StartError::BadBbox(format!("invalid bbox set {bboxes:?}")));
     }
     // Every source must be in the allowlist; a style source has no tile path.
     let mut total = 0u64;
@@ -96,10 +109,16 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
                         .min(known.maxzoom);
                     let mut tmp = known.clone();
                     tmp.maxzoom = clamp;
-                    total += tile_count_in_bbox(&tmp, b, req.minzoom, req.maxzoom);
+                    total += bboxes
+                        .iter()
+                        .map(|b| tile_count_in_bbox(&tmp, *b, req.minzoom, req.maxzoom))
+                        .sum::<u64>();
                 }
                 Some(known) => {
-                    total += tile_count_in_bbox(known, b, req.minzoom, req.maxzoom);
+                    total += bboxes
+                        .iter()
+                        .map(|b| tile_count_in_bbox(known, *b, req.minzoom, req.maxzoom))
+                        .sum::<u64>();
                 }
                 None => return Err(StartError::UnknownSource(s.id.clone())),
             }
@@ -153,7 +172,7 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
         st,
         job,
         resolved,
-        b,
+        bboxes,
         req.minzoom,
         req.maxzoom,
         req.region_id,
@@ -301,12 +320,13 @@ async fn flush_pinned(st: &AppState, batch: &mut Vec<WarmRow>, region: &str) {
     let rows = std::mem::take(batch);
     let region_owned = region.to_string();
     match tokio::task::spawn_blocking(move || {
-        cache.put_many_pinned(&rows, budget, cap, Some(&region_owned), now)
+        let result = cache.put_many_pinned(&rows, budget, cap, Some(&region_owned), now);
+        crate::fetcher::log_cache_err(&cache, "cache_write_failed", result);
     })
     .await
     {
-        Ok(r) => crate::fetcher::log_cache_err(r),
-        Err(e) => eprintln!("tilecache: assets flush task failed: {e}"),
+        Ok(()) => {}
+        Err(e) => eprintln!("event=cache_task_failed operation=assets_flush error={e}"),
     }
 }
 
@@ -575,7 +595,7 @@ async fn run(
     st: AppState,
     job: Arc<tokio::sync::Mutex<WarmJob>>,
     sources: Vec<ChartSource>,
-    bbox: [f64; 4],
+    bboxes: Vec<[f64; 4]>,
     zmin: u32,
     zmax: u32,
     region_id: Option<String>,
@@ -584,9 +604,16 @@ async fn run(
     // set with no orphan join rows (a narrower box leaves nothing pinned outside the new set).
     if let Some(rid) = region_id.clone() {
         let cache = st.cache.clone();
-        match tokio::task::spawn_blocking(move || cache.delete_region(&rid)).await {
-            Ok(r) => crate::fetcher::log_cache_err(r),
-            Err(e) => eprintln!("tilecache: warm delete_region task failed: {e}"),
+        match tokio::task::spawn_blocking(move || {
+            let result = cache.delete_region(&rid);
+            crate::fetcher::log_cache_err(&cache, "cache_region_delete_failed", result);
+        })
+        .await
+        {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("event=cache_task_failed operation=warm_region_delete error={e}")
+            }
         }
     }
     // Capture the style source (if any) before expansion replaces it with synthetic XYZ sub-sources,
@@ -610,7 +637,11 @@ async fn run(
     // total to the real expanded count so progress is accurate.
     let expanded_total: u64 = sources
         .iter()
-        .map(|s| tile_count_in_bbox(s, bbox, zmin, zmax))
+        .flat_map(|s| {
+            bboxes
+                .iter()
+                .map(move |bbox| tile_count_in_bbox(s, *bbox, zmin, zmax))
+        })
         .sum();
     if expanded_total > WARM_TILE_HARD_CAP {
         eprintln!("tilecache: warm expanded to {expanded_total} tiles, over the {WARM_TILE_HARD_CAP} hard cap; aborting");
@@ -633,41 +664,43 @@ async fn run(
     let region_arc: Option<Arc<str>> = region_id.as_deref().map(Arc::from);
     'outer: for source in &sources {
         let source_arc = Arc::new(source.clone());
-        for (z, x, y) in tiles_iter(source, bbox, zmin, zmax) {
-            if cancel.load(Ordering::Relaxed) {
-                final_state = WarmState::Cancelled;
-                break 'outer;
-            }
-            let permit = match st.warm_semaphore.clone().acquire_owned().await {
-                Ok(p) => p,
-                Err(_) => {
-                    final_state = WarmState::Error;
+        for bbox in &bboxes {
+            for (z, x, y) in tiles_iter(source, *bbox, zmin, zmax) {
+                if cancel.load(Ordering::Relaxed) {
+                    final_state = WarmState::Cancelled;
                     break 'outer;
                 }
-            };
-            let st2 = st.clone();
-            let source2 = source_arc.clone();
-            let rid = region_arc.clone();
-            set.spawn(async move {
-                let _permit = permit;
-                warm_one(&st2, &source2, z, x, y, rid.as_deref()).await
-            });
-            // Drain any finished tasks without blocking, keeping memory flat.
-            while let Some(done) = set.try_join_next() {
-                if let Ok(f) = done {
-                    if !accumulate(
-                        &st,
-                        &job,
-                        &mut batch,
-                        f,
-                        region_id.as_deref(),
-                        &mut final_state,
-                    )
-                    .await
-                    {
-                        // capped: stop spawning and draining.
-                        cancel.store(true, Ordering::Relaxed);
+                let permit = match st.warm_semaphore.clone().acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => {
+                        final_state = WarmState::Error;
                         break 'outer;
+                    }
+                };
+                let st2 = st.clone();
+                let source2 = source_arc.clone();
+                let rid = region_arc.clone();
+                set.spawn(async move {
+                    let _permit = permit;
+                    warm_one(&st2, &source2, z, x, y, rid.as_deref()).await
+                });
+                // Drain any finished tasks without blocking, keeping memory flat.
+                while let Some(done) = set.try_join_next() {
+                    if let Ok(f) = done {
+                        if !accumulate(
+                            &st,
+                            &job,
+                            &mut batch,
+                            f,
+                            region_id.as_deref(),
+                            &mut final_state,
+                        )
+                        .await
+                        {
+                            // capped: stop spawning and draining.
+                            cancel.store(true, Ordering::Relaxed);
+                            break 'outer;
+                        }
                     }
                 }
             }
@@ -914,6 +947,7 @@ mod tests {
             WarmRequest {
                 sources: vec![st.sources.read().await["s"].clone()],
                 bbox: [-10.0, -10.0, 10.0, 10.0],
+                additional_bbox: None,
                 minzoom: 0,
                 maxzoom: 1,
                 region_id: None,
@@ -958,6 +992,7 @@ mod tests {
             WarmRequest {
                 sources: vec![st.sources.read().await["s"].clone()],
                 bbox: [-10.0, -10.0, 10.0, 10.0],
+                additional_bbox: None,
                 minzoom: 0,
                 maxzoom: 0,
                 region_id: None,
@@ -997,6 +1032,7 @@ mod tests {
             WarmRequest {
                 sources: vec![st.sources.read().await["s"].clone()],
                 bbox: [-10.0, -10.0, 10.0, 10.0],
+                additional_bbox: None,
                 minzoom: 0,
                 maxzoom: 0,
                 region_id: None,
@@ -1027,6 +1063,7 @@ mod tests {
                 WarmRequest {
                     sources: vec![unknown],
                     bbox: [-1.0, -1.0, 1.0, 1.0],
+                    additional_bbox: None,
                     minzoom: 0,
                     maxzoom: 0,
                     region_id: None
@@ -1041,6 +1078,7 @@ mod tests {
                 WarmRequest {
                     sources: vec![known.clone()],
                     bbox: [10.0, 10.0, 5.0, 5.0],
+                    additional_bbox: None,
                     minzoom: 0,
                     maxzoom: 0,
                     region_id: None
@@ -1064,6 +1102,7 @@ mod tests {
                 WarmRequest {
                     sources: vec![deep],
                     bbox: [-180.0, -85.0, 180.0, 85.0],
+                    additional_bbox: None,
                     minzoom: 0,
                     maxzoom: 12,
                     region_id: None
@@ -1072,6 +1111,33 @@ mod tests {
             .await,
             Err(StartError::TooMany(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn one_warm_job_counts_both_antimeridian_boxes() {
+        let addr = stub().await;
+        let db = NamedTempFile::new().unwrap();
+        let st = state(&db, dev(), xyz(addr, "img")).await;
+        let source = st.sources.read().await["s"].clone();
+        let west = [179.9, -1.0, 180.0, 1.0];
+        let east = [-180.0, -1.0, -179.9, 1.0];
+        let expected = crate::geom::tile_count_in_bbox(&source, west, 1, 1)
+            + crate::geom::tile_count_in_bbox(&source, east, 1, 1);
+        let job = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![source],
+                bbox: west,
+                additional_bbox: Some(east),
+                minzoom: 1,
+                maxzoom: 1,
+                region_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let snapshot = warm_snapshot(&st, &job).await.unwrap();
+        assert_eq!(snapshot["total"].as_u64().unwrap(), expected);
     }
 
     // V2-4: a bbox whose latitude equals or exceeds the Web Mercator limit must succeed and enumerate
@@ -1089,6 +1155,7 @@ mod tests {
             WarmRequest {
                 sources: vec![src.clone()],
                 bbox: [-180.0, -90.0, 180.0, 90.0],
+                additional_bbox: None,
                 minzoom: 0,
                 maxzoom: 0,
                 region_id: None,
@@ -1149,6 +1216,7 @@ mod tests {
                 WarmRequest {
                     sources: vec![st.sources.read().await["s"].clone()],
                     bbox: [-180.0, -85.0, 180.0, 85.0],
+                    additional_bbox: None,
                     minzoom: 0,
                     maxzoom: 4,
                     region_id: None,
@@ -1165,6 +1233,7 @@ mod tests {
             WarmRequest {
                 sources: vec![st.sources.read().await["s"].clone()],
                 bbox: [-1.0, -1.0, 1.0, 1.0],
+                additional_bbox: None,
                 minzoom: 0,
                 maxzoom: 0,
                 region_id: None,
@@ -1192,6 +1261,7 @@ mod tests {
             WarmRequest {
                 sources: vec![st.sources.read().await["s"].clone()],
                 bbox: [-180.0, -85.0, 180.0, 85.0],
+                additional_bbox: None,
                 minzoom: 0,
                 maxzoom: 4,
                 region_id: None,
@@ -1252,6 +1322,7 @@ mod tests {
             WarmRequest {
                 sources: vec![src],
                 bbox: [-1.0, -1.0, 1.0, 1.0],
+                additional_bbox: None,
                 minzoom: 0,
                 maxzoom: 2,
                 region_id: Some("r1".into()),
@@ -1286,6 +1357,7 @@ mod tests {
             WarmRequest {
                 sources: vec![src],
                 bbox: [-0.01, -0.01, 0.01, 0.01],
+                additional_bbox: None,
                 minzoom: 14,
                 maxzoom: 16,
                 region_id: Some("r1".into()),
@@ -1354,6 +1426,7 @@ mod tests {
             WarmRequest {
                 sources: vec![src],
                 bbox: [-0.5, -0.5, 0.5, 0.5],
+                additional_bbox: None,
                 minzoom: 0,
                 maxzoom: 0,
                 region_id: Some("r1".into()),
@@ -1393,6 +1466,7 @@ mod tests {
             WarmRequest {
                 sources: vec![src.clone()],
                 bbox: [-0.5, -0.5, 0.5, 0.5],
+                additional_bbox: None,
                 minzoom: 0,
                 maxzoom: 0,
                 region_id: Some("r1".into()),
@@ -1411,6 +1485,7 @@ mod tests {
             WarmRequest {
                 sources: vec![src],
                 bbox: [-0.5, -0.5, 0.5, 0.5],
+                additional_bbox: None,
                 minzoom: 0,
                 maxzoom: 0,
                 region_id: Some("r1".into()),
@@ -1441,6 +1516,7 @@ mod tests {
             WarmRequest {
                 sources: vec![st.sources.read().await["s"].clone()],
                 bbox: [-1.0, -1.0, 1.0, 1.0],
+                additional_bbox: None,
                 minzoom: 0,
                 maxzoom: 0,
                 region_id: Some("r1".into()),
@@ -1493,6 +1569,7 @@ mod tests {
             WarmRequest {
                 sources: vec![src],
                 bbox: [-0.5, -0.5, 0.5, 0.5],
+                additional_bbox: None,
                 minzoom: 0,
                 maxzoom: 0,
                 region_id: Some("r1".into()),

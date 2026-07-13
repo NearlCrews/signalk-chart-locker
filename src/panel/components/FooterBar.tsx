@@ -24,6 +24,7 @@ interface Props {
   justSavedAt: number | null
   onSave: () => void
   onDiscard: () => void
+  valid?: boolean
 }
 
 /**
@@ -31,8 +32,8 @@ interface Props {
  * two callbacks identity-stable, so a keystroke in a field re-renders the
  * footer only when the dirty flag or unconfigured state actually flips.
  */
-export default memo(function FooterBar ({ dirty, unconfigured, justSavedAt, onSave, onDiscard }: Props): React.ReactElement {
-  const saveDisabled = saveButtonDisabled(dirty, unconfigured)
+export default memo(function FooterBar ({ dirty, unconfigured, justSavedAt, onSave, onDiscard, valid = true }: Props): React.ReactElement {
+  const saveDisabled = !valid || saveButtonDisabled(dirty, unconfigured)
   return (
     <div style={S.footer}>
       <button type='button' style={S.btnPrimary} onClick={onSave} disabled={saveDisabled}>

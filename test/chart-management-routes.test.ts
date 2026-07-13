@@ -131,6 +131,34 @@ test('POST with a non-object body returns 400', () => {
   assert.equal(res.statusCode, 400)
 })
 
+test('POST rejects empty, oversized, and non-positive overrides', () => {
+  const ctx = collect()
+  ctx.registry.set(record())
+  for (const body of [{}, { name: '' }, { description: 'x'.repeat(1001) }, { scale: 0 }]) {
+    const res = new FakeRes()
+    ctx.post['/api/charts/:id/override']({ params: { id: 'sf-pmtiles' }, body }, res)
+    assert.equal(res.statusCode, 400)
+  }
+})
+
+test('POST /api/charts/rescan waits for the scan and returns discovery status', async () => {
+  const get: Record<string, (req: ManagementRequest, res: FakeRes) => void | Promise<void>> = {}
+  const post: Record<string, (req: ManagementRequest, res: FakeRes) => void | Promise<void>> = {}
+  const registry = new ChartRegistry()
+  let scans = 0
+  registerChartManagementRoutes(
+    { get (p, h) { get[p] = h }, post (p, h) { post[p] = h } },
+    securedApp(),
+    registry,
+    new OverrideStore('/dev/null'),
+    async () => { scans++; registry.markScanned(123) }
+  )
+  const res = new FakeRes()
+  await post['/api/charts/rescan']!({ params: {}, body: null }, res)
+  assert.equal(scans, 1)
+  assert.deepEqual(res.body, { discovery: { valid: 0, invalid: 0, lastScanAt: 123 } })
+})
+
 test('routes are not mounted without a security strategy (fail closed)', () => {
   const get: Record<string, unknown> = {}
   const post: Record<string, unknown> = {}

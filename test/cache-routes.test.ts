@@ -53,6 +53,17 @@ test('POST /api/cache/config saves the store and posts ttlSecs to the container'
   assert.deepEqual(JSON.parse(call!.init!.body!), { ttlSecs: 7 * 86_400 })
 })
 
+test('POST /api/cache/config relays a container rejection instead of reporting success', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
+  const { fetchImpl } = recordingFetch({ '/cache/scroll-ttl': { status: 503, body: {} } })
+  const { router, routes } = makeRegionsRouter()
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  const route = routes.find(r => r.method === 'POST' && r.path === '/api/cache/config')!
+  const { responded, res } = fakeRegionsRes()
+  await route.handler({ params: {}, body: { ttlDays: 7 } }, res)
+  assert.equal(responded[0]?.status, 503)
+})
+
 test('POST /api/cache/clear-scroll relays the freed totals', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
   const { fetchImpl } = recordingFetch({ '/cache/clear-scroll': { status: 200, body: { freedBytes: 123, freedRows: 4 } } })

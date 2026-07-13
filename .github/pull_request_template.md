@@ -19,7 +19,11 @@
 - [ ] `npm run typecheck` passes
 - [ ] `npm run lint` passes
 - [ ] `npm run build` passes
-- [ ] For container changes: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo build --release --bin tilecache` pass
+- [ ] `npm run check:package` passes
+- [ ] `npm audit --omit=dev` passes when dependencies or release files change
+- [ ] For container changes: `cargo test --workspace --all-features`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo build --release --bin tilecache`, and `cargo audit --file Cargo.lock` pass
+- [ ] Panel changes were checked in a real browser in light, dark, and night-red themes
+- [ ] Maintained documentation and App Store screenshots were updated when applicable
 
 ## Chart sources, regions, PMTiles, and container affected
 

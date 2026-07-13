@@ -22,6 +22,8 @@ export interface CacheInfoRouter {
 interface Deps {
   dataDir?: string
   statfs?: (path: string) => StatfsResult
+  /** Configured external cache path, or null for the Signal K data filesystem. */
+  cachePath?: () => string | null
 }
 
 /** Mount the cache-info route behind the admin gate. Returns whether it was mounted. */
@@ -31,12 +33,28 @@ export function registerCacheInfoRoute (router: CacheInfoRouter, app: ServerAPI,
 
   router.get('/api/cache-info', (_req, res) => {
     try {
-      const freeGiB = readFreeGiB(dataDir, deps.statfs)
-      res.status(200).json({ freeGiB, recommendedCapGiB: deriveDefaultCapGiB(freeGiB) })
+      const configuredPath = deps.cachePath?.() ?? null
+      let measuredPath = configuredPath ?? dataDir
+      let usingFallback = false
+      let freeGiB: number
+      try {
+        freeGiB = readFreeGiB(measuredPath, deps.statfs)
+      } catch (error) {
+        if (configuredPath === null) throw error
+        measuredPath = dataDir
+        usingFallback = true
+        freeGiB = readFreeGiB(dataDir, deps.statfs)
+      }
+      res.status(200).json({
+        freeGiB,
+        recommendedCapGiB: deriveDefaultCapGiB(freeGiB),
+        storage: configuredPath !== null && !usingFallback ? 'external' : 'data-directory',
+        usingFallback
+      })
     } catch {
       // Detection failed (early call or a platform without statfs): report no free space and the
       // static default so the panel still has a usable recommendation and shows no free-space line.
-      res.status(200).json({ freeGiB: null, recommendedCapGiB: CACHE_CAP_STATIC_DEFAULT_GIB })
+      res.status(200).json({ freeGiB: null, recommendedCapGiB: CACHE_CAP_STATIC_DEFAULT_GIB, storage: 'unknown', usingFallback: false })
     }
   })
   return true

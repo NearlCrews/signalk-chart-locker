@@ -10,17 +10,17 @@ import { registerTileRoutes, type TileRouter } from '../http/tile-routes.js'
 import { registerRegionsRoutes, type RegionsRouter } from '../http/regions-routes.js'
 import { registerCacheInfoRoute, type CacheInfoRouter } from '../http/cache-info-route.js'
 import { ChartRegistry, registerChartProvider, type ChartRouteApp } from '../charts/chart-registry.js'
-import { type DiscoveryHandle, startDiscovery } from '../charts/discovery.js'
+import { type DiscoveryHandle, rescanCharts, startDiscovery } from '../charts/discovery.js'
 import { isThirdPartyPmtilesEnabled } from '../charts/mutual-exclusion.js'
 import { registerPmtilesServeRoute, type ServeRouter } from '../http/pmtiles-routes.js'
 import { registerChartManagementRoutes, type ManagementRouter } from '../http/chart-management-routes.js'
 import { OverrideStore } from '../charts/overrides.js'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { readFreeGiB } from '../runtime/free-space.js'
 import { CACHE_CAP_MAX_GIB, CACHE_CAP_MIN_GIB, deriveDefaultCapGiB } from '../shared/cache-cap.js'
 import { createPositionWarmer, type PositionWarmer } from '../runtime/position-warmer.js'
 import { loadRegionsStore, updateRegion, createCachedRegionsLoader, POSITION_WARM_REGION_ID, positionWarmBudgetBytes } from '../runtime/regions-store.js'
-import { warmRegion } from '../runtime/tilecache-client.js'
+import { getRegionByteTotals, warmRegion } from '../runtime/tilecache-client.js'
 
 interface ChartLockerConfig {
   // Sectioned to match how the admin form groups the fields: nested objects render as titled
@@ -48,6 +48,9 @@ export function createPlugin (app: ServerAPI): Plugin {
   // Its address is held for the proxy routes.
   let tilecacheLaunched = false
   let tilecacheAddress: string | null = null
+  let configuredCachePath: string | null = null
+  let tilecacheHealthy = false
+  let tilecacheConfigured = false
   // Position-warm lifecycle state (factory scope, like tilecacheAddress).
   let positionUnsub: (() => void) | null = null
   let warmer: PositionWarmer | null = null
@@ -70,15 +73,33 @@ export function createPlugin (app: ServerAPI): Plugin {
   // The charts directory resolved from the active config, captured so the override re-apply closure
   // rescans the configured directory, not the default. Set in setupCharts.
   let activeChartsDir: string | undefined
-  // Single-flight guard: at most one rescan runs at a time. The override-triggered rescan and the
-  // discovery watcher can both call rescanCharts on the same ChartRegistry; concurrent runs are
-  // redundant and can race. A new trigger while a rescan is in progress is a no-op (the running
-  // rescan will see the latest overrides because it reads them at execution time).
-  let rescanInProgress = false
 
   function chartsDirFor (config: ChartLockerConfig): string {
     const override = config.charts?.path?.trim()
     return override ? resolve(configPath, override) : join(configPath, 'charts', 'pmtiles')
+  }
+
+  function validateConfig (config: ChartLockerConfig): void {
+    const cap = config.tileCache?.cacheCapGiB ?? DEFAULT_CACHE_CAP_GIB
+    const budget = config.tileCache?.regionsBudgetGiB ?? 0
+    if (!Number.isInteger(cap) || cap < CACHE_CAP_MIN_GIB || cap > CACHE_CAP_MAX_GIB) {
+      throw new Error(`cacheCapGiB must be an integer between ${CACHE_CAP_MIN_GIB} and ${CACHE_CAP_MAX_GIB}`)
+    }
+    if (!Number.isInteger(budget) || budget < 0 || budget > cap) {
+      throw new Error('regionsBudgetGiB must be an integer from 0 through cacheCapGiB')
+    }
+    const chartsPath = config.charts?.path?.trim() ?? ''
+    if (chartsPath !== '') {
+      const resolved = resolve(configPath, chartsPath)
+      const rel = relative(configPath, resolved)
+      if (isAbsolute(chartsPath) || rel === '..' || rel.startsWith(`..${sep}`)) {
+        throw new Error('charts.path must stay within the Signal K configuration directory')
+      }
+    }
+    const external = config.advanced?.cacheVolumeSource?.trim() ?? ''
+    if (external !== '' && !isAbsolute(external)) throw new Error('cacheVolumeSource must be an absolute host path')
+    const tag = config.advanced?.imageTag?.trim() ?? ''
+    if (tag !== '' && !/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(tag)) throw new Error('imageTag is not a valid OCI tag')
   }
 
   async function setupCharts (config: ChartLockerConfig): Promise<void> {
@@ -105,6 +126,10 @@ export function createPlugin (app: ServerAPI): Plugin {
 
   async function doStart (config: ChartLockerConfig): Promise<void> {
     app.setPluginStatus('Starting...')
+    validateConfig(config)
+    tilecacheHealthy = false
+    tilecacheConfigured = false
+    configuredCachePath = config.advanced?.cacheVolumeSource?.trim() || null
     const manager = requireContainerManager(app)
     if (!manager) return
     if (!(await ensureRuntimeReady(app, manager))) return
@@ -146,7 +171,8 @@ export function createPlugin (app: ServerAPI): Plugin {
       const tcAddress = await manager.resolveContainerAddress(TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT)
       if (tcAddress) {
         tilecacheAddress = tcAddress
-        if (!(await probeTilecacheHealth(tcAddress))) {
+        tilecacheHealthy = await probeTilecacheHealth(tcAddress)
+        if (!tilecacheHealthy) {
           app.debug('Tilecache container did not pass its health probe at startup; tiles will work once it is ready.')
         }
         // R, the saved-regions reserve: the configured value (converted from GiB), or half the cap
@@ -161,8 +187,11 @@ export function createPlugin (app: ServerAPI): Plugin {
         const regionsBudgetBytes = Math.min(rawR, capBytes)
         const pBudget = positionWarmBudgetBytes(regionsBudgetBytes)
         const pushed = await pushTilecacheConfig(tcAddress, buildSourcePayload(capBytes, regionsBudgetBytes, pBudget, scrollTtlSecs))
+        tilecacheConfigured = pushed
         if (!pushed) {
-          app.debug('Tilecache config push failed; the proxy has an empty allowlist until the next push.')
+          app.debug('event=tilecache_config_push_failed state=unconfigured')
+        } else {
+          app.debug('event=tilecache_config_push_succeeded state=configured')
         }
       }
     } catch (err) {
@@ -173,19 +202,29 @@ export function createPlugin (app: ServerAPI): Plugin {
     // restart to error: the container's in-memory warm-job registry does not survive a restart, so a
     // region caught downloading is a lost job and must never stay downloading.
     const dataDir = app.getDataDirPath()
+    const regionTotals = tilecacheAddress === null ? null : await getRegionByteTotals(tilecacheAddress)
     for (const region of loadRegionsStore(dataDir).regions) {
       if (region.status === 'downloading') {
         updateRegion(dataDir, region.id, { status: 'error' })
+      } else if (
+        regionTotals !== null &&
+        (region.status === 'ready' || region.status === 'capped') &&
+        region.bytes > 0 &&
+        (regionTotals[region.id] ?? 0) === 0
+      ) {
+        // The disposable cache was recreated or upgraded while durable region metadata survived.
+        // Never advertise the region as offline-ready when none of its pins remain.
+        updateRegion(dataDir, region.id, { status: 'needs-redownload', bytes: 0 })
       }
     }
     const regionsLoader = createCachedRegionsLoader(dataDir)
     regionsLoaderStop = regionsLoader.stop
     warmer = createPositionWarmer({
       getStore: regionsLoader.getStore,
-      warm: async (bbox, sources, minzoom, maxzoom) => {
+      warm: async (bbox, sources, minzoom, maxzoom, _regionId, additionalBbox) => {
         const address = tilecacheAddress
         if (address === null) return null
-        return warmRegion(address, { bbox, sources, minzoom, maxzoom, regionId: POSITION_WARM_REGION_ID })
+        return warmRegion(address, { bbox, additionalBbox, sources, minzoom, maxzoom, regionId: POSITION_WARM_REGION_ID })
       }
     })
     positionUnsub = app.streambundle.getSelfBus('navigation.position' as unknown as Parameters<typeof app.streambundle.getSelfBus>[0])
@@ -193,9 +232,13 @@ export function createPlugin (app: ServerAPI): Plugin {
 
     await chartsReady
 
-    const tcStatus = tilecacheAddress !== null
-      ? `Tilecache at ${tilecacheAddress}.`
-      : 'Tilecache container unavailable; tile caching is disabled.'
+    const tcStatus = tilecacheAddress === null
+      ? 'Tilecache container unavailable; tile caching is disabled.'
+      : !tilecacheConfigured
+          ? `Tilecache at ${tilecacheAddress}, but its configuration push failed; cached tile requests are unavailable.`
+          : !tilecacheHealthy
+              ? `Tilecache at ${tilecacheAddress}; startup health is still pending.`
+              : `Tilecache at ${tilecacheAddress}; ready.`
     if (isThirdPartyPmtilesEnabled(configPath)) {
       app.setPluginStatus(`${tcStatus} PMTiles charts disabled: signalk-pmtiles-plugin is enabled, disable it to use the Chart Locker chart provider.`)
     } else {
@@ -211,6 +254,8 @@ export function createPlugin (app: ServerAPI): Plugin {
 
     // Clear the tilecache address first so the proxy routes report unavailable, then stop its container.
     tilecacheAddress = null
+    tilecacheHealthy = false
+    tilecacheConfigured = false
     if (tilecacheLaunched) {
       const manager = getContainerManager()
       if (manager) {
@@ -358,23 +403,19 @@ export function createPlugin (app: ServerAPI): Plugin {
     registerWithRouter (router) {
       registerTileRoutes(router as unknown as TileRouter, () => tilecacheAddress, undefined, PLUGIN_MOUNT_PATH)
       registerRegionsRoutes(router as unknown as RegionsRouter, app, () => tilecacheAddress)
-      registerCacheInfoRoute(router as unknown as CacheInfoRouter, app)
+      registerCacheInfoRoute(router as unknown as CacheInfoRouter, app, { cachePath: () => configuredCachePath })
       registerPmtilesServeRoute(router as unknown as ServeRouter, registry)
       registerChartManagementRoutes(
         router as unknown as ManagementRouter,
         app,
         registry,
         getOverrides(),
-        () => {
-          if (rescanInProgress) return
-          rescanInProgress = true
-          ;(async () => {
-            const { rescanCharts } = await import('../charts/discovery.js')
-            await rescanCharts({ chartsDir: activeChartsDir ?? chartsDirFor({}), registry, namer: getOverrides().namer() })
-          })()
-            .catch((err: unknown) => app.debug(`chart rescan after override failed: ${String(err)}`))
-            .finally(() => { rescanInProgress = false })
-        }
+        () => rescanCharts({
+          chartsDir: activeChartsDir ?? chartsDirFor({}),
+          registry,
+          namer: getOverrides().namer(),
+          onError: (message) => app.debug(`Chart discovery: ${message}`)
+        })
       )
     }
   }

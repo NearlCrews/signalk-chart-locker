@@ -38,8 +38,8 @@ body:
   - type: textarea
     id: area
     attributes:
-      label: Chart sources, regions, or PMTiles
-      description: If the request involves a specific chart source (a raster overlay or the vector basemap), saved-region or auto-cache behavior, or PMTiles chart serving, describe it here.
+      label: Affected project area
+      description: Identify relevant chart sources, saved-region or auto-cache behavior, PMTiles chart serving, cache operations, diagnostics, storage, or container lifecycle.
       placeholder: |
         Area: Saved regions
         Chart sources: an additional raster overlay

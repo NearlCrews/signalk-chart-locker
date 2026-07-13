@@ -600,5 +600,53 @@ export const S = {
     color: 'var(--cl-warn-fg)',
     background: 'var(--cl-warn-bg)',
     border: '1px solid var(--cl-warn-border)'
+  },
+  infoBanner: {
+    ...BANNER_BASE,
+    color: 'var(--cl-info-fg)',
+    background: 'var(--cl-info-bg)',
+    border: '1px solid var(--cl-info-border)'
+  },
+  metricsGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+    gap: 8,
+    marginBottom: 12
+  },
+  metric: {
+    padding: 10,
+    border: '1px solid var(--cl-border)',
+    borderRadius: 'var(--cl-radius)',
+    background: 'var(--cl-surface-muted)'
+  },
+  metricLabel: {
+    display: 'block',
+    fontSize: 'var(--cl-font-xsmall)',
+    color: 'var(--cl-text-faint)',
+    marginBottom: 4
+  },
+  metricValue: {
+    fontSize: 'var(--cl-font-title)',
+    color: 'var(--cl-text)',
+    fontWeight: 600
+  },
+  actions: {
+    display: 'flex',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 8,
+    marginBottom: 12
+  },
+  simpleTable: {
+    width: '100%',
+    borderCollapse: 'collapse',
+    fontSize: 'var(--cl-font-small)',
+    color: 'var(--cl-text)'
+  },
+  tableCell: {
+    padding: '6px 4px',
+    borderBottom: '1px solid var(--cl-border)',
+    textAlign: 'left'
   }
 } satisfies Record<string, CSSProperties>

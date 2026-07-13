@@ -21,6 +21,11 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
         working-directory: container
+      - name: cargo audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit --file Cargo.lock
+        working-directory: container
       - name: cargo build
         run: cargo build --release --bin tilecache
         working-directory: container
@@ -40,3 +45,5 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+      - run: npm audit --omit=dev
+      - run: npm run check:package

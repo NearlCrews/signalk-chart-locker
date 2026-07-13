@@ -6,8 +6,8 @@ We actively support the following versions with security updates:
 
 | Version | Supported |
 | ------- | --------- |
-| 0.1.x   | Yes       |
-| < 0.1   | No        |
+| 0.4.x   | Yes       |
+| < 0.4   | No        |
 
 ## Reporting a Vulnerability
 
@@ -43,27 +43,35 @@ Please include the following information in your report:
 
 When using this plugin:
 
-1. **Keep Updated**: always use the latest version.
-2. **Review Dependencies**: regularly update dependencies.
-3. **Network Security**: ensure your Signal K server is properly secured.
+1. **Keep Updated**: always use the latest supported 0.4 release.
+2. **Review Dependencies**: regularly update dependencies and run both documented audits.
+3. **Network Security**: ensure your Signal K server is properly secured and do not expose the
+   internal tile-cache container port directly.
 4. **Access Control**: limit access to your Signal K admin interface. The
    regions, geocode, cache, and chart-management API endpoints share one admin
    gate that fails closed, so an ungatable server leaves them unmounted. Keep
    server access control enabled.
-5. **Monitor Logs**: watch for unusual activity in the Signal K logs.
+5. **Host Paths**: configure an external cache drive only with an absolute path you control. The
+   plugin rejects relative paths, and local chart paths cannot escape the Signal K configuration
+   directory.
+6. **Monitor Logs**: watch for unusual activity and repeated `warm_rejected`,
+   `cache_write_failed`, `cache_eviction_failed`, or `cache_database_recreating` events.
 
 ## Dependency Security
 
 This project uses:
 
-- `npm audit` for vulnerability scanning of the Node plugin
-- `cargo` advisories for the Rust tilecache container
+- `npm audit --omit=dev` for vulnerability scanning of the published Node runtime dependencies
+- RustSec advisories through `cargo-audit` for the Rust tilecache container
 - Automated dependency updates via Dependabot for security patches
 
 Run a security audit:
 
 ```bash
-npm audit
+npm audit --omit=dev
+cd container
+cargo install cargo-audit --locked
+cargo audit --file Cargo.lock
 ```
 
 ## Data Handling
@@ -85,6 +93,15 @@ configuration tree (including `security.json`) is never exposed to the
 internet-facing container. The runtime image carries no GDAL, GEOS, PROJ, or
 SpatiaLite: the tilecache binary links only against libc, libm, libgcc, and the
 loader.
+
+The source allowlist and cache budgets are pushed by the plugin after startup. Until that push
+completes, the panel and plugin status report the container as unconfigured. Container health is
+database-aware and returns an error if SQLite cannot be queried. The container also reserves 256 MiB
+of filesystem headroom and degrades cache writes when that reserve would be consumed.
+
+Plugin-owned JSON state is written to a mode-0600 temporary file, flushed, and atomically renamed.
+The cache database is disposable. If it must be recreated, durable saved-region metadata survives,
+but regions with no remaining pinned bytes are marked for re-download.
 
 ## Signal K Security
 

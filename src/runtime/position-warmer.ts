@@ -7,7 +7,7 @@ import type { Bbox } from 'signalk-chart-sources'
 import type { Position } from '../shared/types.js'
 import type { RegionsStore } from './regions-store.js'
 import type { WarmResult } from './tilecache-client.js'
-import { shouldWarm, bboxAround, type WarmTrigger } from './position-warm.js'
+import { shouldWarm, bboxesAround, type WarmTrigger } from './position-warm.js'
 
 export interface PositionWarmer {
   onPosition (pos: Position): void
@@ -15,7 +15,7 @@ export interface PositionWarmer {
 
 interface Deps {
   getStore: () => RegionsStore
-  warm: (bbox: Bbox, sources: string[], minzoom: number, maxzoom: number, regionId?: string) => Promise<WarmResult | null>
+  warm: (bbox: Bbox, sources: string[], minzoom: number, maxzoom: number, regionId?: string, additionalBbox?: Bbox) => Promise<WarmResult | null>
   now?: () => number
   backoffSecs?: number
 }
@@ -37,7 +37,7 @@ export function createPositionWarmer (deps: Deps): PositionWarmer {
       const settings = store.positionWarm
       const nowMs = now()
       if (!shouldWarm(pos, store.regions, settings, trigger, nowMs)) return
-      const bbox = bboxAround(pos, settings.radiusMeters)
+      const bboxes = bboxesAround(pos, settings.radiusMeters)
       const minzoom = Math.max(0, settings.baseZoom - ZOOM_SPREAD)
       const maxzoom = settings.baseZoom + ZOOM_SPREAD
       inFlight = true
@@ -49,7 +49,7 @@ export function createPositionWarmer (deps: Deps): PositionWarmer {
       const backOff = (): void => { trigger.backoffUntilMs = now() + backoffSecs * 1000 }
       ;(async () => {
         try {
-          const result = await deps.warm(bbox, settings.sources, minzoom, maxzoom)
+          const result = await deps.warm(bboxes[0]!, settings.sources, minzoom, maxzoom, undefined, bboxes[1])
           // A null result (unreachable) or all-errors on a non-zero attempt means offline: back off so we
           // do not hammer the egress timeout.
           if (result === null || (result.total > 0 && result.errors >= result.total)) backOff()

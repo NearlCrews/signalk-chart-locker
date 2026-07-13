@@ -10,6 +10,25 @@ export interface WarmResult {
   total: number
 }
 
+/** Read all region byte totals in one request, or null when the container is unavailable or malformed. */
+export async function getRegionByteTotals (address: string, fetchImpl: typeof fetch = fetch): Promise<Record<string, number> | null> {
+  try {
+    const response = await fetchImpl(`http://${address}/cache/regions`, {
+      signal: AbortSignal.timeout(CONTAINER_FETCH_TIMEOUT_MS)
+    })
+    if (!response.ok) return null
+    const body = (await response.json()) as { regions?: unknown }
+    if (typeof body.regions !== 'object' || body.regions === null || Array.isArray(body.regions)) return null
+    const totals: Record<string, number> = {}
+    for (const [id, bytes] of Object.entries(body.regions)) {
+      if (typeof bytes === 'number' && Number.isFinite(bytes) && bytes >= 0) totals[id] = bytes
+    }
+    return totals
+  } catch {
+    return null
+  }
+}
+
 const POLL_ATTEMPTS = 20
 const POLL_INTERVAL_MS = 500
 const MAX_RETRIES = 3
@@ -38,7 +57,7 @@ async function fetchWithRetry (url: string, options: RequestInit, fetchImpl: typ
 
 export async function warmRegion (
   address: string,
-  req: { bbox: Bbox, sources: string[], minzoom: number, maxzoom: number, regionId?: string },
+  req: { bbox: Bbox, sources: string[], minzoom: number, maxzoom: number, regionId?: string, additionalBbox?: Bbox },
   fetchImpl: typeof fetch = fetch
 ): Promise<WarmResult | null> {
   try {

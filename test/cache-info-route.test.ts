@@ -32,7 +32,7 @@ test('cache-info reports free GiB and a recommended cap from injected statfs', (
   const { res, out } = fakeRes()
   routes.get('GET /api/cache-info')!({ params: {} }, res)
   assert.equal(out.code, 200)
-  assert.deepEqual(out.body, { freeGiB: 120, recommendedCapGiB: 32 })
+  assert.deepEqual(out.body, { freeGiB: 120, recommendedCapGiB: 32, storage: 'data-directory', usingFallback: false })
 })
 
 test('cache-info falls back to nulls and the static default when statfs throws', () => {
@@ -41,7 +41,25 @@ test('cache-info falls back to nulls and the static default when statfs throws',
   const { res, out } = fakeRes()
   routes.get('GET /api/cache-info')!({ params: {} }, res)
   assert.equal(out.code, 200)
-  assert.deepEqual(out.body, { freeGiB: null, recommendedCapGiB: 8 })
+  assert.deepEqual(out.body, { freeGiB: null, recommendedCapGiB: 8, storage: 'unknown', usingFallback: false })
+})
+
+test('cache-info measures the configured external path and reports a missing-drive fallback', () => {
+  const { router, routes } = collector()
+  const paths: string[] = []
+  registerCacheInfoRoute(router, securedApp(), {
+    dataDir: '/data',
+    cachePath: () => '/media/cache',
+    statfs: (path) => {
+      paths.push(path)
+      if (path === '/media/cache') throw new Error('drive absent')
+      return { bsize: 4096, bavail: 2_621_440 }
+    }
+  })
+  const { res, out } = fakeRes()
+  routes.get('GET /api/cache-info')!({ params: {} }, res)
+  assert.deepEqual(paths, ['/media/cache', '/data'])
+  assert.deepEqual(out.body, { freeGiB: 10, recommendedCapGiB: 4, storage: 'data-directory', usingFallback: true })
 })
 
 test('cache-info is not mounted without a security strategy (fail closed)', () => {

@@ -75,9 +75,13 @@ pub(crate) fn strong_etag(body: &[u8]) -> String {
 
 /// Log a cache write that failed for a reason other than a graceful disk-full degrade, so a real DB
 /// fault (locking, corruption) is visible in the container logs instead of silently dropped.
-pub(crate) fn log_cache_err<T>(result: rusqlite::Result<T>) {
+pub(crate) fn log_cache_err<T>(
+    cache: &crate::cache::TileCache,
+    event: &str,
+    result: rusqlite::Result<T>,
+) {
     if let Err(e) = result {
-        eprintln!("tilecache: cache write failed: {e}");
+        cache.record_operation_error(event, &e);
     }
 }
 
@@ -91,7 +95,7 @@ async fn run_cache_write(label: &str, detached: bool, f: impl FnOnce() + Send + 
         return;
     }
     if let Err(e) = handle.await {
-        eprintln!("tilecache: {label} task failed: {e}");
+        eprintln!("event=cache_task_failed operation={label} error={e}");
     }
 }
 
@@ -221,8 +225,12 @@ async fn store_200(
     let cap = state.live_cap_bytes.load(Ordering::Relaxed);
     let source_owned = source_id.to_string();
     run_cache_write("tile store", false, move || {
-        log_cache_err(cache.put(TileKey::new(&source_owned, z, x, y), &tile, false, now));
-        log_cache_err(cache.evict_to(cap));
+        log_cache_err(
+            &cache,
+            "cache_write_failed",
+            cache.put(TileKey::new(&source_owned, z, x, y), &tile, false, now),
+        );
+        log_cache_err(&cache, "cache_eviction_failed", cache.evict_to(cap));
     })
     .await;
     if if_none_match == Some(etag.as_str()) {
@@ -250,7 +258,11 @@ async fn negative_cache(
     let cache = state.cache.clone();
     let source_owned = source_id.to_string();
     run_cache_write("negative-cache store", false, move || {
-        log_cache_err(cache.put(TileKey::new(&source_owned, z, x, y), &tile, false, now))
+        log_cache_err(
+            &cache,
+            "cache_write_failed",
+            cache.put(TileKey::new(&source_owned, z, x, y), &tile, false, now),
+        )
     })
     .await;
     FetchOutcome::Empty { status }
@@ -304,7 +316,11 @@ pub async fn get_tile(
                 let cache = state.cache.clone();
                 let source_owned = source_id.to_string();
                 run_cache_write("touch", true, move || {
-                    log_cache_err(cache.touch(TileKey::new(&source_owned, z, x, y), now))
+                    log_cache_err(
+                        &cache,
+                        "cache_touch_failed",
+                        cache.touch(TileKey::new(&source_owned, z, x, y), now),
+                    )
                 })
                 .await;
             }
@@ -423,12 +439,11 @@ async fn fill(
                 let cache = state.cache.clone();
                 let source_owned = source_id.clone();
                 run_cache_write("revalidation refresh", false, move || {
-                    log_cache_err(cache.put(
-                        TileKey::new(&source_owned, z, x, y),
-                        &refreshed,
-                        false,
-                        now,
-                    ))
+                    log_cache_err(
+                        &cache,
+                        "cache_write_failed",
+                        cache.put(TileKey::new(&source_owned, z, x, y), &refreshed, false, now),
+                    )
                 })
                 .await;
                 respond_cached(&tile, if_none_match.as_deref(), false)

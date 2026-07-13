@@ -11,7 +11,7 @@
  */
 
 import type * as React from 'react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import StatusBar from './components/StatusBar.js'
 import Banner from './components/Banner.js'
 import Section from './components/Section.js'
@@ -25,6 +25,8 @@ import { useConfig } from './hooks/use-config.js'
 import { useStatus } from './hooks/use-status.js'
 import { useCacheInfo } from './hooks/use-cache-info.js'
 import { useTheme } from './hooks/use-theme.js'
+import { useCacheOperations } from './hooks/use-cache-operations.js'
+import { useChartDiscovery } from './hooks/use-chart-discovery.js'
 import {
   CACHE_CAP_DEFAULT_GIB,
   CACHE_CAP_MAX_GIB,
@@ -38,6 +40,13 @@ import { S, THEME_STYLE } from './styles.js'
 /** How long, in milliseconds, the "Saved" confirmation pill stays visible. */
 const SAVED_PILL_MS = 2500
 
+function formatBytes (bytes: number | null): string {
+  if (bytes === null) return 'Unknown'
+  if (bytes < 1024 ** 2) return `${Math.round(bytes / 1024)} KiB`
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`
+  return `${(bytes / 1024 ** 3).toFixed(1)} GiB`
+}
+
 interface Props {
   /** The plugin configuration supplied by the admin UI. Untyped at the federation boundary. */
   configuration: unknown
@@ -48,10 +57,18 @@ interface Props {
 /** The configuration panel rendered inside the Signal K admin UI. */
 export default function PluginConfigurationPanel ({ configuration, save }: Props): React.ReactElement {
   const { status, error, lastUpdatedMs } = useStatus()
-  const { freeGiB, recommendedCapGiB } = useCacheInfo()
+  const { freeGiB, recommendedCapGiB, storage, usingFallback } = useCacheInfo()
+  const cache = useCacheOperations()
+  const charts = useChartDiscovery()
   const { state, savedState, dispatch, markSaved, reseed } = useConfig(configuration)
   const [theme, setTheme] = useTheme()
   const [justSavedAt, setJustSavedAt] = useState<number | null>(null)
+  const [ttlDraft, setTtlDraft] = useState(30)
+  const [actionError, setActionError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (cache.stats !== null) setTtlDraft(cache.stats.ttlDays)
+  }, [cache.stats?.ttlDays])
   // Whether the plugin has ever been saved. Seeded from the mount prop (the admin UI passes null or
   // undefined for a never-configured plugin) and flipped on the first save, because the admin UI does
   // not re-pass configuration after a save, so a value derived purely from the prop would stay
@@ -72,6 +89,37 @@ export default function PluginConfigurationPanel ({ configuration, save }: Props
   // Save must stay enabled while the plugin has never been saved, so the user can persist defaults to
   // enable the plugin without making a throwaway edit first.
   const unconfigured = !everSaved
+
+  const validationErrors = useMemo(() => {
+    const errors: string[] = []
+    if (state.tileCache.regionsBudgetGiB > state.tileCache.cacheCapGiB) {
+      errors.push('Saved-regions budget cannot exceed the cache cap.')
+    }
+    if (state.charts.path.startsWith('/') || state.charts.path.split(/[\\/]+/).includes('..')) {
+      errors.push('The PMTiles charts directory must stay relative to the Signal K configuration directory.')
+    }
+    if (state.advanced.cacheVolumeSource !== '' && !state.advanced.cacheVolumeSource.startsWith('/')) {
+      errors.push('The external cache drive must be an absolute host path.')
+    }
+    if (state.advanced.imageTag !== '' && !/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(state.advanced.imageTag)) {
+      errors.push('The container image tag is not a valid OCI tag.')
+    }
+    return errors
+  }, [state])
+
+  const restartChanges = useMemo(() => {
+    if (!dirty) return []
+    const changes: string[] = []
+    if (state.tileCache !== savedState.tileCache) changes.push('tile-cache limits')
+    if (state.charts !== savedState.charts) changes.push('chart discovery')
+    if (state.advanced !== savedState.advanced) changes.push('container settings')
+    return changes
+  }, [dirty, state, savedState])
+
+  const runAction = useCallback((action: () => Promise<void>): void => {
+    setActionError(null)
+    action().catch((cause) => setActionError(cause instanceof Error ? cause.message : String(cause)))
+  }, [])
 
   // Warn before a tab close or reload while edits are unsaved, so a
   // fat-fingered close cannot silently lose in-progress configuration.
@@ -131,6 +179,92 @@ export default function PluginConfigurationPanel ({ configuration, save }: Props
       {error !== null
         ? <Banner variant='danger'>Status unavailable: {error}. The next poll will retry automatically.</Banner>
         : null}
+      {cache.stats !== null && !cache.stats.configured
+        ? <Banner variant='warn'>Tile cache is running but still waiting for its source and budget configuration.</Banner>
+        : null}
+      {cache.stats?.diskPressure === true
+        ? <Banner variant='danger'>The cache filesystem is below its reserved free-space headroom. New tiles will be served without being cached.</Banner>
+        : null}
+      {Object.entries(cache.stats?.upstream ?? {}).some(([, upstream]) => upstream.slow)
+        ? <Banner variant='warn'>One or more chart sources are responding slowly. Chart Locker has increased their request timeout automatically.</Banner>
+        : null}
+      {actionError !== null ? <Banner variant='danger'>Cache action failed: {actionError}</Banner> : null}
+      {validationErrors.map((message) => <Banner key={message} variant='danger'>{message}</Banner>)}
+      {restartChanges.length > 0
+        ? <Banner variant='info'>Saving will reapply {restartChanges.join(', ')} and may recreate the tile-cache container.</Banner>
+        : null}
+
+      <Section title='Cache operations' description='Live usage, source health, retention, and maintenance controls.'>
+        {cache.stats === null
+          ? <p style={S.hint}>{cache.error === null ? 'Loading cache statistics...' : `Statistics unavailable: ${cache.error}`}</p>
+          : (
+            <>
+              <div style={S.metricsGrid}>
+                {[
+                  ['Used', formatBytes(cache.stats.bytes)],
+                  ['Capacity', formatBytes(cache.stats.cap)],
+                  ['Saved regions', formatBytes(cache.stats.pinnedBytes)],
+                  ['Scroll cache', formatBytes(cache.stats.scrollBytes)],
+                  ['Region headroom', formatBytes(cache.stats.regionsFreeBytes)],
+                  ['Filesystem free', formatBytes(cache.stats.availableBytes)]
+                ].map(([label, value]) => (
+                  <div key={label} style={S.metric}>
+                    <span style={S.metricLabel}>{label}</span>
+                    <span style={S.metricValue}>{value}</span>
+                  </div>
+                ))}
+              </div>
+              <NumberField
+                id='cl-scroll-ttl'
+                label='Scroll cache retention (days)'
+                min={0}
+                max={365}
+                integer
+                fallback={30}
+                value={ttlDraft}
+                onChange={setTtlDraft}
+                disabled={cache.busy}
+                hint='Unpinned tiles older than this are removed by the background sweep. Set 0 to disable age-based removal.'
+              />
+              <div style={S.actions}>
+                <button
+                  type='button' style={S.btnPrimary} disabled={cache.busy || ttlDraft === cache.stats.ttlDays}
+                  onClick={() => runAction(() => cache.setTtlDays(ttlDraft))}
+                >Apply retention
+                </button>
+                <button
+                  type='button' style={S.btnSecondary} disabled={cache.busy}
+                  onClick={() => {
+                    if (window.confirm('Clear every unpinned scroll tile? Saved-region tiles will be kept.')) runAction(cache.clearScroll)
+                  }}
+                >Clear scroll cache
+                </button>
+                <button
+                  type='button' style={S.btnSecondary} disabled={cache.busy}
+                  onClick={() => runAction(cache.refresh)}
+                >Refresh
+                </button>
+              </div>
+              {cache.stats.bySource.length > 0
+                ? (
+                  <table style={S.simpleTable}>
+                    <thead><tr><th style={S.tableCell}>Source</th><th style={S.tableCell}>Usage</th><th style={S.tableCell}>Tiles</th><th style={S.tableCell}>Upstream</th></tr></thead>
+                    <tbody>{cache.stats.bySource.map((source) => (
+                      <tr key={source.source}>
+                        <td style={S.tableCell}>{source.source}</td>
+                        <td style={S.tableCell}>{formatBytes(source.bytes)}</td>
+                        <td style={S.tableCell}>{source.rows}</td>
+                        <td style={S.tableCell}>{cache.stats?.upstream[source.source]?.slow === true ? 'Slow' : 'Normal'}</td>
+                      </tr>
+                    ))}
+                    </tbody>
+                  </table>
+                  )
+                : null}
+              <p style={S.hintBelow}>Diagnostics: {cache.stats.diagnostics.cacheOperationErrors} cache errors, {cache.stats.diagnostics.diskPressureEvents} disk-pressure events, and {cache.stats.diagnostics.warmRejections} rejected warm requests.</p>
+            </>
+            )}
+      </Section>
 
       <Section
         title='Tile cache'
@@ -149,14 +283,15 @@ export default function PluginConfigurationPanel ({ configuration, save }: Props
               The most disk space the tile cache may use. When it reaches this size it evicts the
               least recently used unpinned tiles to stay under the cap. Do not set this to all of
               your free space: the cache grows to fill the cap, and a full disk can stop the server
-              from writing. If you move the cache to an external drive under Advanced, this value
-              reflects the data directory filesystem, not the drive.
+              from writing. Free-space guidance uses the external cache drive when one is configured
+              and available.
             </>
           }
         />
         {freeGiB !== null
-          ? <p style={S.hintBelow}>{freeGiB} GiB free on the Signal K data directory.</p>
+          ? <p style={S.hintBelow}>{freeGiB} GiB free on the {storage === 'external' ? 'external cache filesystem' : 'Signal K data filesystem'}.</p>
           : null}
+        {usingFallback ? <Banner variant='warn'>The configured external cache path is unavailable, so free space is measured on the Signal K data filesystem.</Banner> : null}
         {freeGiB !== null && state.tileCache.cacheCapGiB > freeGiB
           ? (
             <Banner variant='warn'>
@@ -201,6 +336,15 @@ export default function PluginConfigurationPanel ({ configuration, save }: Props
             </>
           }
         />
+        {charts.discovery !== null
+          ? (
+            <>
+              <p style={S.hintBelow}>{charts.discovery.valid} valid chart{charts.discovery.valid === 1 ? '' : 's'}, {charts.discovery.invalid.length} invalid. {charts.discovery.lastScanAt === null ? 'Not scanned yet.' : `Last scanned ${new Date(charts.discovery.lastScanAt).toLocaleString()}.`}</p>
+              {charts.discovery.invalid.map((item) => <Banner key={item.fileName} variant='warn'>{item.fileName}: {item.error}</Banner>)}
+            </>
+            )
+          : charts.error !== null ? <Banner variant='warn'>Chart discovery unavailable: {charts.error}</Banner> : null}
+        <button type='button' style={S.btnSecondary} disabled={charts.busy} onClick={() => runAction(charts.rescan)}>Rescan charts</button>
       </Section>
 
       <Disclosure summary='Advanced'>
@@ -240,6 +384,7 @@ export default function PluginConfigurationPanel ({ configuration, save }: Props
         justSavedAt={justSavedAt}
         onSave={handleSave}
         onDiscard={handleDiscard}
+        valid={validationErrors.length === 0}
       />
     </div>
   )

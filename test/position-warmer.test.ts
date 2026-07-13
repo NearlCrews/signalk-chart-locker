@@ -63,3 +63,19 @@ test('backs off after an all-errors warm', async () => {
   await Promise.resolve()
   assert.equal(calls, 2, 'resumes after the backoff')
 })
+
+test('passes both antimeridian boxes in one warm job', async () => {
+  let additional: Bbox | undefined
+  const warmer = createPositionWarmer({
+    getStore: () => store({ radiusMeters: 5000 }),
+    warm: async (_bbox, _sources, _minzoom, _maxzoom, _regionId, additionalBbox) => {
+      additional = additionalBbox
+      return { errors: 0, total: 2 }
+    },
+    now: () => 1_000_000
+  })
+  warmer.onPosition({ latitude: 0, longitude: 179.99 })
+  await Promise.resolve()
+  assert.ok(additional)
+  assert.equal(additional[0], -180)
+})

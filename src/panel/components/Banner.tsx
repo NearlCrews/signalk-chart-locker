@@ -10,14 +10,15 @@ import type * as React from 'react'
 import { S } from '../styles.js'
 
 interface Props {
-  variant: 'danger' | 'warn'
+  variant: 'danger' | 'warn' | 'info'
   children: React.ReactNode
 }
 
 export default function Banner ({ variant, children }: Props): React.ReactElement {
   const isDanger = variant === 'danger'
+  const style = isDanger ? S.errorBanner : variant === 'warn' ? S.warnBanner : S.infoBanner
   return (
-    <div role={isDanger ? 'alert' : 'status'} style={isDanger ? S.errorBanner : S.warnBanner}>
+    <div role={isDanger ? 'alert' : 'status'} style={style}>
       {children}
     </div>
   )

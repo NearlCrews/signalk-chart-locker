@@ -38,15 +38,26 @@ test('routes are not mounted without a security strategy (fail closed)', () => {
   assert.equal(routes.size, 0)
 })
 
-test('POST /api/position-warm/config floors the position-warm interval at 60 seconds', async () => {
+test('POST /api/position-warm/config rejects an interval below 60 seconds', async () => {
   const { router, routes } = collector()
   const dir = mkdtempSync(join(tmpdir(), 'pw-'))
   registerRegionsRoutes(router, securedApp(), () => 'addr:8080', { dataDir: dir })
   const { res, out } = fakeRes()
   await routes.get('POST /api/position-warm/config')!({ params: {}, body: { positionWarm: { intervalSecs: 5 } } }, res)
-  assert.equal(out.code, 204)
+  assert.equal(out.code, 400)
   const { loadRegionsStore } = await import('../src/runtime/regions-store.js')
   assert.equal(loadRegionsStore(dir).positionWarm.intervalSecs, 60)
+})
+
+test('POST /api/position-warm/config rejects malformed settings without changing the store', async () => {
+  const { router, routes } = collector()
+  const dir = mkdtempSync(join(tmpdir(), 'pw-'))
+  registerRegionsRoutes(router, securedApp(), () => 'addr:8080', { dataDir: dir })
+  for (const positionWarm of [{ enabled: 'yes' }, { baseZoom: 25 }, { sources: ['same', 'same'] }]) {
+    const { res, out } = fakeRes()
+    await routes.get('POST /api/position-warm/config')!({ params: {}, body: { positionWarm } }, res)
+    assert.equal(out.code, 400)
+  }
 })
 
 test('routes report 503 when the container address is unset', async () => {

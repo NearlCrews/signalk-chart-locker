@@ -41,7 +41,32 @@ export function haversineMeters (a: Position, b: Position): number {
 export function bboxAround (pos: Position, radiusMeters: number): Bbox {
   const dLat = radiusMeters / 111_320
   const dLng = radiusMeters / (111_320 * Math.max(0.01, Math.cos((pos.latitude * Math.PI) / 180)))
-  return [pos.longitude - dLng, pos.latitude - dLat, pos.longitude + dLng, pos.latitude + dLat]
+  return [
+    Math.max(-180, pos.longitude - dLng),
+    Math.max(-90, pos.latitude - dLat),
+    Math.min(180, pos.longitude + dLng),
+    Math.min(90, pos.latitude + dLat)
+  ]
+}
+
+/**
+ * One or two world-bounded boxes around a position. A radius crossing the antimeridian is split so the
+ * tile enumerator warms both sides of the date line without interpreting it as an almost-global box.
+ */
+export function bboxesAround (pos: Position, radiusMeters: number): Bbox[] {
+  const dLat = radiusMeters / 111_320
+  const dLng = Math.min(180, radiusMeters / (111_320 * Math.max(0.01, Math.cos((pos.latitude * Math.PI) / 180))))
+  const south = Math.max(-90, pos.latitude - dLat)
+  const north = Math.min(90, pos.latitude + dLat)
+  const west = pos.longitude - dLng
+  const east = pos.longitude + dLng
+  if (west < -180) {
+    return [[west + 360, south, 180, north], [-180, south, east, north]]
+  }
+  if (east > 180) {
+    return [[west, south, 180, north], [-180, south, east - 360, north]]
+  }
+  return [[west, south, east, north]]
 }
 
 /** The interval floor: a position-warm never fires more often than this, even if a persisted or

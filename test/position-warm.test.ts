@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { Bbox } from 'signalk-chart-sources'
-import { insideBox, haversineMeters, bboxAround, shouldWarm, insideAnyRegion, type WarmTrigger } from '../src/runtime/position-warm.js'
+import { insideBox, haversineMeters, bboxAround, bboxesAround, shouldWarm, insideAnyRegion, type WarmTrigger } from '../src/runtime/position-warm.js'
 import { DEFAULT_REGIONS_STORE } from '../src/runtime/regions-store.js'
 import type { SavedRegion } from '../src/runtime/regions-store.js'
 
@@ -30,6 +30,14 @@ test('bboxAround brackets the position', () => {
   assert.ok(minLng < here.longitude && maxLng > here.longitude)
   assert.ok(minLat < here.latitude && maxLat > here.latitude)
   assert.ok(haversineMeters(here, { latitude: minLat, longitude: here.longitude }) >= radiusMeters * 0.95)
+})
+
+test('bboxesAround splits a radius crossing the antimeridian', () => {
+  const boxes = bboxesAround({ latitude: 0, longitude: 179.99 }, 5000)
+  assert.equal(boxes.length, 2)
+  assert.equal(boxes[0]![2], 180)
+  assert.equal(boxes[1]![0], -180)
+  assert.ok(boxes[1]![2] > -180)
 })
 
 test('shouldWarm fires outside the box after the move threshold and interval', () => {

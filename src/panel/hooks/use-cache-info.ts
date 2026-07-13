@@ -19,6 +19,8 @@ export interface UseCacheInfoResult {
   freeGiB: number | null
   /** The recommended cache cap in GiB, or null until the fetch resolves. */
   recommendedCapGiB: number | null
+  storage: 'data-directory' | 'external' | 'unknown'
+  usingFallback: boolean
 }
 
 /** Read a value off the raw response as a finite number, else null. */
@@ -30,6 +32,8 @@ function readFiniteNumber (value: unknown): number | null {
 export function useCacheInfo (): UseCacheInfoResult {
   const [freeGiB, setFreeGiB] = useState<number | null>(null)
   const [recommendedCapGiB, setRecommendedCapGiB] = useState<number | null>(null)
+  const [storage, setStorage] = useState<UseCacheInfoResult['storage']>('unknown')
+  const [usingFallback, setUsingFallback] = useState(false)
   const fetcher = useAbortableFetch()
 
   useEffect(() => {
@@ -37,10 +41,12 @@ export function useCacheInfo (): UseCacheInfoResult {
     // failure the values stay null and the panel falls back to the static default.
     async function load (): Promise<void> {
       try {
-        const parsed = await fetcher.fetchJson(CACHE_INFO_URL) as { freeGiB?: unknown, recommendedCapGiB?: unknown }
+        const parsed = await fetcher.fetchJson(CACHE_INFO_URL) as { freeGiB?: unknown, recommendedCapGiB?: unknown, storage?: unknown, usingFallback?: unknown }
         if (fetcher.canceled()) return
         setFreeGiB(readFiniteNumber(parsed.freeGiB))
         setRecommendedCapGiB(readFiniteNumber(parsed.recommendedCapGiB))
+        setStorage(parsed.storage === 'external' || parsed.storage === 'data-directory' ? parsed.storage : 'unknown')
+        setUsingFallback(parsed.usingFallback === true)
       } catch {
         // Non-fatal: leave the values null so the panel keeps the static default.
       }
@@ -49,5 +55,5 @@ export function useCacheInfo (): UseCacheInfoResult {
     load()
   }, [fetcher])
 
-  return { freeGiB, recommendedCapGiB }
+  return { freeGiB, recommendedCapGiB, storage, usingFallback }
 }

@@ -14,14 +14,14 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.4.2
+## What's new in 0.4.3
 
-The tile-cache config push (the source allowlist and cache budget accounting) now retries a
-transient failure instead of giving up after one attempt. A container recreated for a version
-bump can take a few seconds longer to accept connections than a warm restart, and a push lost to
-that race left every tile 404ing until the next restart happened to win it.
+Version 0.4.3 adds live cache operations and diagnostics to the plugin panel, hardens saved-region
+recovery and input validation, protects filesystem headroom, supports position warming across the
+antimeridian, and improves chart discovery feedback. It also adds release package checks and
+dependency audits to CI.
 
-See the [changelog](CHANGELOG.md#v042) for the full list.
+See the [0.4.3 changelog](CHANGELOG.md#v043) for the full list.
 
 ## What it does
 
@@ -60,12 +60,16 @@ tiles. A standalone install of Binnacle is unaffected.
   region never stays stuck downloading.
 - **Auto-cache around the boat.** An optional throttled fill keeps a small tile radius warm around
   the vessel as it travels outside the saved regions, always LRU-bounded so it never displaces
-  the pinned coverage.
+  the pinned coverage. A radius that crosses the antimeridian is split into two bounded boxes and
+  completed as one warm job.
 - **Local PMTiles chart provider.** Drop `.pmtiles` archives in the charts folder and the
   companion discovers, validates, and registers them without a plugin restart. Each archive is
   served with a strong ETag and HTTP Range support so the browser cache works. A chart-management
   panel in the Binnacle chartplotter lists the detected archives. Defers gracefully to
   `signalk-pmtiles-plugin` when that plugin is enabled.
+- **Operational configuration panel.** Inspect cache usage, filesystem headroom, source health,
+  diagnostics, and chart discovery without leaving the Signal K admin UI. Change scroll retention,
+  clear only unpinned scroll tiles, refresh live state, and request a chart rescan from the same panel.
 
 ## Requirements
 
@@ -96,21 +100,69 @@ After installation, enable the plugin in the Signal K plugin configuration panel
 starts the tilecache container automatically when Signal K restarts. No further configuration is
 required for the tile cache or the PMTiles provider.
 
-**Tile cache capacity.** The plugin settings expose a slider for the cache size cap that moves in
-4 GiB steps, from 4 up to 32 GiB. The default is set to about 80 percent of the free space on the
-Signal K data directory at the time the settings load, floored to the nearest 4 GiB to leave
-headroom and capped at 32 GiB, and the panel warns when the cap exceeds the detected free space. A
-second GiB control sets the
-saved-regions budget, a ceiling on how much the pinned region tiles may total; leave it at 0 to
-reserve half the cap. That budget is not space taken from the scroll cache until a region is
-actually saved: the on-demand scroll cache uses the whole cap until then. A region download pins
-its tiles and evicts only unpinned scroll tiles to make room, never a pinned tile, and the scroll
-cache is evicted least-recently-used when the cap is reached.
+**Tile cache capacity.** The cache cap slider moves in 4 GiB steps from 4 through 32 GiB. On a new
+configuration, the panel recommends about 80 percent of the free space on the filesystem that will
+hold the cache, floored to the nearest 4 GiB and capped at 32 GiB. When an external cache path is
+configured and available, its filesystem is measured. If it is unavailable, the panel clearly
+reports that free-space guidance has fallen back to the Signal K data filesystem.
+
+The saved-regions budget is a ceiling on pinned region tiles. Leave it at 0 to use half the cache
+cap. It must not exceed the cache cap. This budget does not remove space from the scroll cache until
+a region is saved. A region download pins its tiles and evicts only unpinned scroll tiles to make
+room. Pinned tiles are never evicted by scroll-cache pressure.
+
+The settings panel also provides live cache operations: total, pinned, and scroll usage; remaining
+saved-region headroom; actual filesystem free space; per-source usage and upstream health; scroll
+retention; and a safe clear action that preserves saved-region tiles. The cache keeps 256 MiB of
+filesystem headroom outside its configured cap. Under disk pressure it continues serving fetched
+tiles without writing them and reports the degraded state in the panel.
+
+**Scroll retention.** Set retention from 0 through 365 days. A value of 0 disables age-based
+removal. The clear action removes every unpinned scroll tile and preserves saved-region and other
+pinned tiles. Retention changes are persisted even when the container is temporarily unavailable and
+are pushed again on the next start.
+
+**External cache drive.** The Advanced section accepts an absolute host path for a USB SSD, NVMe
+drive, or other cache filesystem. A relative path is rejected. If the path is missing at startup,
+`signalk-container` applies its configured fallback behavior and the panel reports the measurement
+fallback rather than presenting the data filesystem as the external drive.
 
 **PMTiles charts.** Place `.pmtiles` files in the server's charts folder (the same folder
 `signalk-pmtiles-plugin` uses). The companion detects and registers them automatically. If
 `signalk-pmtiles-plugin` is already enabled and serving that folder, the companion surfaces a
 clear status and defers to it.
+
+The panel reports valid and invalid archives, their latest scan time, and each validation error. Use
+the Rescan charts action after copying files when an operating-system watch event was delayed.
+
+The charts path must be relative to the Signal K configuration directory and cannot escape it with
+`..`. The optional image tag in Advanced must be a valid OCI tag. Invalid settings are shown next to
+the configuration and rejected again by the plugin before any container work starts.
+
+Saving cache limits, chart discovery settings, or container settings can reapply configuration or
+recreate the tile-cache container. The panel summarizes that restart impact before saving.
+
+## Reliability and recovery
+
+- State files are written through a flushed temporary file and atomically renamed, preventing a
+  partial JSON document after power loss.
+- A database-aware health check verifies SQLite before the container reports healthy. The plugin
+  separately reports whether the source and budget configuration push has completed.
+- If the disposable cache database is recreated, saved regions whose pinned bytes disappeared are
+  marked `needs-redownload` instead of remaining falsely ready.
+- A failed region re-download keeps the prior region state. A missing warm job is reconciled to an
+  error instead of leaving the region stuck downloading.
+- Position-warm, saved-region, chart override, and direct plugin configuration inputs are validated
+  at their server boundaries.
+
+See [Operations](docs/OPERATIONS.md) for status interpretation, diagnostics, recovery procedures,
+and structured log events. See [HTTP API](docs/API.md) for the plugin routes and validation limits.
+
+## Configuration panel
+
+| Light | Dark | Night red |
+| ----- | ---- | --------- |
+| ![Light configuration panel](assets/screenshots/config-panel.png) | ![Dark configuration panel](assets/screenshots/config-panel-dark.png) | ![Night-red configuration panel](assets/screenshots/config-panel-night.png) |
 
 ## Development
 
@@ -124,7 +176,9 @@ npm install
 npm run typecheck   # TypeScript type-check
 npm run lint        # ESLint
 npm test            # node --test unit tests
-npm run build       # compile TypeScript to dist/
+npm run build       # clean and compile dist/, then build the panel remote
+npm run check:package
+npm audit --omit=dev
 ```
 
 Rust (Cargo workspace):
@@ -132,9 +186,15 @@ Rust (Cargo workspace):
 ```bash
 cd container
 cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo build --release --bin tilecache
+cargo install cargo-audit --locked
+cargo audit --file Cargo.lock
 ```
+
+Before a release, also verify the panel in a real browser and follow the
+[publish runbook](docs/superpowers/2026-06-30-publish-runbook.md). Publishing the npm package or
+creating the version tag requires explicit owner approval.
 
 ## License
 

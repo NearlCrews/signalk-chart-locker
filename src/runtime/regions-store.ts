@@ -219,31 +219,41 @@ export function createCachedRegionsLoader (dataDir: string): CachedRegionsLoader
   }
 }
 
-/** Write the store atomically enough for a single-writer plugin (one JSON file). */
+/** Write the store atomically for the plugin-owned JSON file. */
 export function saveRegionsStore (dataDir: string, store: RegionsStore): void {
   writeJsonState(join(dataDir, STORE_FILE), store)
 }
 
+/**
+ * Run one synchronous read-modify-write transaction. JavaScript cannot interleave another callback inside
+ * this critical section, so every in-process mutation observes the preceding write rather than retaining a
+ * stale snapshot across an asynchronous boundary.
+ */
+export function mutateRegionsStore (dataDir: string, mutate: (store: RegionsStore) => void): RegionsStore {
+  const store = loadRegionsStore(dataDir)
+  mutate(store)
+  saveRegionsStore(dataDir, store)
+  return store
+}
+
 /** Append a region to the persisted store and write it back. */
 export function addRegion (dataDir: string, region: SavedRegion): void {
-  const store = loadRegionsStore(dataDir)
-  store.regions.push(region)
-  saveRegionsStore(dataDir, store)
+  mutateRegionsStore(dataDir, (store) => { store.regions.push(region) })
 }
 
 /** Patch a region in place by id and write the store back; a no-op when the id is absent. */
 export function updateRegion (dataDir: string, id: string, patch: Partial<SavedRegion>): void {
-  const store = loadRegionsStore(dataDir)
-  const idx = store.regions.findIndex((r) => r.id === id)
-  if (idx >= 0) store.regions[idx] = { ...store.regions[idx]!, ...patch }
-  saveRegionsStore(dataDir, store)
+  mutateRegionsStore(dataDir, (store) => {
+    const idx = store.regions.findIndex((r) => r.id === id)
+    if (idx >= 0) store.regions[idx] = { ...store.regions[idx]!, ...patch }
+  })
 }
 
 /** Drop a region by id from the persisted store and write it back. */
 export function removeRegion (dataDir: string, id: string): void {
-  const store = loadRegionsStore(dataDir)
-  store.regions = store.regions.filter((r) => r.id !== id)
-  saveRegionsStore(dataDir, store)
+  mutateRegionsStore(dataDir, (store) => {
+    store.regions = store.regions.filter((r) => r.id !== id)
+  })
 }
 
 /** The persisted regions list. */

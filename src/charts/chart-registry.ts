@@ -66,6 +66,7 @@ export function chartResource (record: ChartRecord): ChartResource {
 export class ChartRegistry {
   readonly #records = new Map<string, ChartRecord>()
   readonly #errors = new Map<string, string>()
+  #lastScanAt: number | null = null
 
   set (record: ChartRecord): void {
     this.#records.set(record.identifier, record)
@@ -78,6 +79,7 @@ export class ChartRegistry {
   clear (): void {
     this.#records.clear()
     this.#errors.clear()
+    this.#lastScanAt = null
   }
 
   has (id: string): boolean {
@@ -116,6 +118,20 @@ export class ChartRegistry {
 
   errors (): Array<{ fileName: string, error: string }> {
     return [...this.#errors.entries()].map(([fileName, error]) => ({ fileName, error }))
+  }
+
+  retainErrors (fileNames: Set<string>): void {
+    for (const fileName of this.#errors.keys()) {
+      if (!fileNames.has(fileName)) this.#errors.delete(fileName)
+    }
+  }
+
+  markScanned (at = Date.now()): void {
+    this.#lastScanAt = at
+  }
+
+  discoveryStatus (): { valid: number, invalid: number, lastScanAt: number | null } {
+    return { valid: this.#records.size, invalid: this.#errors.size, lastScanAt: this.#lastScanAt }
   }
 }
 

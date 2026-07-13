@@ -1,0 +1,13 @@
+{
+  "config": {
+    "MD013": false,
+    "MD024": {
+      "siblings_only": true
+    },
+    "MD033": false
+  },
+  "ignores": [
+    "docs/superpowers/plans/**",
+    "docs/superpowers/2026-06-28-tilecache-release-and-roadmap-plan.md"
+  ]
+}

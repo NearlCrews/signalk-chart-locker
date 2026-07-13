@@ -1,6 +1,6 @@
 {
   "name": "signalk-chart-locker",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Signal K plugin that runs a Rust container alongside the server for a boat-wide tile cache, a PMTiles chart provider, and saved downloadable map regions.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -8,17 +8,20 @@
     "dist",
     "public",
     "assets",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "docs/API.md",
+    "docs/OPERATIONS.md"
   ],
   "scripts": {
     "build": "npm run build:plugin && npm run build:panel",
-    "build:plugin": "tsc",
+    "build:plugin": "node scripts/clean-dist.mjs && tsc",
     "build:panel": "webpack --config webpack.config.cjs",
     "watch:panel": "webpack --watch --mode development --config webpack.config.cjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.panel.json && tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "test": "node --import tsx --test test/*.test.ts",
+    "check:package": "npm run build && node scripts/check-package-contents.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

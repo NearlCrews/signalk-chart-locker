@@ -61,7 +61,7 @@ fn open_or_recreate(path: &Path) -> TileCache {
         Ok(c) => c,
         Err(e) => {
             eprintln!(
-                "tilecache: opening the cache DB {} failed: {e}; recreating it",
+                "event=cache_database_recreating path={} error={e}",
                 path.display()
             );
             for suffix in ["", "-wal", "-shm"] {
@@ -72,8 +72,10 @@ fn open_or_recreate(path: &Path) -> TileCache {
                 };
                 let _ = std::fs::remove_file(&p);
             }
-            TileCache::open(path)
-                .expect("recreate the tile cache DB after removing the corrupt one")
+            let cache = TileCache::open(path)
+                .expect("recreate the tile cache DB after removing the corrupt one");
+            eprintln!("event=cache_database_recreated path={}", path.display());
+            cache
         }
     }
 }
@@ -93,15 +95,30 @@ fn tilecache_port() -> u16 {
 /// Connect to the local port; exit 0 if the service is listening, else 1. Used by the container
 /// HEALTHCHECK on a distroless image that has no shell.
 fn healthcheck() -> i32 {
+    use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::time::Duration;
     let addr = format!("127.0.0.1:{}", tilecache_port());
     match addr.parse() {
         Ok(sa) => {
-            if TcpStream::connect_timeout(&sa, Duration::from_secs(3)).is_ok() {
-                0
-            } else {
-                1
+            let Ok(mut stream) = TcpStream::connect_timeout(&sa, Duration::from_secs(3)) else {
+                return 1;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+            if stream
+                .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .is_err()
+            {
+                return 1;
+            }
+            let mut response = [0u8; 64];
+            match stream.read(&mut response) {
+                Ok(count)
+                    if String::from_utf8_lossy(&response[..count]).starts_with("HTTP/1.1 200") =>
+                {
+                    0
+                }
+                _ => 1,
             }
         }
         Err(_) => 1,

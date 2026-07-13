@@ -141,6 +141,12 @@ pub struct AppState {
     /// The live scroll-tile TTL in seconds, seeded from `knobs.scroll_ttl_secs` and updated by the
     /// dedicated POST /cache/scroll-ttl route. Zero disables the age sweep.
     pub live_scroll_ttl_secs: Arc<AtomicI64>,
+    /// True after the plugin has pushed the source allowlist and live budgets at least once.
+    pub configured: Arc<AtomicBool>,
+    /// Operator-facing counters for rejected warm requests and accepted config pushes.
+    pub warm_rejections: Arc<AtomicU64>,
+    pub config_pushes: Arc<AtomicU64>,
+    pub cache_operation_errors: Arc<AtomicU64>,
     /// Single-flight guard for the one-time global basemap assets warm, so two concurrent basemap
     /// downloads do not both fetch the full glyph and sprite set.
     pub assets_warming: Arc<AtomicBool>,
@@ -182,6 +188,10 @@ impl AppState {
             live_regions_budget: Arc::new(AtomicI64::new(0)),
             live_position_warm_budget: Arc::new(AtomicI64::new(0)),
             live_scroll_ttl_secs: Arc::new(AtomicI64::new(scroll_ttl_secs)),
+            configured: Arc::new(AtomicBool::new(false)),
+            warm_rejections: Arc::new(AtomicU64::new(0)),
+            config_pushes: Arc::new(AtomicU64::new(0)),
+            cache_operation_errors: Arc::new(AtomicU64::new(0)),
             assets_warming: Arc::new(AtomicBool::new(false)),
             upstream_health: Arc::new(UpstreamHealth::new(base_timeout_ms)),
         }

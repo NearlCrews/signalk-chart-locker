@@ -24,6 +24,7 @@ pub fn app(state: AppState) -> Router {
         .route("/config", post(config))
         .route("/cache/scroll-ttl", post(set_scroll_ttl))
         .route("/cache/clear-scroll", post(clear_scroll))
+        .route("/cache/regions", get(all_region_bytes_route))
         .route("/tile/{source}/{z}/{x}/{y}", get(tile))
         .route("/warm", post(warm_start))
         .route("/warm/{job_id}", get(warm_status))
@@ -37,20 +38,38 @@ pub fn app(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok" }))
+async fn health(State(st): State<AppState>) -> Response {
+    let cache = st.cache.clone();
+    let database_ready = matches!(
+        tokio::task::spawn_blocking(move || cache.probe()).await,
+        Ok(Ok(()))
+    );
+    let configured = st.configured.load(Ordering::Relaxed);
+    let status = if database_ready { "ok" } else { "degraded" };
+    let body = Json(serde_json::json!({
+        "status": status,
+        "databaseReady": database_ready,
+        "configured": configured
+    }));
+    if database_ready {
+        body.into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, body).into_response()
+    }
 }
 
 async fn stats(State(st): State<AppState>) -> Json<serde_json::Value> {
     let cap = st.live_cap_bytes.load(Ordering::Relaxed);
     let r = st.live_regions_budget.load(Ordering::Relaxed);
     let p = st.live_position_warm_budget.load(Ordering::Relaxed);
+    let configured = st.configured.load(Ordering::Relaxed);
+    let available_bytes = st.cache.available_bytes().ok();
     // Run the SQLite reads on a blocking thread. real_region_pinned_bytes probes region_tiles per pinned
     // tile, so on a large cache it can scan for many seconds; keeping it off the async runtime stops one
     // stats call from wedging the async reactor. Each cache read degrades to its zero value on an
     // error, matching the prior unwrap_or, and the whole tuple defaults to zeros on a task join failure.
     let cache = st.cache.clone();
-    let (rows, bytes, pinned_bytes, pw, real_pinned, avg_rows, by_source_rows) =
+    let (rows, bytes, pinned_bytes, pw, real_pinned, source_rows) =
         tokio::task::spawn_blocking(move || {
             let (rows, bytes, pinned_bytes) = cache.stats().unwrap_or((0, 0, 0));
             // The position-warm pseudo-region's pinned bytes, reported as positionWarmBytes.
@@ -63,27 +82,29 @@ async fn stats(State(st): State<AppState>) -> Json<serde_json::Value> {
             let real_pinned = cache
                 .real_region_pinned_bytes(crate::state::POSITION_WARM_REGION_ID)
                 .unwrap_or(0);
-            let avg_rows = cache.per_source_avg().unwrap_or_default();
-            let by_source_rows = cache.per_source_totals().unwrap_or_default();
-            (
-                rows,
-                bytes,
-                pinned_bytes,
-                pw,
-                real_pinned,
-                avg_rows,
-                by_source_rows,
-            )
+            let source_rows = cache.per_source_stats().unwrap_or_default();
+            (rows, bytes, pinned_bytes, pw, real_pinned, source_rows)
         })
         .await
         .unwrap_or_default();
-    let avg: serde_json::Map<String, serde_json::Value> = avg_rows
-        .into_iter()
-        .map(|(source, mean)| (source, serde_json::json!(mean)))
+    let avg: serde_json::Map<String, serde_json::Value> = source_rows
+        .iter()
+        .filter_map(|stats| {
+            stats
+                .average_bytes
+                .map(|value| (stats.source.clone(), serde_json::json!(value)))
+        })
         .collect();
-    let by_source: Vec<serde_json::Value> = by_source_rows
+    let by_source: Vec<serde_json::Value> = source_rows
         .into_iter()
-        .map(|(source, bytes, rows)| serde_json::json!({ "source": source, "bytes": bytes, "rows": rows }))
+        .filter(|stats| stats.scroll_rows > 0)
+        .map(|stats| {
+            serde_json::json!({
+                "source": stats.source,
+                "bytes": stats.scroll_bytes,
+                "rows": stats.scroll_rows
+            })
+        })
         .collect();
     // Per-source upstream health, present only for sources with a live health entry. The in-memory
     // snapshot is a fast lock, so it runs on the reactor rather than the blocking cache pool. timeoutSecs
@@ -123,6 +144,17 @@ async fn stats(State(st): State<AppState>) -> Json<serde_json::Value> {
         "perSourceAvgBytes": avg,
         "bySource": by_source,
         "upstream": upstream,
+        "configured": configured,
+        "availableBytes": available_bytes,
+        "minimumHeadroomBytes": crate::cache::MIN_FREE_HEADROOM_BYTES,
+        "diskPressure": available_bytes.map(|bytes| bytes < crate::cache::MIN_FREE_HEADROOM_BYTES),
+        "diagnostics": {
+            "diskPressureEvents": st.cache.disk_pressure_events(),
+            "warmRejections": st.warm_rejections.load(Ordering::Relaxed),
+            "configPushes": st.config_pushes.load(Ordering::Relaxed),
+            "cacheOperationErrors": st.cache.operation_error_events()
+                + st.cache_operation_errors.load(Ordering::Relaxed),
+        },
     }))
 }
 
@@ -152,6 +184,7 @@ struct ConfigBody {
 /// per-region delete converges it. The physical total stays at or below the cap throughout. This is
 /// documented and acceptable, not a bug.
 async fn config(State(st): State<AppState>, Json(body): Json<ConfigBody>) -> StatusCode {
+    let source_count = body.sources.len();
     {
         let mut map = st.sources.write().await;
         map.clear();
@@ -177,6 +210,9 @@ async fn config(State(st): State<AppState>, Json(body): Json<ConfigBody>) -> Sta
     if let Some(t) = body.scroll_ttl_secs {
         st.live_scroll_ttl_secs.store(t, Ordering::Relaxed);
     }
+    st.configured.store(true, Ordering::Relaxed);
+    st.config_pushes.fetch_add(1, Ordering::Relaxed);
+    eprintln!("event=config_push_applied sources={source_count}");
     StatusCode::NO_CONTENT
 }
 
@@ -203,10 +239,12 @@ async fn clear_scroll(State(st): State<AppState>) -> Response {
             Json(serde_json::json!({ "freedBytes": bytes, "freedRows": rows })).into_response()
         }
         Ok(Err(e)) => {
+            st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
             eprintln!("tilecache: clear_unpinned failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
         Err(e) => {
+            st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
             eprintln!("tilecache: clear_unpinned task failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
@@ -219,11 +257,37 @@ async fn region_bytes_route(State(st): State<AppState>, Path(region_id): Path<St
     match tokio::task::spawn_blocking(move || cache.region_bytes(&region_id)).await {
         Ok(Ok(bytes)) => Json(serde_json::json!({ "bytes": bytes })).into_response(),
         Ok(Err(e)) => {
+            st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
             eprintln!("tilecache: region_bytes failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
         Err(e) => {
+            st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
             eprintln!("tilecache: region_bytes task failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// GET /cache/regions: all region byte totals in one SQLite query.
+async fn all_region_bytes_route(State(st): State<AppState>) -> Response {
+    let cache = st.cache.clone();
+    match tokio::task::spawn_blocking(move || cache.all_region_bytes()).await {
+        Ok(Ok(rows)) => {
+            let regions: serde_json::Map<String, serde_json::Value> = rows
+                .into_iter()
+                .map(|(id, bytes)| (id, serde_json::json!(bytes)))
+                .collect();
+            Json(serde_json::json!({ "regions": regions })).into_response()
+        }
+        Ok(Err(e)) => {
+            st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
+            eprintln!("event=cache_region_totals_failed error={e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Err(e) => {
+            st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
+            eprintln!("event=cache_region_totals_task_failed error={e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
@@ -250,7 +314,7 @@ async fn delete_region_route(
         // delete_region demotes refcount-zero tiles from pinned to unpinned without changing
         // total_bytes, so the total is already at or below the cap and this evict_to is effectively a
         // no-op. Kept for safety: it cannot exceed the cap and trims nothing it should keep.
-        crate::fetcher::log_cache_err(cache.evict_to(cap));
+        crate::fetcher::log_cache_err(&cache, "cache_eviction_failed", cache.evict_to(cap));
         Ok::<(), rusqlite::Error>(())
     })
     .await;
@@ -297,6 +361,8 @@ async fn tile(
 struct WarmBody {
     sources: Vec<String>,
     bbox: [f64; 4],
+    #[serde(default)]
+    additional_bbox: Option<[f64; 4]>,
     minzoom: u32,
     maxzoom: u32,
     #[serde(default)]
@@ -327,6 +393,7 @@ async fn warm_start(State(st): State<AppState>, Json(body): Json<WarmBody>) -> R
     let req = crate::warm::WarmRequest {
         sources: placeholders,
         bbox: body.bbox,
+        additional_bbox: body.additional_bbox,
         minzoom: body.minzoom,
         maxzoom: body.maxzoom,
         region_id: body.region_id,
@@ -335,14 +402,26 @@ async fn warm_start(State(st): State<AppState>, Json(body): Json<WarmBody>) -> R
         Ok(job_id) => {
             (StatusCode::OK, Json(serde_json::json!({ "jobId": job_id }))).into_response()
         }
-        Err(crate::warm::StartError::UnknownSource(_)) => StatusCode::NOT_FOUND.into_response(),
+        Err(crate::warm::StartError::UnknownSource(_)) => {
+            st.warm_rejections.fetch_add(1, Ordering::Relaxed);
+            eprintln!("event=warm_rejected reason=unknown_source");
+            StatusCode::NOT_FOUND.into_response()
+        }
         Err(crate::warm::StartError::TooMany(n)) => {
+            st.warm_rejections.fetch_add(1, Ordering::Relaxed);
+            eprintln!("event=warm_rejected reason=tile_limit tiles={n}");
             (StatusCode::BAD_REQUEST, format!("too many tiles: {n}")).into_response()
         }
         Err(crate::warm::StartError::BadBbox(m)) | Err(crate::warm::StartError::BadZoom(m)) => {
+            st.warm_rejections.fetch_add(1, Ordering::Relaxed);
+            eprintln!("event=warm_rejected reason=invalid_geometry");
             (StatusCode::BAD_REQUEST, m).into_response()
         }
-        Err(crate::warm::StartError::TooManyJobs) => StatusCode::TOO_MANY_REQUESTS.into_response(),
+        Err(crate::warm::StartError::TooManyJobs) => {
+            st.warm_rejections.fetch_add(1, Ordering::Relaxed);
+            eprintln!("event=warm_rejected reason=job_limit");
+            StatusCode::TOO_MANY_REQUESTS.into_response()
+        }
     }
 }
 
@@ -431,6 +510,8 @@ mod tests {
         let (status, body) = body_string(resp).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("\"status\":\"ok\""));
+        assert!(body.contains("\"databaseReady\":true"));
+        assert!(body.contains("\"configured\":false"));
     }
 
     #[tokio::test]
@@ -597,6 +678,20 @@ mod tests {
         let (status, body) = body_string(resp).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("\"rows\":0"));
+        assert!(body.contains("\"diagnostics\""));
+        assert!(body.contains("\"availableBytes\""));
+    }
+
+    #[tokio::test]
+    async fn all_region_bytes_route_returns_one_batched_map() {
+        let db = NamedTempFile::new().unwrap();
+        let resp = app(dev_state(&db))
+            .oneshot(Request::get("/cache/regions").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let (status, body) = body_string(resp).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, r#"{"regions":{}}"#);
     }
 
     #[tokio::test]

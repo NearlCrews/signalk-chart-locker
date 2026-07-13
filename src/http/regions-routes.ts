@@ -8,7 +8,7 @@ import { estimateBytes, type Bbox } from 'signalk-chart-sources'
 import { ensureApiAdminGate } from '../shared/admin-gate.js'
 import { CONTAINER_FETCH_TIMEOUT_MS } from '../runtime/container-fetch.js'
 import {
-  loadRegionsStore, saveRegionsStore, type PositionWarmSettings,
+  loadRegionsStore, mutateRegionsStore, type PositionWarmSettings,
   addRegion, updateRegion, removeRegion, listRegions,
   type SavedRegion, type RegionStatus
 } from '../runtime/regions-store.js'
@@ -57,18 +57,69 @@ interface Deps {
 
 /** The floor for the position-warm interval, enforced server-side as well as in the panel. */
 const MIN_WARM_INTERVAL_SECS = 60
+const MAX_WARM_INTERVAL_SECS = 86_400
+const MAX_WARM_DISTANCE_METERS = 100_000
+const MAX_SOURCE_IDS = 64
+const MAX_SOURCE_ID_LENGTH = 256
+const MAX_REGION_NAME_LENGTH = 120
+const MAX_WARM_ZOOM = 24
 
 // Container route bases reached from more than one handler, named so each path lives once. Single-use
 // routes (scroll-ttl, clear-scroll, and geocode) stay inline at their one call site.
 const CONTAINER_STATS_PATH = '/cache/stats'
 const CONTAINER_REGION_PATH = '/cache/region'
+const CONTAINER_REGIONS_PATH = '/cache/regions'
 const CONTAINER_WARM_PATH = '/warm'
 
 /** A finite, correctly ordered lon/lat bbox: [minLng, minLat, maxLng, maxLat]. */
 function isValidBbox (value: unknown): value is Bbox {
   return Array.isArray(value) && value.length === 4 &&
     value.every((n) => typeof n === 'number' && Number.isFinite(n)) &&
+    value[0] >= -180 && value[2] <= 180 && value[1] >= -90 && value[3] <= 90 &&
     value[0] < value[2] && value[1] < value[3]
+}
+
+function isRecord (value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function validSourceIds (value: unknown, allowEmpty: boolean): value is string[] {
+  if (!Array.isArray(value) || value.length > MAX_SOURCE_IDS || (!allowEmpty && value.length === 0)) return false
+  if (!value.every((source) => typeof source === 'string' && source.length > 0 && source.length <= MAX_SOURCE_ID_LENGTH)) return false
+  return new Set(value).size === value.length
+}
+
+function readPositionWarmPatch (value: unknown): Partial<PositionWarmSettings> | string {
+  if (!isRecord(value)) return 'positionWarm must be an object'
+  const patch: Partial<PositionWarmSettings> = {}
+  if ('enabled' in value) {
+    if (typeof value.enabled !== 'boolean') return 'enabled must be a boolean'
+    patch.enabled = value.enabled
+  }
+  for (const [key, min, max] of [
+    ['radiusMeters', 1, MAX_WARM_DISTANCE_METERS],
+    ['moveThresholdMeters', 0, MAX_WARM_DISTANCE_METERS],
+    ['intervalSecs', MIN_WARM_INTERVAL_SECS, MAX_WARM_INTERVAL_SECS]
+  ] as const) {
+    if (key in value) {
+      const candidate = value[key]
+      if (typeof candidate !== 'number' || !Number.isFinite(candidate) || candidate < min || candidate > max) {
+        return `${key} must be a finite number between ${min} and ${max}`
+      }
+      patch[key] = candidate
+    }
+  }
+  if ('baseZoom' in value) {
+    if (typeof value.baseZoom !== 'number' || !Number.isInteger(value.baseZoom) || value.baseZoom < 0 || value.baseZoom > MAX_WARM_ZOOM) {
+      return `baseZoom must be an integer between 0 and ${MAX_WARM_ZOOM}`
+    }
+    patch.baseZoom = value.baseZoom
+  }
+  if ('sources' in value) {
+    if (!validSourceIds(value.sources, true)) return 'sources must be a unique array of valid source IDs'
+    patch.sources = value.sources
+  }
+  return patch
 }
 
 /** Mount the regions routes behind the admin gate. Returns whether they were mounted. */
@@ -127,6 +178,22 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     }
   }
 
+  const allRegionBytes = async (address: string): Promise<Record<string, number> | null> => {
+    try {
+      const response = await fetchImpl(`http://${address}${CONTAINER_REGIONS_PATH}`)
+      if (!response.ok) return null
+      const body = (await response.json()) as { regions?: unknown }
+      if (!isRecord(body.regions)) return null
+      const totals: Record<string, number> = {}
+      for (const [id, bytes] of Object.entries(body.regions)) {
+        if (typeof bytes === 'number' && Number.isFinite(bytes) && bytes >= 0) totals[id] = bytes
+      }
+      return totals
+    } catch {
+      return null
+    }
+  }
+
   const statusFromState = (state: WarmSnapshot['state']): RegionStatus => {
     if (state === 'done') return 'ready'
     if (state === 'capped') return 'capped'
@@ -161,13 +228,14 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
   })
 
   router.post('/api/position-warm/config', (req, res) => {
-    const store = loadRegionsStore(dataDir)
-    const incoming = (req.body as { positionWarm?: Partial<PositionWarmSettings> } | undefined) ?? {}
-    const positionWarm = { ...store.positionWarm, ...(incoming.positionWarm ?? {}) }
-    // Floor the interval server-side (the panel enforces it too) so a direct POST cannot set a
-    // sub-60-second loop that hammers the egress path.
-    positionWarm.intervalSecs = Math.max(MIN_WARM_INTERVAL_SECS, positionWarm.intervalSecs)
-    saveRegionsStore(dataDir, { ...store, positionWarm })
+    if (!isRecord(req.body) || !('positionWarm' in req.body)) {
+      res.status(400).json({ error: 'positionWarm is required' }); return
+    }
+    const patch = readPositionWarmPatch(req.body.positionWarm)
+    if (typeof patch === 'string') { res.status(400).json({ error: patch }); return }
+    mutateRegionsStore(dataDir, (store) => {
+      store.positionWarm = { ...store.positionWarm, ...patch }
+    })
     res.status(204).end()
   })
 
@@ -179,11 +247,13 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     // Persist to the store first, the source of truth, so the new TTL survives even when the container
     // is down: it is pushed on the next doStart. With no address this returns 503 after persisting,
     // which is intended.
-    const store = loadRegionsStore(dataDir)
-    saveRegionsStore(dataDir, { ...store, cacheScrollTtlDays: ttlDays })
+    mutateRegionsStore(dataDir, (store) => { store.cacheScrollTtlDays = ttlDays })
     const address = withAddress(res); if (address === null) return
     try {
-      await fetchImpl(`http://${address}/cache/scroll-ttl`, warmInit({ ttlSecs: ttlDays * 86_400 }))
+      const upstream = await fetchImpl(`http://${address}/cache/scroll-ttl`, warmInit({ ttlSecs: ttlDays * 86_400 }))
+      if (!upstream.ok) {
+        res.status(upstream.status).json({ error: 'tilecache rejected cache configuration' }); return
+      }
       res.status(204).end()
     } catch {
       res.status(502).json({ error: 'tilecache unreachable' })
@@ -220,10 +290,10 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
   router.get('/api/regions', async (_req, res) => {
     const address = getAddress()
     const regions = listRegions(dataDir)
-    const dtos = await Promise.all(regions.map(async (region) => {
-      // cachedBytes is cache-derived from the container; 0 when the container is unreachable.
-      const cachedBytes = address === null ? 0 : await regionBytes(address, region.id, region.bytes)
-      return { ...region, cachedBytes }
+    const totals = address === null ? null : await allRegionBytes(address)
+    const dtos = regions.map((region) => ({
+      ...region,
+      cachedBytes: totals?.[region.id] ?? (totals === null ? region.bytes : 0)
     }))
     res.status(200).json(dtos)
   })
@@ -233,18 +303,22 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     const { bbox, sourceIds, minzoom, maxzoom, name } = b
     // Validate BEFORE touching the container so an invalid body is a 400 even with no address.
     if (!isValidBbox(bbox) ||
-        !Array.isArray(sourceIds) || !sourceIds.every((s) => typeof s === 'string') ||
-        typeof minzoom !== 'number' || !Number.isFinite(minzoom) ||
-        typeof maxzoom !== 'number' || !Number.isFinite(maxzoom) || minzoom > maxzoom ||
-        typeof name !== 'string' || name.trim().length === 0) {
-      res.status(400).json({ error: 'a finite ordered bbox, a sourceIds array, minzoom <= maxzoom, and a non-empty name are required' }); return
+        !validSourceIds(sourceIds, false) ||
+        typeof minzoom !== 'number' || !Number.isInteger(minzoom) || minzoom < 0 || minzoom > MAX_WARM_ZOOM ||
+        typeof maxzoom !== 'number' || !Number.isInteger(maxzoom) || maxzoom < 0 || maxzoom > MAX_WARM_ZOOM || minzoom > maxzoom ||
+        typeof name !== 'string' || name.trim().length === 0 || name.trim().length > MAX_REGION_NAME_LENGTH) {
+      res.status(400).json({ error: `bbox must be within world bounds; sourceIds must be non-empty and unique; zooms must be integers from 0 to ${MAX_WARM_ZOOM}; name must be 1 to ${MAX_REGION_NAME_LENGTH} characters` }); return
     }
     const address = withAddress(res); if (address === null) return
     // Re-validate the byte estimate authoritatively server-side, upfront, with the SHARED estimateBytes
     // (so the panel and the plugin agree), and refuse over-budget BEFORE persisting or starting the job.
     let stats: ContainerStats
     try {
-      stats = (await (await fetchImpl(`http://${address}${CONTAINER_STATS_PATH}`)).json()) as ContainerStats
+      const statsResponse = await fetchImpl(`http://${address}${CONTAINER_STATS_PATH}`)
+      if (!statsResponse.ok) {
+        res.status(statsResponse.status).json({ error: 'tilecache statistics unavailable' }); return
+      }
+      stats = (await statsResponse.json()) as ContainerStats
     } catch {
       res.status(502).json({ error: 'tilecache unreachable' }); return
     }
@@ -268,7 +342,9 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     try {
       const warmResp = await fetchImpl(`http://${address}${CONTAINER_WARM_PATH}`, warmInit({ sources: sourceIds, bbox, minzoom, maxzoom, regionId: region.id }))
       if (!warmResp.ok) throw new Error('warm start rejected')
-      const { jobId } = (await warmResp.json()) as { jobId: string }
+      const warmBody = (await warmResp.json()) as { jobId?: unknown }
+      if (typeof warmBody.jobId !== 'string' || warmBody.jobId.length === 0) throw new Error('invalid warm job')
+      const jobId = warmBody.jobId
       regionJobs.set(region.id, jobId)
       res.status(200).json({ region, jobId })
     } catch {
@@ -337,7 +413,16 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
       const warmResp = await fetchImpl(`http://${address}${CONTAINER_WARM_PATH}`, warmInit({
         sources: region.sourceIds, bbox: region.bbox, minzoom: region.minzoom, maxzoom: region.maxzoom, regionId: region.id
       }))
-      const { jobId } = (await warmResp.json()) as { jobId: string }
+      if (!warmResp.ok) {
+        const body = await warmResp.json().catch(() => ({}))
+        res.status(warmResp.status).json(isRecord(body) ? body : { error: 'tilecache rejected re-download' })
+        return
+      }
+      const body = (await warmResp.json()) as { jobId?: unknown }
+      if (typeof body.jobId !== 'string' || body.jobId.length === 0) {
+        res.status(502).json({ error: 'tilecache returned an invalid warm job' }); return
+      }
+      const { jobId } = body as { jobId: string }
       regionJobs.set(id, jobId)
       updateRegion(dataDir, id, { status: 'downloading' })
       res.status(200).json({ jobId })
