@@ -102,6 +102,35 @@ export function createPlugin (app: ServerAPI): Plugin {
     if (tag !== '' && !/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(tag)) throw new Error('imageTag is not a valid OCI tag')
   }
 
+  /**
+   * Preserve configurations accepted before the 0.4.3 validation boundary. Older releases allowed
+   * cache caps outside the current 4 to 32 GiB range and clamped an oversized regions budget at use
+   * time. Migrate only those known-safe nonnegative integer cases; malformed, fractional, and negative
+   * values still reach validateConfig and fail closed.
+   */
+  function migrateLegacyConfig (raw: ChartLockerConfig): ChartLockerConfig {
+    const rawCap = raw.tileCache?.cacheCapGiB
+    const cacheCapGiB = typeof rawCap === 'number' && Number.isInteger(rawCap) && rawCap >= 0
+      ? Math.min(CACHE_CAP_MAX_GIB, Math.max(CACHE_CAP_MIN_GIB, rawCap))
+      : rawCap
+    const effectiveCap = cacheCapGiB ?? DEFAULT_CACHE_CAP_GIB
+    const rawBudget = raw.tileCache?.regionsBudgetGiB
+    const regionsBudgetGiB = typeof rawBudget === 'number' && Number.isInteger(rawBudget) && rawBudget >= 0 && rawBudget > effectiveCap
+      ? effectiveCap
+      : rawBudget
+
+    if (cacheCapGiB === rawCap && regionsBudgetGiB === rawBudget) return raw
+    app.debug(`Migrated legacy cache limits to cacheCapGiB=${String(cacheCapGiB)}, regionsBudgetGiB=${String(regionsBudgetGiB)}`)
+    return {
+      ...raw,
+      tileCache: {
+        ...raw.tileCache,
+        cacheCapGiB,
+        regionsBudgetGiB
+      }
+    }
+  }
+
   async function setupCharts (config: ChartLockerConfig): Promise<void> {
     if (isThirdPartyPmtilesEnabled(configPath)) {
       return
@@ -124,8 +153,9 @@ export function createPlugin (app: ServerAPI): Plugin {
     registry.clear()
   }
 
-  async function doStart (config: ChartLockerConfig): Promise<void> {
+  async function doStart (rawConfig: ChartLockerConfig): Promise<void> {
     app.setPluginStatus('Starting...')
+    const config = migrateLegacyConfig(rawConfig)
     validateConfig(config)
     tilecacheHealthy = false
     tilecacheConfigured = false

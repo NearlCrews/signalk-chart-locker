@@ -15,7 +15,7 @@
   "scripts": {
     "build": "npm run build:plugin && npm run build:panel",
     "build:plugin": "node scripts/clean-dist.mjs && tsc",
-    "build:panel": "webpack --config webpack.config.cjs",
+    "build:panel": "webpack --config webpack.config.cjs && node scripts/check-panel-bundle.mjs",
     "watch:panel": "webpack --watch --mode development --config webpack.config.cjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.panel.json && tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint .",

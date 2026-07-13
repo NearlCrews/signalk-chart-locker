@@ -37,12 +37,28 @@ test('start sets a plugin error and does nothing when the container manager is m
   assert.equal(app.errors.length, 1)
 })
 
-test('start rejects configuration that bypasses the panel validation', async () => {
+test('start rejects malformed configuration that bypasses the panel validation', async () => {
   setContainerManager(fakeManager())
   const app = fakeApp()
   const plugin = createPlugin(app as never)
-  await plugin.start({ tileCache: { cacheCapGiB: 8, regionsBudgetGiB: 9 } }, () => {})
-  assert.ok(app.errors.some((message) => message.includes('regionsBudgetGiB')))
+  await plugin.start({ tileCache: { cacheCapGiB: 3.5, regionsBudgetGiB: 0 } }, () => {})
+  assert.ok(app.errors.some((message) => message.includes('cacheCapGiB')))
+})
+
+test('start migrates legacy cache limits accepted before 0.4.3', async () => {
+  for (const [storedCap, storedBudget, expectedCap] of [[2, 9, 4], [100, 50, 32]]) {
+    const record = managerRecord()
+    setContainerManager(fakeManager({ record, address: null }))
+    const app = fakeApp()
+    const plugin = createPlugin(app as never)
+
+    await plugin.start({ tileCache: { cacheCapGiB: storedCap, regionsBudgetGiB: storedBudget } }, () => {})
+
+    assert.deepEqual(app.errors, [])
+    assert.equal(record.ensured.length, 1)
+    assert.equal(record.ensured[0]?.config.env?.TILECACHE_CAP_BYTES, String(expectedCap * 1024 ** 3))
+    await plugin.stop()
+  }
 })
 
 test('stop with no prior start and a manager present is a clean no-op', async () => {

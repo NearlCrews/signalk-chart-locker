@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The React 19 configuration panel now uses the production JSX runtime instead of failing to load
+  when Babel 8 emits the unsupported development runtime.
+- Startup migrates legacy cache limits that earlier releases accepted instead of rejecting the
+  persisted configuration before the panel can open.
+- Panel builds now fail if a future toolchain change emits the React development JSX runtime.
+
 <a id="v043"></a>
 
 ## [0.4.3] - 2026-07-13

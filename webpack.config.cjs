@@ -36,7 +36,10 @@ module.exports = {
             // Babel 8 detects JSX from the file extension (.tsx enables it,
             // .ts does not), so the old isTSX/allExtensions options are gone.
             '@babel/preset-typescript',
-            ['@babel/preset-react', { runtime: 'automatic' }]
+            // Pin the production JSX runtime. Babel 8 otherwise emits jsxDEV when NODE_ENV is
+            // unset, even under webpack production mode. The Signal K React 19 share scope exposes
+            // the production runtime, so jsxDEV would be undefined when the panel loads.
+            ['@babel/preset-react', { runtime: 'automatic', development: false }]
           ]
         }
       }
