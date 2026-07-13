@@ -155,8 +155,14 @@ export async function startDiscovery (deps: DiscoveryDeps): Promise<DiscoveryHan
   const debounceMs = deps.debounceMs ?? 300
   let timer: NodeJS.Timeout | undefined
   let retryTimer: NodeJS.Timeout | undefined
+  let pollTimer: NodeJS.Timeout | undefined
   let watcher: FSWatcher | undefined
   let stopped = false
+  const runRescan = (): void => {
+    rescanCharts(deps).catch((error: unknown) => {
+      deps.onError?.(`chart rescan failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  }
   const scheduleRetry = (): void => {
     if (stopped || retryTimer !== undefined) return
     retryTimer = setTimeout(() => {
@@ -171,9 +177,7 @@ export async function startDiscovery (deps: DiscoveryDeps): Promise<DiscoveryHan
       watcher = watch(deps.chartsDir, () => {
         if (timer) clearTimeout(timer)
         timer = setTimeout(() => {
-          rescanCharts(deps).catch((error: unknown) => {
-            deps.onError?.(`chart rescan failed: ${error instanceof Error ? error.message : String(error)}`)
-          })
+          runRescan()
         }, debounceMs)
       })
       watcher.unref()
@@ -188,12 +192,21 @@ export async function startDiscovery (deps: DiscoveryDeps): Promise<DiscoveryHan
       scheduleRetry()
     }
   }
-  installWatcher()
+  // Native directory events are reliable on the Linux deployment target. macOS can drop them, and
+  // Node 24's Windows watcher can abort the process while a watched directory is being closed, so
+  // those platforms use a short unreferenced polling interval instead.
+  if (process.platform === 'linux') {
+    installWatcher()
+  } else {
+    pollTimer = setInterval(runRescan, 5000)
+    pollTimer.unref()
+  }
   return {
     stop () {
       stopped = true
       if (timer) clearTimeout(timer)
       if (retryTimer) clearTimeout(retryTimer)
+      if (pollTimer) clearInterval(pollTimer)
       watcher?.close()
     }
   }

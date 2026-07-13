@@ -23,7 +23,8 @@ All notable changes to this project are documented here. The format follows
   a region is persisted or a warm begins.
 - Keep PMTiles discovery and serving available when the container manager or runtime is unavailable,
   disable every PMTiles management and serving route during a provider conflict, create missing chart
-  directories, recover failed directory watches, and detect same-size file replacements reliably.
+  directories, recover failed directory watches, poll on platforms with unreliable watcher events,
+  and detect same-size file replacements reliably.
 - Serve PMTiles through a validated file descriptor identity so a path swap cannot redirect an
   in-progress request, and stream proxied responses with backpressure and cancellation handling.
 - Download region replacements into job-specific staging pins, atomically promote only complete

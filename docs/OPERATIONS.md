@@ -93,8 +93,9 @@ job. This prevents the tile enumerator from treating the request as an almost-gl
 
 ## Chart discovery
 
-Chart discovery watches the configured directory and serializes every scan, including watch events,
-manual rescans, and override reapplication. The panel reports:
+Chart discovery watches the configured directory on Linux, uses a five-second polling fallback on
+other platforms, and serializes every scan, including change detection, manual rescans, and override
+reapplication. The panel reports:
 
 - Valid chart count
 - Invalid file count and validation errors

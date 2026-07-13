@@ -236,14 +236,19 @@ export function createCachedRegionsLoader (dataDir: string): CachedRegionsLoader
   // Watch the directory, not the file: regions.json may not exist yet, and an atomic rename-replace is
   // only observable at the directory level. A null filename (some platforms omit it) is treated as a
   // possible change to be safe.
-  try {
-    watcher = watch(dataDir, (_event, filename) => {
-      if (filename === null || filename === STORE_FILE) dirty = true
-    })
-    // An unhandled watcher error would throw; on error, drop the watcher and rely on the self-heal stat.
-    watcher.on('error', () => { if (watcher !== null) { watcher.close(); watcher = null } })
-  } catch {
-    watcher = null
+  // Native events are reliable on the Linux deployment target. On other platforms the throttled
+  // stat below is the sole invalidation mechanism, avoiding delayed macOS events and a Node 24
+  // Windows watcher assertion during teardown.
+  if (process.platform === 'linux') {
+    try {
+      watcher = watch(dataDir, (_event, filename) => {
+        if (filename === null || filename === STORE_FILE) dirty = true
+      })
+      // An unhandled watcher error would throw; on error, drop the watcher and rely on the self-heal stat.
+      watcher.on('error', () => { if (watcher !== null) { watcher.close(); watcher = null } })
+    } catch {
+      watcher = null
+    }
   }
 
   const reload = (mtimeMs: number): RegionsStore => {
