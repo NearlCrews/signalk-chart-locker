@@ -14,14 +14,14 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.4.3
+## What's new in 0.4.4
 
-Version 0.4.3 adds live cache operations and diagnostics to the plugin panel, hardens saved-region
-recovery and input validation, protects filesystem headroom, supports position warming across the
-antimeridian, and improves chart discovery feedback. It also adds release package checks and
-dependency audits to CI.
+Version 0.4.4 restores the React 19 configuration panel by pinning its production JSX runtime and
+migrates cache limits accepted by earlier releases into the current safe range during startup. Panel
+builds now execute the federated bundle against the Signal K React share-scope contract so this class
+of runtime failure cannot pass the release gate again.
 
-See the [0.4.3 changelog](CHANGELOG.md#v043) for the full list.
+See the [0.4.4 changelog](CHANGELOG.md#v044) for the full list.
 
 ## What it does
 
