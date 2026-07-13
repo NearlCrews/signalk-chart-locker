@@ -35,6 +35,7 @@ test('start sets a plugin error and does nothing when the container manager is m
   const plugin = createPlugin(app as never)
   await plugin.start({}, () => {})
   assert.equal(app.errors.length, 1)
+  await plugin.stop()
 })
 
 test('start rejects malformed configuration that bypasses the panel validation', async () => {
