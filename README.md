@@ -88,6 +88,11 @@ tiles. A standalone install of Binnacle is unaffected.
 - The [Binnacle Chartplotter](https://www.npmjs.com/package/signalk-binnacle) for the regions
   and chart-management panels.
 
+On secured Signal K servers, chart tiles, styles, readiness checks, and PMTiles files are available
+to authenticated `readonly`, `readwrite`, and administrator users. Saving regions, changing cache
+settings, reverse geocoding, and editing chart metadata require an administrator session. Signal K
+servers with security disabled continue to expose the read routes without a login.
+
 ## Installation
 
 **From the App Store (recommended).** In the Signal K admin UI, open Apps and Plugins, then

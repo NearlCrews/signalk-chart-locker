@@ -90,19 +90,32 @@ test('doStart does not register charts when the third-party plugin is enabled, a
   }
 })
 
-test('registerWithRouter mounts the open serve route', async () => {
+test('registerWithRouter mounts chart reads through the readonly access scope', async () => {
   const root = await configRoot()
   setContainerManager(fakeManager())
   const { app } = chartApp(root)
   const plugin = createPlugin(app as never)
   const routerRoutes: Record<string, unknown> = {}
+  const readonlyRoutes: Record<string, unknown> = {}
+  const accessLevels: string[] = []
   try {
     plugin.registerWithRouter?.({
       get: (p: string, h: unknown) => { routerRoutes[p] = h },
       post: (p: string, h: unknown) => { routerRoutes[p] = h },
-      delete: (p: string, h: unknown) => { routerRoutes[p] = h }
+      delete: (p: string, h: unknown) => { routerRoutes[p] = h },
+      access: (level: string) => {
+        accessLevels.push(level)
+        return { get: (p: string, h: unknown) => { readonlyRoutes[p] = h } }
+      }
     } as never)
-    assert.equal(typeof routerRoutes['/pmtiles/:file'], 'function')
+    assert.deepEqual(accessLevels, ['readonly'])
+    assert.equal(typeof readonlyRoutes['/tiles/ready'], 'function')
+    assert.equal(typeof readonlyRoutes['/tile/:source/:z/:x/:y'], 'function')
+    assert.equal(typeof readonlyRoutes['/style/:source'], 'function')
+    assert.equal(typeof readonlyRoutes['/style/:source/*'], 'function')
+    assert.equal(typeof readonlyRoutes['/pmtiles/:file'], 'function')
+    assert.equal(routerRoutes['/tiles/ready'], undefined)
+    assert.equal(routerRoutes['/pmtiles/:file'], undefined)
   } finally {
     clearGlobals()
     await rm(root, { recursive: true, force: true })

@@ -9,9 +9,15 @@ not be exposed outside the Signal K host.
 Management routes under `/api` use the Signal K admin middleware. If the server cannot provide a
 security strategy, Chart Locker fails closed and does not mount them.
 
-The read-only tile, style, readiness, and PMTiles routes remain open so chartplotter clients can use
-them through the normal Signal K HTTP origin. Tile source identifiers come from the trusted source
-catalog, and PMTiles files must be present in the discovered registry.
+The tile, style, readiness, and PMTiles GET routes are registered with Signal K's `readonly` access
+scope. They are available to authenticated `readonly`, `readwrite`, and administrator users. When
+Signal K security is disabled, they remain available to every client. Tile source identifiers come
+from the trusted source catalog, and PMTiles files must be present in the discovered registry.
+
+Chart management, saved-region management, cache configuration, cache clearing, and reverse
+geocoding remain administrator-only. A 401 or 403 from an `/api` route should be checked against
+`/skServer/loginStatus` before prompting the user to sign in because a valid non-administrator
+session and a route-permission failure are distinct conditions.
 
 ## Browser-facing routes
 

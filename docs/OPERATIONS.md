@@ -16,6 +16,12 @@ The plugin starts the container through `signalk-container`, resolves its privat
 health, and pushes the source allowlist and cache budgets. The internal container port should not be
 published directly.
 
+Signal K grants tile, style, readiness, and PMTiles GET routes to authenticated `readonly`,
+`readwrite`, and administrator users. Saved-region, cache, reverse-geocoding, and chart-management
+routes remain administrator-only. On a secured server, use `/skServer/loginStatus` to distinguish a
+signed-out browser, a non-administrator user, and an administrator session before diagnosing an
+access failure.
+
 ## Readiness states
 
 The plugin panel and status line distinguish these conditions:

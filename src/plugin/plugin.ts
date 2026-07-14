@@ -38,6 +38,10 @@ interface ChartLockerConfig {
   }
 }
 
+interface AccessAwarePluginRouter {
+  access?: (level: 'readonly') => unknown
+}
+
 export function createPlugin (app: ServerAPI): Plugin {
   // All lifecycle transitions are serialized through this chain. It always resolves: errors from
   // doStart are caught in start(), and doStop never throws. This eliminates the concurrent-call
@@ -444,16 +448,17 @@ export function createPlugin (app: ServerAPI): Plugin {
       lifecycle = lifecycle.then(() => doStop())
       return lifecycle
     },
-    // Mount the tile and style proxy on the Signal K server so every device reaches the cached tiles
-    // through the server, keeping the container plugin-only. The routes read the live tilecache address.
-    // The regions routes are admin-gated (fail closed if the security strategy is absent); the tile
-    // routes remain open so every device can fetch cached tiles without authentication. Additional
-    // route groups (PMTiles serve and management, v3) compose by mounting alongside these two.
+    // Mount the tile and style proxy on the Signal K server so every authenticated Signal K user can
+    // reach cached charts while the container remains plugin-only. Current servers record these GET
+    // routes as readonly permissions. Older servers do not expose access(), and retain their original
+    // direct-route behavior through the fallback. Management routes stay admin-gated and fail closed.
     registerWithRouter (router) {
-      registerTileRoutes(router as unknown as TileRouter, () => tilecacheAddress, undefined, PLUGIN_MOUNT_PATH)
+      const accessRouter = router as unknown as AccessAwarePluginRouter
+      const readRouter = accessRouter.access?.('readonly') ?? router
+      registerTileRoutes(readRouter as TileRouter, () => tilecacheAddress, undefined, PLUGIN_MOUNT_PATH)
       registerRegionsRoutes(router as unknown as RegionsRouter, app, () => tilecacheAddress)
       registerCacheInfoRoute(router as unknown as CacheInfoRouter, app, { cachePath: () => configuredCachePath })
-      registerPmtilesServeRoute(router as unknown as ServeRouter, registry, () => pmtilesEnabled)
+      registerPmtilesServeRoute(readRouter as ServeRouter, registry, () => pmtilesEnabled)
       registerChartManagementRoutes(
         router as unknown as ManagementRouter,
         app,
