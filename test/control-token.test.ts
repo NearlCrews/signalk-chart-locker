@@ -19,7 +19,8 @@ test('control token is stable, private, and invalid legacy content is preserved'
     assert.equal(second, first)
     assert.match(first, /^[A-Za-z0-9_-]{43}$/)
     const path = join(dir, 'tilecache-control-token')
-    assert.equal((await stat(path)).mode & 0o777, 0o600)
+    // Windows reports synthesized POSIX mode bits and cannot prove the ACL through fs.stat().
+    if (process.platform !== 'win32') assert.equal((await stat(path)).mode & 0o777, 0o600)
 
     await writeFile(path, 'legacy-invalid-token\n', { mode: 0o600 })
     const replacement = getOrCreateControlToken(dir)

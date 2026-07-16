@@ -67,6 +67,8 @@ All notable changes to this project are documented here. The format follows
   shutdown, closes descriptors on stream failures and disconnects, and reports rescan errors instead
   of publishing stale chart metadata. Range and HEAD responses use identity-checked descriptors,
   strong ETags, bounded metadata, and `X-Content-Type-Options: nosniff`.
+- Poll third-party PMTiles enablement on macOS and Windows instead of using native filesystem events,
+  avoiding libuv watcher aborts while preserving live provider transitions.
 - Make plugin lifecycle, mutual-exclusion transitions, persistent-state updates, container-manager
   calls, and every buffered container control response bounded and restart-safe. Startup and teardown
   are abortable, failed durable writes leave live state unchanged, corrupt state files are preserved

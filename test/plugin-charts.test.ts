@@ -196,7 +196,7 @@ test('live third-party enable and disable transitions clear and restore chart re
   await writeFile(configFile, JSON.stringify({ enabled: false }))
   setContainerManager(fakeManager())
   const { app, providers } = chartApp(root)
-  const plugin = createPlugin(app as never)
+  const plugin = createPlugin(app as never, { mutualExclusionPollIntervalMs: 10 })
   const resources = async (): Promise<Record<string, unknown>> => {
     const provider = providers[0] as { methods: { listResources: () => Promise<Record<string, unknown>> } }
     return provider.methods.listResources()

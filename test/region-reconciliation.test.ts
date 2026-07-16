@@ -23,6 +23,20 @@ async function waitFor (predicate: () => boolean, timeoutMs = 2000): Promise<voi
   assert.equal(predicate(), true, 'condition did not become true before the deadline')
 }
 
+async function settleWithin<T> (promise: Promise<T>, timeoutMs = 2000): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('promise did not settle before the deadline')), timeoutMs)
+      })
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 test('a saved region reaches durable terminal state without any client status poll', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'region-reconcile-'))
   const { routes, router } = makeRegionsRouter()
@@ -120,7 +134,9 @@ test('stopping the route handle aborts and drains an in-flight reconciliation fe
   try {
     const create = routes.find(({ method, path }) => method === 'POST' && path === '/api/regions')!
     await create.handler({ params: {}, body: requestBody }, fakeRegionsRes().res)
-    await statusStarted
+    // Reconciliation sleeps on an unref'ed production timer. Retain one test-owned timer until the
+    // status request starts so Node 22 does not cancel this test with a pending promise.
+    await settleWithin(statusStarted)
     if (handle !== false) await handle.stop()
     assert.equal(aborted, true)
   } finally {

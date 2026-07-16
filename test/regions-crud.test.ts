@@ -131,10 +131,11 @@ test('POST /api/regions returns 503 when the container address is unavailable', 
 
 test('an invalid container job id is not retained or used in a status URL', async () => {
   const calls: string[] = []
+  const invalidJobId = `bad\n${'x'.repeat(80)}`
   const fetchImpl = async (url: string): Promise<Response> => {
     calls.push(url)
     if (url.includes('/cache/stats')) return Response.json({ regionsFreeBytes: 1_000_000, perSourceAvgBytes: { seamark: 1 } })
-    if (url.endsWith('/warm')) return Response.json({ jobId: `bad\n${'x'.repeat(80)}` })
+    if (url.endsWith('/warm')) return Response.json({ jobId: invalidJobId })
     if (url.includes('/warm/region/')) return new Response(null, { status: 404 })
     throw new Error(`unexpected url: ${url}`)
   }
@@ -150,7 +151,7 @@ test('an invalid container job id is not retained or used in a status URL', asyn
   const id = createdRegion.id
   const status = routes.find(r => r.method === 'GET' && r.path.endsWith('/status'))!
   await status.handler({ params: { id }, body: null }, fakeRegionsRes().res)
-  assert.equal(calls.some((url) => url.includes('bad')), false)
+  assert.equal(calls.some((url) => url.includes(`/warm/${encodeURIComponent(invalidJobId)}`)), false)
   assert.equal(calls.some((url) => url.includes('/warm/region/')), true)
 })
 
