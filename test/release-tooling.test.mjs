@@ -395,3 +395,19 @@ test('container manifest metadata requires exactly both supported architectures'
     /exactly the supported Linux architectures/
   )
 })
+
+test('container smoke tests use distinct platform manifest digests', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/container-image.yml', import.meta.url), 'utf8')
+  const manifestStep = workflow.indexOf('- name: Record the staged platform digests')
+  const smokeStep = workflow.indexOf('- name: Smoke-test both staged architectures')
+  const cosignStep = workflow.indexOf('- name: Install Cosign')
+  assert.ok(manifestStep >= 0)
+  assert.ok(smokeStep > manifestStep)
+  assert.ok(cosignStep > smokeStep)
+
+  const smokeBlock = workflow.slice(smokeStep, cosignStep)
+  assert.match(smokeBlock, /AMD64_DIGEST: \$\{\{ steps\.manifests\.outputs\.amd64_digest \}\}/)
+  assert.match(smokeBlock, /ARM64_DIGEST: \$\{\{ steps\.manifests\.outputs\.arm64_digest \}\}/)
+  assert.match(smokeBlock, /"\$\{IMAGE\}@\$\{platform_digest\}"/)
+  assert.doesNotMatch(smokeBlock, /"\$\{IMAGE\}@\$\{IMAGE_DIGEST\}"/)
+})
