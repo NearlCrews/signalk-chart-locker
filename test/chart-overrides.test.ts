@@ -1,7 +1,7 @@
 // test/chart-overrides.test.ts
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { OverrideStore } from '../src/charts/overrides.js'
@@ -81,18 +81,29 @@ test('the namer applies an override over the decoded name, falling back to defau
   }
 })
 
-test('a failed override write does not change the live in-memory value', { skip: process.platform === 'win32' }, async () => {
+test('a failed override write does not change the live in-memory value', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ov-fail-'))
   const file = join(dir, 'pmtiles-overrides.json')
+  const backup = `${file}.before`
   const store = new OverrideStore(file)
   try {
     store.load()
     store.set('chart', { name: 'Before' })
-    await chmod(dir, 0o500)
+
+    // A regular file cannot atomically replace a nonempty directory on any supported platform,
+    // even when the process can bypass filesystem mode checks.
+    await rename(file, backup)
+    await mkdir(file)
+    await writeFile(join(file, 'blocker'), 'occupied')
+
     assert.throws(() => store.set('chart', { name: 'After' }))
     assert.deepEqual(store.get('chart'), { name: 'Before' })
+
+    const persisted = new OverrideStore(backup)
+    persisted.load()
+    assert.deepEqual(persisted.get('chart'), { name: 'Before' })
+    assert.equal((await readdir(dir)).some((name) => name.startsWith('pmtiles-overrides.json.tmp-')), false)
   } finally {
-    await chmod(dir, 0o700)
     await rm(dir, { recursive: true, force: true })
   }
 })

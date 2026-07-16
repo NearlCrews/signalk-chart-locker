@@ -61,6 +61,7 @@ interface Deps {
   isGeocodingEnabled?: () => boolean
   pollIntervalMs?: number
   reconciliationRequestSpacingMs?: number
+  updateRegion?: typeof updateRegion
 }
 
 export interface RegionsRoutesHandle {
@@ -166,6 +167,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
   if (!ensureApiAdminGate(app)) return false
   const dataDir = deps.dataDir ?? app.getDataDirPath()
   const rawFetch: FetchImpl = deps.fetchImpl ?? ((url, init) => fetch(url, init))
+  const persistRegionUpdate = deps.updateRegion ?? updateRegion
   // Wrap every container fetch with a bounded timeout, so a hung container endpoint (for example a
   // deadlocked /cache/stats) surfaces as a caught failure and a 502 or 503, never an open request that
   // hangs the panel. A caller that supplies its own signal keeps it.
@@ -293,7 +295,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
       patch.lastDownloadedAt = nowUnixSecs()
     }
     if (result.authoritative && region.bytes !== result.bytes) patch.bytes = result.bytes
-    if (Object.keys(patch).length > 0) updateRegion(dataDir, regionId, patch)
+    if (Object.keys(patch).length > 0) persistRegionUpdate(dataDir, regionId, patch)
     return result.authoritative
   }
 
@@ -301,7 +303,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
   const reconcileLostJob = (regionId: string): void => {
     const region = listRegions(dataDir).find((r) => r.id === regionId)
     if (region && region.status === 'downloading') {
-      updateRegion(dataDir, regionId, { status: 'error' })
+      persistRegionUpdate(dataDir, regionId, { status: 'error' })
     }
   }
 
@@ -726,7 +728,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
       if (!validWarmJobId(body.jobId)) {
         trackRegionJob(id)
         try {
-          updateRegion(dataDir, id, { status: 'downloading' })
+          persistRegionUpdate(dataDir, id, { status: 'downloading' })
         } catch (error) {
           storageFailure(res, error); return
         }
@@ -736,7 +738,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
       regionJobs.set(id, jobId)
       trackedRegions.add(id)
       try {
-        updateRegion(dataDir, id, { status: 'downloading' })
+        persistRegionUpdate(dataDir, id, { status: 'downloading' })
       } catch (error) {
         ensureReconciliationLoop()
         storageFailure(res, error); return
@@ -746,7 +748,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     } catch {
       trackRegionJob(id)
       try {
-        updateRegion(dataDir, id, { status: 'downloading' })
+        persistRegionUpdate(dataDir, id, { status: 'downloading' })
       } catch (error) {
         storageFailure(res, error); return
       }

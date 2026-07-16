@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { linkSync, writeFileSync } from 'node:fs'
-import { chmod, link, mkdtemp, lstat, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import { link, mkdtemp, lstat, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -10,6 +10,12 @@ import { promisify } from 'node:util'
 import { getOrCreateControlToken } from '../src/runtime/control-token.js'
 
 const execFileAsync = promisify(execFile)
+
+function controlTokenChildArgs (dataDir: string): string[] {
+  const moduleUrl = pathToFileURL(resolve('src/runtime/control-token.ts')).href
+  const script = `import controlTokenModule from ${JSON.stringify(moduleUrl)}; const { getOrCreateControlToken } = controlTokenModule; process.stdout.write(getOrCreateControlToken(process.argv[1]))`
+  return ['--import', 'tsx', '--input-type=module', '--eval', script, dataDir]
+}
 
 test('control token is stable, private, and invalid legacy content is preserved', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'control-token-'))
@@ -34,10 +40,8 @@ test('control token is stable, private, and invalid legacy content is preserved'
 
 test('concurrent processes publish one complete token', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'control-token-race-'))
-  const moduleUrl = pathToFileURL(resolve('src/runtime/control-token.ts')).href
-  const script = `import { getOrCreateControlToken } from ${JSON.stringify(moduleUrl)}; process.stdout.write(getOrCreateControlToken(process.argv[1]))`
   try {
-    const args = ['--import', 'tsx', '--input-type=module', '--eval', script, dir]
+    const args = controlTokenChildArgs(dir)
     const [one, two] = await Promise.all([
       execFileAsync(process.execPath, args),
       execFileAsync(process.execPath, args)
@@ -49,18 +53,33 @@ test('concurrent processes publish one complete token', async () => {
   }
 })
 
-test('control token creation failure does not expose file contents', { skip: process.platform === 'win32' }, async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'control-token-permission-'))
+test('control token creation failure does not expose file contents', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'control-token-failure-'))
   const marker = 'must-not-appear-in-errors'
+  const path = join(dir, 'tilecache-control-token')
   try {
-    await writeFile(join(dir, 'tilecache-control-token'), marker, { mode: 0o600 })
-    await chmod(dir, 0o500)
-    assert.throws(() => getOrCreateControlToken(dir), (error: unknown) => {
-      assert.equal(String(error).includes(marker), false)
-      return true
-    })
+    await writeFile(path, marker, { mode: 0o600 })
+    assert.throws(
+      () => getOrCreateControlToken(dir, {
+        createToken: () => {
+          throw Object.assign(new Error('injected token creation failure'), { code: 'ENOSPC' })
+        }
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error)
+        assert.equal(error.message, `cannot create tilecache control token at ${path}`)
+        assert.equal(String(error).includes(marker), false)
+        return true
+      }
+    )
+
+    const files = await readdir(dir)
+    const corrupt = files.find((name) => /^tilecache-control-token\.corrupt-\d+-[0-9a-f]{24}$/.test(name))
+    assert.ok(corrupt)
+    assert.equal(await readFile(join(dir, corrupt), 'utf8'), marker)
+    assert.equal(files.includes('tilecache-control-token'), false)
+    assert.equal(files.includes('tilecache-control-token.lock'), false)
   } finally {
-    await chmod(dir, 0o700)
     await rm(dir, { recursive: true, force: true })
   }
 })
@@ -110,11 +129,9 @@ test('canonical lock PID parsing rejects trailing garbage instead of borrowing a
 
 test('concurrent stale-lock recoverers cannot remove a replacement lock', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'control-token-stale-race-'))
-  const moduleUrl = pathToFileURL(resolve('src/runtime/control-token.ts')).href
-  const script = `import { getOrCreateControlToken } from ${JSON.stringify(moduleUrl)}; process.stdout.write(getOrCreateControlToken(process.argv[1]))`
   try {
     await writeFile(join(dir, 'tilecache-control-token.lock'), '2147483647\n', { mode: 0o600 })
-    const args = ['--import', 'tsx', '--input-type=module', '--eval', script, dir]
+    const args = controlTokenChildArgs(dir)
     const results = await Promise.all(Array.from({ length: 6 }, async () => await execFileAsync(process.execPath, args)))
     assert.equal(new Set(results.map(({ stdout }) => stdout)).size, 1)
     assert.equal((await readFile(join(dir, 'tilecache-control-token'), 'utf8')).trim(), results[0]?.stdout)
