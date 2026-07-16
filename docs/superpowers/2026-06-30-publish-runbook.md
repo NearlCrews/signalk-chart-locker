@@ -16,9 +16,9 @@ container image. Do not publish to npm or create a release tag without explicit 
    `config-panel.png`, `config-panel-dark.png`, and `config-panel-night.png`.
 7. If the panel's comparable production gzip total grew by more than 5 percent, record the baseline
    and current total, and obtain explicit owner approval for the exception.
-8. Publish the backward-compatible Binnacle patch that accepts recovery-pending saved-region
-   responses before Chart Locker 0.6.0. Record that published Binnacle version as the exact minimum
-   in the README, and confirm it continues polling by region identifier after either HTTP 202 shape.
+8. Publish Binnacle 0.15.4 or newer before Chart Locker 0.6.0. Confirm the README records 0.15.4 as
+   the exact minimum and that Binnacle continues polling by region identifier after either HTTP 202
+   shape.
 
 Any change under `container/` requires a plugin version bump. The plugin pins the image tag to its own
 version, and `signalk-container` recreates the container only when that tag changes.

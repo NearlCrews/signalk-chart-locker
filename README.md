@@ -14,9 +14,9 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's coming in 0.6.0
+## What's new in 0.6.0
 
-The unreleased 0.6.0 line moves the configuration panel to the accessible, theme-aware
+Version 0.6.0 moves the configuration panel to the accessible, theme-aware
 `signalk-nearlcrews-ui` design system, adds browser and live Signal K integration coverage, and
 raises the minimum Signal K server version to 2.24.0 for its React 19.2 Admin host.
 
@@ -26,7 +26,7 @@ rows and pinned region coverage survive the one-time SQLite auto-vacuum conversi
 default image tag from any prior Chart Locker release advances to the matching 0.6.0 container
 instead of retaining an incompatible protocol pair during a direct or skipped-version upgrade.
 
-See the [Unreleased changelog](CHANGELOG.md#unreleased) for the full list.
+See the [0.6.0 changelog](CHANGELOG.md#v060) for the full list.
 
 ## What it does
 
@@ -90,9 +90,9 @@ tiles. A standalone install of Binnacle is unaffected.
   runtime (Podman or Docker) accessible to Signal K are required for tile caching, saved-region
   downloads, position warming, and reverse geocoding. Local PMTiles discovery and serving continue
   without them. Version 1.20.2 or newer is recommended for the Container Manager update badge.
-- A [Binnacle Chartplotter](https://www.npmjs.com/package/signalk-binnacle) release newer than 0.15.3
-  for reliable saved-region create and re-download recovery, plus the regions and chart-management
-  panels. Published Binnacle 0.15.3 and older do not accept Chart Locker's recovery-pending response.
+- [Binnacle Chartplotter](https://www.npmjs.com/package/signalk-binnacle) 0.15.4 or newer for reliable
+  saved-region create and re-download recovery, plus the regions and chart-management panels.
+  Binnacle 0.15.3 and older do not accept Chart Locker's recovery-pending response.
 
 On secured Signal K servers that expose scoped plugin routers, chart tiles, styles, readiness checks,
 and PMTiles files are available to authenticated `readonly`, `readwrite`, and administrator users.

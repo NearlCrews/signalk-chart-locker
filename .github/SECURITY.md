@@ -6,8 +6,8 @@ We actively support the following versions with security updates:
 
 | Version | Supported |
 | ------- | --------- |
-| 0.5.x   | Yes       |
-| < 0.5   | No        |
+| 0.6.x   | Yes       |
+| < 0.6   | No        |
 
 ## Reporting a Vulnerability
 
@@ -43,7 +43,7 @@ Please include the following information in your report:
 
 When using this plugin:
 
-1. **Keep Updated**: always use the latest supported 0.5 release.
+1. **Keep Updated**: always use the latest supported 0.6 release.
 2. **Review Dependencies**: regularly update dependencies and run both documented audits.
 3. **Network Security**: ensure your Signal K server is properly secured and do not expose the
    internal tile-cache container port directly.

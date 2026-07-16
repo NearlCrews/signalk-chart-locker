@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+<a id="v060"></a>
+
+## [0.6.0] - 2026-07-16
+
 ### Added
 
 - Exercise the built configuration-panel remote in Chromium, Firefox, WebKit, and mobile Chromium,
