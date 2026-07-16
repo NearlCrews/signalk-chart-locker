@@ -1,4 +1,4 @@
-//! The Chart Locker tile cache and proxy: a tokenless reverse proxy and disk cache for the
+//! The Chart Locker tile cache and proxy: a guarded reverse proxy and disk cache for the
 //! allowlisted raster chart overlays and the vector basemap. This is the one container with internet
 //! egress.
 

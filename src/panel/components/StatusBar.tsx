@@ -12,14 +12,10 @@
 
 import type * as React from 'react'
 import { memo, useEffect, useState } from 'react'
+import { Section, StatusIndicator } from 'signalk-nearlcrews-ui'
 import type { PluginRuntimeStatus } from '../hooks/use-status.js'
 import { relativeTime } from '../relative-time.js'
-import { S } from '../styles.js'
-
-// The dot base merged with each state variant once at module load, rather than
-// rebuilding the merged object on every render.
-const DOT_OK: React.CSSProperties = { ...S.dot, ...S.dotOk }
-const DOT_OFF: React.CSSProperties = { ...S.dot, ...S.dotOff }
+import styles from '../PluginConfigurationPanel.module.css'
 
 interface Props {
   /** The latest plugin status, or null until the first poll resolves. */
@@ -48,26 +44,16 @@ export default memo(function StatusBar ({ status, lastUpdatedMs }: Props): React
     return () => clearInterval(id)
   }, [lastUpdatedMs])
   return (
-    <div style={S.statusBar}>
-      <div style={S.statusTitleRow}>
-        <span style={S.statusBarTitle}>Plugin status</span>
-        {lastUpdatedMs !== null
-          ? (
-            <span style={S.statusCheckedAt}>
-              checked {relativeTime(lastUpdatedMs)}
-            </span>
-            )
-          : null}
-      </div>
+    <Section
+      title='Plugin status'
+      actions={lastUpdatedMs !== null
+        ? <span className={styles.secondaryText}>Checked {relativeTime(lastUpdatedMs)}</span>
+        : undefined}
+    >
       {status === null
-        ? (
-          <span style={S.statusBarLoading}>
-            <span style={DOT_OFF} aria-hidden='true' />
-            Loading status...
-          </span>
-          )
+        ? <StatusIndicator tone='neutral' role='status' aria-live='polite'>Loading status...</StatusIndicator>
         : <StatusLine status={status} />}
-    </div>
+    </Section>
   )
 })
 
@@ -76,18 +62,10 @@ function StatusLine ({ status }: { status: PluginRuntimeStatus }): React.ReactEl
   const { enabled, statusMessage } = status
   if (statusMessage !== '') {
     return (
-      <div style={S.statusRow}>
-        <span style={enabled ? DOT_OK : DOT_OFF} aria-hidden='true' />
-        <span style={S.statusMessage}>{statusMessage}</span>
-      </div>
+      <StatusIndicator tone={enabled ? 'success' : 'neutral'} role='status' aria-live='polite'>{statusMessage}</StatusIndicator>
     )
   }
-  return (
-    <div style={S.statusRow}>
-      <span style={enabled ? DOT_OK : DOT_OFF} aria-hidden='true' />
-      {enabled
-        ? <span style={S.statusMessage}>Plugin enabled.</span>
-        : <span style={S.statusMessageMuted}>Plugin disabled. Enable it above to start the tile cache.</span>}
-    </div>
-  )
+  return enabled
+    ? <StatusIndicator tone='success' role='status' aria-live='polite'>Plugin enabled.</StatusIndicator>
+    : <StatusIndicator tone='neutral' role='status' aria-live='polite'>Plugin disabled. Enable it above to start the tile cache.</StatusIndicator>
 }

@@ -43,3 +43,17 @@ test('GET /api/geocode returns 400 when lat or lon is missing', async () => {
   await route.handler({ params: {}, body: null, query: { lat: '37.77' } }, res)
   assert.equal(responded[2]?.status, 400, 'missing lon must be 400')
 })
+
+test('GET /api/geocode returns 404 without egress when geocoding is disabled', async () => {
+  let calls = 0
+  const { router, routes } = makeRegionsRouter()
+  registerRegionsRoutes(router, securedApp(), () => '127.0.0.1:9999', {
+    isGeocodingEnabled: () => false,
+    fetchImpl: async () => { calls++; return new Response('{}') }
+  })
+  const route = routes.find(c => c.path === '/api/geocode')!
+  const { responded, res } = fakeRegionsRes()
+  await route.handler({ params: {}, body: null, query: { lat: '1', lon: '2' } }, res)
+  assert.equal(responded[0]?.status, 404)
+  assert.equal(calls, 0)
+})

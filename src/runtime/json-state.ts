@@ -15,13 +15,58 @@ import {
 } from 'node:fs'
 import { dirname } from 'node:path'
 
-/** Read and parse the JSON at `path`, returning `fallback` on a missing or corrupt file. */
-export function readJsonState<T> (path: string, fallback: T): T {
+export interface ReadJsonStateOptions<T> {
+  /** Validate the parsed root before it is trusted as T. */
+  validate?: (value: unknown) => value is T
+  /** Preserve invalid plugin-owned state beside the original before returning the fallback. */
+  backupCorrupt?: boolean
+}
+
+function errorCode (error: unknown): string | undefined {
+  return typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
+    ? error.code
+    : undefined
+}
+
+export function preserveInvalidJsonState (path: string): void {
+  const backup = `${path}.corrupt-${Date.now()}-${Math.random().toString(16).slice(2)}`
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as T
+    renameSync(path, backup)
+  } catch (error) {
+    throw new Error(`cannot preserve invalid JSON state at ${path}`, { cause: error })
+  }
+}
+
+/**
+ * Read and validate the JSON at `path`.
+ *
+ * A missing file returns `fallback`. Other read failures remain visible to callers. Invalid JSON or an
+ * invalid root is moved aside before the fallback is returned, preventing the next successful mutation
+ * from silently destroying the only copy of the bad state. Set `backupCorrupt` false only for state owned
+ * by another plugin, where Chart Locker must never rename the file.
+ */
+export function readJsonState<T> (path: string, fallback: T, options: ReadJsonStateOptions<T> = {}): T {
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return fallback
+    throw error
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
   } catch {
+    if (options.backupCorrupt !== false) preserveInvalidJsonState(path)
     return fallback
   }
+
+  if (options.validate !== undefined && !options.validate(parsed)) {
+    if (options.backupCorrupt !== false) preserveInvalidJsonState(path)
+    return fallback
+  }
+  return parsed as T
 }
 
 /**

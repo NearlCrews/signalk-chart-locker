@@ -16,11 +16,12 @@ The plugin starts the container through `signalk-container`, resolves its privat
 health, and pushes the source allowlist and cache budgets. The internal container port should not be
 published directly.
 
-Signal K grants tile, style, readiness, and PMTiles GET routes to authenticated `readonly`,
-`readwrite`, and administrator users. Saved-region, cache, reverse-geocoding, and chart-management
-routes remain administrator-only. On a secured server, use `/skServer/loginStatus` to distinguish a
-signed-out browser, a non-administrator user, and an administrator session before diagnosing an
-access failure.
+Signal K servers with scoped plugin routers grant tile, style, readiness, and PMTiles GET routes to
+authenticated `readonly`, `readwrite`, and administrator users. Released servers without that API
+keep the fallback read routes inside the administrator-only plugin mount. Saved-region, cache,
+reverse-geocoding, and chart-management routes remain administrator-only. On a secured server, use
+`/skServer/loginStatus` to distinguish a signed-out browser, a non-administrator user, and an
+administrator session before diagnosing an access failure.
 
 ## Readiness states
 
@@ -56,27 +57,52 @@ and other host activity. When a write would consume that reserve:
 The safe clear action deletes only unpinned scroll rows. It does not remove saved-region tiles,
 position-warm pins, or global basemap assets.
 
+Cache-cap configuration publication is transactional. The container validates irreducible pinned
+bytes first, then evicts eligible scroll data, returns free SQLite pages to the filesystem, and
+publishes the candidate settings only after enforcement succeeds. A cap below pinned saved coverage
+is rejected before eviction. The prior container configuration remains active when one exists; a
+fresh container whose retained database already exceeds its first requested cap remains
+unconfigured. Increase the cap, or delete saved coverage and redownload only what fits, then retry
+the lower cap. The plugin logs the rejection as `tilecache_config_push_failed` and reports the
+container as unconfigured until a valid configuration push succeeds.
+
 ## Saved-region lifecycle
 
 Region states are:
 
-- `downloading`: a warm job is active.
+- `downloading`: a warm job is active or an accepted warm start is pending recovery by region ID.
 - `ready`: every requested tile completed within the budget.
 - `capped`: the warm reached a cache or pinned-byte limit.
 - `error`: the job failed or disappeared.
 - `needs-redownload`: durable metadata exists, but the cache no longer contains the region pins.
 
-At plugin startup, a region left `downloading` is changed to `error` because warm jobs are in-memory
-and cannot survive a container restart. The plugin also obtains all region byte totals in one request.
-If a `ready` or `capped` region previously recorded bytes but now has no pinned bytes, it becomes
-`needs-redownload`.
+At plugin startup, the plugin looks up every region left `downloading` by region ID. A retained
+running job resumes tracking, and a retained terminal job is reconciled into its durable state. The
+region changes to `error` only when the container confirms that no retained job exists. The plugin
+also obtains all region byte totals in one request. If a `ready` or `capped` region previously
+recorded bytes but now has no pinned bytes, it becomes `needs-redownload`.
 
-A re-download does not change the stored state until the container accepts the warm and returns a
-non-empty job identifier. The container downloads replacements into a temporary region and swaps the
-pins only after every tile succeeds and the final set fits the budget. Rejected, capped, cancelled, or
-failed replacements therefore preserve the previous usable pins. Only one warm may target a region
-at a time. Deleting a region first cancels and drains its active warm, then removes container pins,
-and removes metadata only after that succeeds.
+A deterministically rejected re-download leaves the stored state unchanged. Once the container
+accepts the non-idempotent warm, the region becomes `downloading`. A well-formed response supplies the
+job identifier immediately. If the accepted response is lost or malformed, the API returns recovery
+pending and the reconciliation loop discovers the retained job by region ID. The container downloads
+replacements into a temporary region and swaps the pins only after every tile succeeds and the final
+set fits the budget. Rejected, capped, cancelled, or failed replacements therefore preserve the
+previous usable pins. Only one warm may target a region at a time. Deleting a region first cancels and
+drains its active warm, then removes container pins, and removes metadata only after that succeeds.
+
+## Reverse-geocoding privacy and availability
+
+The Advanced `geocodingEnabled` setting defaults to true. When enabled, region auto-naming sends the
+region box center, rounded to five decimal places, to `nominatim.openstreetmap.org` only when a
+download requests a name. It does not send the vessel position, credentials, Signal K data, or box
+drag events. The container enforces one application-wide provider request per second and keeps a
+24-hour, 256-entry in-memory response cache keyed by the rounded coordinates.
+
+Disable the setting when no third-party coordinate disclosure is acceptable. Disabled geocoding
+returns 404 without provider egress. DNS, connectivity, provider, and rate-limit failures do not block
+the saved-region download; the chartplotter falls back to an editable coordinate-derived name. The
+lookup cache is intentionally non-durable and is cleared by a container restart.
 
 ## Position warming
 
@@ -99,9 +125,10 @@ job. This prevents the tile enumerator from treating the request as an almost-gl
 
 ## Chart discovery
 
-Chart discovery watches the configured directory on Linux, uses a five-second polling fallback on
-other platforms, and serializes every scan, including change detection, manual rescans, and override
-reapplication. The panel reports:
+Chart discovery combines native directory events with a five-second file-identity poll on Linux, so
+deleting and recreating the directory cannot strand a watcher on its old inode. Other platforms use
+the five-second poll without a native watcher. Discovery serializes every scan, including change
+detection, manual rescans, and override reapplication. The panel reports:
 
 - Valid chart count
 - Invalid file count and validation errors
@@ -151,6 +178,16 @@ Before moving an existing cache, stop Signal K, copy the cache directory while p
 configure the new absolute path, and start Signal K. The cache database is disposable, so starting
 with an empty target is also safe. Saved-region metadata survives in the Signal K data directory and
 missing pins are marked for re-download.
+
+An upgrade from 0.5.0 preserves existing cache rows and saved-region pin membership while converting
+the SQLite file to incremental auto-vacuum. The conversion may temporarily need space for a second
+database image. If SQLite reports a full disk, Chart Locker continues using the original cache,
+logs `event=cache_auto_vacuum_deferred reason=disk_full`, and retries the conversion at the next
+container start. Cleanup of abandoned staging pins is also deferred, with
+`event=cache_staging_cleanup_deferred reason=auto_vacuum_disk_full`, so a second write cannot turn the
+storage optimization fallback into a startup failure. Logical cache clears still complete in this
+deferred state, although the database file cannot return free pages to the filesystem until
+conversion succeeds.
 
 ## Troubleshooting checklist
 

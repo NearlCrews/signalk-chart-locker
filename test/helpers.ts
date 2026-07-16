@@ -1,11 +1,16 @@
 /** Shared test fakes and global cleanup, hoisted so the lifecycle and runtime tests share one definition. */
 
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ContainerConfig, ContainerManager, ContainerRuntimeInfo, ContainerUpdateRegistration, ContainerVersionSource } from '../src/shared/types.js'
 import type { RegionsRouter, RegionsRequest, RegionsResponse } from '../src/http/regions-routes.js'
 import { CONTAINER_MANAGER_GLOBAL_KEY } from '../src/runtime/container-manager.js'
+
+const helperTempDirs = new Set<string>()
+process.once('exit', () => {
+  for (const dir of helperTempDirs) rmSync(dir, { recursive: true, force: true })
+})
 
 /** A ServerAPI stand-in that records the status, error, and debug calls the plugin makes. */
 export interface Recorder {
@@ -14,6 +19,7 @@ export interface Recorder {
   config: { configPath: string }
   /** True once the navigation.position unsubscribe returned by getSelfBus().onValue() is called. */
   positionUnsubCalled: boolean
+  positionUnsubCalls: number
   setPluginStatus (m: string): void
   setPluginError (m: string): void
   error (...args: unknown[]): void
@@ -29,12 +35,14 @@ export function fakeApp (): Recorder {
   // One real temp directory per app, used for both the config path and the data dir, so the JSON state
   // persistence and the chart discovery in start() have a writable directory and never collide.
   const dir = mkdtempSync(join(tmpdir(), 'chart-locker-test-'))
-  let positionUnsubCalled = false
+  helperTempDirs.add(dir)
+  let positionUnsubCalls = 0
   const app: Recorder = {
     status: [],
     errors: [],
     config: { configPath: dir },
-    get positionUnsubCalled () { return positionUnsubCalled },
+    get positionUnsubCalled () { return positionUnsubCalls > 0 },
+    get positionUnsubCalls () { return positionUnsubCalls },
     setPluginStatus (m) { app.status.push(m) },
     setPluginError (m) { app.errors.push(m) },
     error () {},
@@ -42,7 +50,7 @@ export function fakeApp (): Recorder {
     getDataDirPath () { return dir },
     registerResourceProvider () {},
     get () {},
-    streambundle: { getSelfBus (_path?: unknown) { return { onValue () { return () => { positionUnsubCalled = true } } } } },
+    streambundle: { getSelfBus (_path?: unknown) { return { onValue () { return () => { positionUnsubCalls++ } } } } },
     securityStrategy: { addAdminMiddleware () {} }
   }
   return app
@@ -74,7 +82,7 @@ export function updatesRecord (): UpdatesRecord {
 export interface FakeManagerOptions {
   /** The detected runtime; pass null to model a host with no Docker or Podman. Defaults to docker. */
   runtime?: ContainerRuntimeInfo | null
-  /** The resolved container address; pass null to model a launch whose address never resolves. Defaults to a reachable address. */
+  /** The resolved container address. Defaults to null so tests never contact an ambient localhost service. */
   address?: string | null
   /** When supplied, ensureRunning and stop calls are appended to this record. */
   record?: ManagerRecord
@@ -87,7 +95,7 @@ export interface FakeManagerOptions {
 /** A simple container manager fake: a detected docker runtime and a resolvable address by default. */
 export function fakeManager (opts: FakeManagerOptions = {}): ContainerManager {
   const runtime = opts.runtime === undefined ? { runtime: 'docker' } : opts.runtime
-  const address = opts.address === undefined ? '127.0.0.1:8080' : opts.address
+  const address = opts.address === undefined ? null : opts.address
   const record = opts.record
   const updates = opts.updates
   const manager: ContainerManager = {

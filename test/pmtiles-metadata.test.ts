@@ -1,7 +1,7 @@
 // test/pmtiles-metadata.test.ts
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, open, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { decodePmtilesArchive } from '../src/charts/pmtiles-metadata.js'
@@ -70,6 +70,81 @@ test('an antimeridian-crossing bounds box is retained', async () => {
   })
 })
 
+test('out-of-world header bounds are omitted', async () => {
+  const outOfWorld = buildPmtilesFixture({ minLonE7: -2_000_000_000, minLatE7: -1_000_000_000, maxLonE7: 2_000_000_000, maxLatE7: 1_000_000_000 })
+  await withFixture(outOfWorld, async (file) => {
+    const result = await decodePmtilesArchive(file)
+    assert.equal(result.ok, true)
+    if (result.ok) assert.equal(result.decoded.bounds, undefined)
+  })
+})
+
+test('an invalid or unsupported zoom range is rejected', async () => {
+  for (const bytes of [buildPmtilesFixture({ minZoom: 12, maxZoom: 3 }), buildPmtilesFixture({ minZoom: 0, maxZoom: 27 })]) {
+    await withFixture(bytes, async (file) => {
+      const result = await decodePmtilesArchive(file)
+      assert.equal(result.ok, false)
+      if (!result.ok) assert.match(result.error, /zoom range/i)
+    })
+  }
+})
+
+test('an archive section extending beyond the file is rejected', async () => {
+  const bytes = buildPmtilesFixture()
+  bytes.writeBigUInt64LE(999_999n, 32)
+  await withFixture(bytes, async (file) => {
+    const result = await decodePmtilesArchive(file)
+    assert.equal(result.ok, false)
+    if (!result.ok) assert.match(result.error, /outside the file/i)
+  })
+})
+
+test('oversized metadata is ignored without allocating an unbounded decode', async () => {
+  const bytes = buildPmtilesFixture({ metadata: { name: 'x'.repeat(1024 * 1024 + 1) } })
+  await withFixture(bytes, async (file) => {
+    const result = await decodePmtilesArchive(file)
+    assert.equal(result.ok, true)
+    if (result.ok) assert.equal(result.decoded.name, undefined)
+  })
+})
+
+test('metadata names and vector-layer ids are bounded, normalized, and deduplicated', async () => {
+  const metadata = {
+    name: ` ${'x'.repeat(600)} `,
+    vector_layers: [
+      { id: '' },
+      { id: ' water ' },
+      { id: 'water' },
+      { id: 'bad\nlayer' },
+      { id: 'x'.repeat(257) },
+      { id: 'depth' }
+    ]
+  }
+  await withFixture(buildPmtilesFixture({ metadata }), async (file) => {
+    const result = await decodePmtilesArchive(file)
+    assert.equal(result.ok, true)
+    if (!result.ok) return
+    assert.equal(result.decoded.name, undefined)
+    assert.deepEqual(result.decoded.vectorLayers, ['water', 'depth'])
+  })
+})
+
+test('metadata display fields reject leading and embedded control characters', async () => {
+  for (const control of ['\n', '\u0085', '\u2028', '\u2029']) {
+    const metadata = {
+      name: `${control}Unsafe name`,
+      vector_layers: [{ id: `unsafe${control}layer` }, { id: 'safe' }]
+    }
+    await withFixture(buildPmtilesFixture({ metadata }), async (file) => {
+      const result = await decodePmtilesArchive(file)
+      assert.equal(result.ok, true)
+      if (!result.ok) return
+      assert.equal(result.decoded.name, undefined)
+      assert.deepEqual(result.decoded.vectorLayers, ['safe'])
+    })
+  }
+})
+
 test('a truncated file is rejected with a clear error message', async () => {
   const truncated = Buffer.alloc(4)
   await withFixture(truncated, async (file) => {
@@ -86,4 +161,24 @@ test('a nonexistent file is rejected with a cannot read archive error', async ()
   assert.equal(result.ok, false)
   if (result.ok) return
   assert.match(result.error, /cannot read archive/i)
+})
+
+test('the fixed header is filled across short regular-file reads', async () => {
+  await withFixture(buildPmtilesFixture(), async (file) => {
+    let reads = 0
+    const shortOpen = async () => {
+      const handle = await open(file, 'r')
+      return {
+        stat: handle.stat.bind(handle),
+        async read (buffer: Buffer, offset: number, length: number, position: number) {
+          reads++
+          return await handle.read(buffer, offset, Math.min(length, 11), position)
+        },
+        close: handle.close.bind(handle)
+      }
+    }
+    const result = await decodePmtilesArchive(file, { open: shortOpen as never })
+    assert.equal(result.ok, true)
+    assert.ok(reads > 1)
+  })
 })

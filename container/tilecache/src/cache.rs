@@ -6,6 +6,7 @@
 
 use bytes::Bytes;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,6 +23,15 @@ const SCHEMA_VERSION: i64 = 3;
 /// `DELETE ... LIMIT` is unavailable (the bundled SQLite is built without
 /// SQLITE_ENABLE_UPDATE_DELETE_LIMIT), so the delete targets a bounded `rowid IN (SELECT ... LIMIT)`.
 const DELETE_CHUNK: i64 = 4096;
+/// Pages returned per incremental-vacuum step. The cache lock is released between steps so health and
+/// point reads can make progress while an explicit multi-gigabyte clear returns space to the filesystem.
+const VACUUM_CHUNK_PAGES: i64 = 4096;
+/// Conservative logical charge for a negative row's SQLite record and index entries. A missing tile
+/// is not physically free, so charging zero would let sparse requests grow the database without bound.
+pub const NEGATIVE_ROW_COST_BYTES: i64 = 512;
+pub const STAGING_REGION_PREFIX: &str = "__warm_staging__";
+pub const POSITION_STAGING_REGION_PREFIX: &str = "__warm_staging__position-";
+const EVICTION_HYSTERESIS_BYTES: i64 = 64 * 1024 * 1024;
 
 /// A stored tile, or a negative-cache marker when `blob` is `None` (a 404 or 204 from upstream). The
 /// blob is a ref-counted `Bytes`, so serving a cache hit clones a handle, not the bytes.
@@ -38,7 +48,7 @@ pub struct CachedTile {
 }
 
 impl CachedTile {
-    /// A zero-byte negative-cache row for a miss `status` (404 or 204), stamped at `now`. Shared by the
+    /// A conservatively charged negative-cache row for a miss `status` (404 or 204), stamped at `now`. Shared by the
     /// raster, vector, and warm negative paths so the negative-row shape lives in one place.
     pub(crate) fn negative(status: i64, now: i64) -> CachedTile {
         CachedTile {
@@ -48,7 +58,7 @@ impl CachedTile {
             status,
             fetched_at: now,
             last_access: now,
-            bytes: 0,
+            bytes: NEGATIVE_ROW_COST_BYTES,
             blob: None,
         }
     }
@@ -98,6 +108,19 @@ pub struct PutManyOutcome {
     pub capped: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FreshPinOutcome {
+    Pinned,
+    MissingOrStale,
+    Capped,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PinBudgets {
+    pub category_bytes: i64,
+    pub physical_bytes: i64,
+}
+
 /// One source's aggregate cache statistics, produced in a single table scan.
 pub struct SourceStats {
     pub source: String,
@@ -125,9 +148,22 @@ pub struct TileCache {
     operation_error_events: AtomicU64,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AutoVacuumState {
+    Ready,
+    Deferred,
+}
+
 impl TileCache {
     /// Open (creating if absent) the cache DB, apply the microSD pragmas, and ensure the schema.
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
+        Self::open_with_vacuum(path, |conn| conn.execute_batch("VACUUM"))
+    }
+
+    fn open_with_vacuum(
+        path: &Path,
+        vacuum: impl FnOnce(&Connection) -> rusqlite::Result<()>,
+    ) -> rusqlite::Result<Self> {
         let conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -138,7 +174,16 @@ impl TileCache {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.busy_timeout(std::time::Duration::from_millis(5000))?;
         conn.pragma_update(None, "wal_autocheckpoint", 1000)?;
+        // Takes effect immediately for a new empty database. ensure_incremental_auto_vacuum performs
+        // a one-time preserving VACUUM for an existing file created without it.
+        conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+        let auto_vacuum_state = Self::ensure_incremental_auto_vacuum(&conn, vacuum)?;
         Self::ensure_schema(&conn)?;
+        if auto_vacuum_state == AutoVacuumState::Ready {
+            Self::cleanup_abandoned_staging_conn(&conn)?;
+        } else {
+            eprintln!("event=cache_staging_cleanup_deferred reason=auto_vacuum_disk_full");
+        }
         let total_bytes: i64 =
             conn.query_row("SELECT COALESCE(SUM(bytes), 0) FROM tiles", [], |r| {
                 r.get(0)
@@ -165,7 +210,17 @@ impl TileCache {
     /// A cheap database probe used by the HTTP and container healthchecks.
     pub fn probe(&self) -> rusqlite::Result<()> {
         let inner = self.lock();
-        inner.conn.query_row("SELECT 1", [], |_row| Ok(()))
+        let version: i64 = inner
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version != SCHEMA_VERSION {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        inner
+            .conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM tiles LIMIT 1)", [], |_row| {
+                Ok(())
+            })
     }
 
     /// Available bytes on the filesystem containing the cache database.
@@ -173,16 +228,43 @@ impl TileCache {
         fs2::available_space(self.db_path.parent().unwrap_or(Path::new("/")))
     }
 
-    fn has_disk_headroom(&self, additional_bytes: i64) -> bool {
+    fn has_disk_headroom_conn(&self, conn: &Connection, additional_bytes: i64) -> bool {
         if additional_bytes <= 0 {
             return true;
         }
+        let reusable = Self::reusable_bytes_conn(conn).unwrap_or(0);
         self.available_bytes()
             .map(|available| {
-                available >= MIN_FREE_HEADROOM_BYTES.saturating_add(additional_bytes as u64)
+                available.saturating_add(reusable)
+                    >= MIN_FREE_HEADROOM_BYTES.saturating_add(additional_bytes as u64)
             })
             // If the platform cannot report free space, retain SQLite's existing DiskFull fallback.
             .unwrap_or(true)
+    }
+
+    /// Return the additional physical payload bytes a batch can require. Replacing a row with the
+    /// same or a smaller payload needs no new filesystem headroom. Track duplicate keys in batch
+    /// order so a repeated row is compared with the preceding replacement, not the pre-batch value.
+    fn batch_physical_growth_conn(conn: &Connection, rows: &[WarmRow]) -> rusqlite::Result<i64> {
+        let mut current = HashMap::<(String, u32, u32, u32), i64>::new();
+        let mut growth = 0i64;
+        for row in rows {
+            let key = (row.source.clone(), row.z, row.x, row.y);
+            let old_bytes = match current.get(&key) {
+                Some(bytes) => *bytes,
+                None => conn
+                    .query_row(
+                        "SELECT bytes FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
+                        params![row.source, row.z, row.x, row.y],
+                        |record| record.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(0),
+            };
+            growth = growth.saturating_add((row.tile.bytes - old_bytes).max(0));
+            current.insert(key, row.tile.bytes);
+        }
+        Ok(growth)
     }
 
     pub fn disk_pressure_events(&self) -> u64 {
@@ -253,6 +335,132 @@ impl TileCache {
         Ok(())
     }
 
+    /// Incremental auto-vacuum cannot be enabled on a populated legacy database without a full
+    /// VACUUM. Rebuild the database file in place so existing scroll tiles, pinned region coverage,
+    /// and region membership survive the upgrade. SQLite leaves the original database intact when a
+    /// VACUUM cannot finish for lack of space, so defer that optional storage optimization and retry
+    /// at the next start instead of making a usable legacy cache prevent startup.
+    fn ensure_incremental_auto_vacuum(
+        conn: &Connection,
+        vacuum: impl FnOnce(&Connection) -> rusqlite::Result<()>,
+    ) -> rusqlite::Result<AutoVacuumState> {
+        let mode: i64 = conn.pragma_query_value(None, "auto_vacuum", |row| row.get(0))?;
+        if mode == 2 {
+            return Ok(AutoVacuumState::Ready);
+        }
+        conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+        match vacuum(conn) {
+            Ok(()) => {}
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::DiskFull =>
+            {
+                eprintln!("event=cache_auto_vacuum_deferred reason=disk_full");
+                return Ok(AutoVacuumState::Deferred);
+            }
+            Err(error) => return Err(error),
+        }
+        let migrated: i64 = conn.pragma_query_value(None, "auto_vacuum", |row| row.get(0))?;
+        if migrated != 2 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        Ok(AutoVacuumState::Ready)
+    }
+
+    fn cleanup_abandoned_staging_conn(conn: &Connection) -> rusqlite::Result<()> {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM region_tiles WHERE substr(region_id, 1, length(?1)) = ?1",
+            params![STAGING_REGION_PREFIX],
+        )?;
+        tx.execute(
+            "UPDATE tiles SET pinned = 0 WHERE pinned = 1 AND NOT EXISTS (
+                SELECT 1 FROM region_tiles rt WHERE rt.source = tiles.source AND rt.z = tiles.z
+                  AND rt.x = tiles.x AND rt.y = tiles.y
+             )",
+            [],
+        )?;
+        tx.commit()
+    }
+
+    /// Remove staging references left by an interrupted older process and demote now-unreferenced rows.
+    pub fn cleanup_abandoned_staging(&self) -> rusqlite::Result<()> {
+        let mut inner = self.lock();
+        Self::cleanup_abandoned_staging_conn(&inner.conn)?;
+        inner.pinned_bytes = inner.conn.query_row(
+            "SELECT COALESCE(SUM(bytes), 0) FROM tiles WHERE pinned = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        inner.regions_dirty = true;
+        Ok(())
+    }
+
+    fn reusable_bytes_conn(conn: &Connection) -> rusqlite::Result<u64> {
+        let pages: i64 = conn.pragma_query_value(None, "freelist_count", |row| row.get(0))?;
+        let page_size: i64 = conn.pragma_query_value(None, "page_size", |row| row.get(0))?;
+        Ok((pages.max(0) as u64).saturating_mul(page_size.max(0) as u64))
+    }
+
+    pub fn reusable_bytes(&self) -> rusqlite::Result<u64> {
+        let inner = self.lock();
+        Self::reusable_bytes_conn(&inner.conn)
+    }
+
+    /// Checkpoint and truncate the WAL, then return every free page to the filesystem in bounded
+    /// incremental-vacuum steps. The connection lock is released between steps so a large explicit
+    /// clear or cap reduction does not monopolize all cache reads for the entire reclaim.
+    pub fn reclaim_free_pages(&self) -> rusqlite::Result<()> {
+        {
+            let inner = self.lock();
+            let mode: i64 = inner
+                .conn
+                .pragma_query_value(None, "auto_vacuum", |row| row.get(0))?;
+            if mode != 2 {
+                // A v0.5.0 database can remain in NONE mode only when its one-time preserving
+                // VACUUM was deferred for disk pressure. Avoid even a WAL checkpoint in that state:
+                // the logical deletion already committed, and any extra write can fail on the same
+                // constrained filesystem. A later restart retries conversion and physical reclaim.
+                return Ok(());
+            }
+            inner
+                .conn
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        }
+        loop {
+            let (before, after) = {
+                let inner = self.lock();
+                let mode: i64 = inner
+                    .conn
+                    .pragma_query_value(None, "auto_vacuum", |row| row.get(0))?;
+                if mode != 2 {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+                let before: i64 = inner
+                    .conn
+                    .pragma_query_value(None, "freelist_count", |row| row.get(0))?;
+                if before == 0 {
+                    return Ok(());
+                }
+                inner
+                    .conn
+                    .execute_batch(&format!(
+                        "PRAGMA incremental_vacuum({VACUUM_CHUNK_PAGES}); PRAGMA wal_checkpoint(TRUNCATE)"
+                    ))?;
+                let after: i64 = inner
+                    .conn
+                    .pragma_query_value(None, "freelist_count", |row| row.get(0))?;
+                (before, after)
+            };
+            if after == 0 {
+                return Ok(());
+            }
+            if after >= before {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            std::thread::yield_now();
+        }
+    }
+
     /// Look up a cached tile by key. Does not update last_access (the caller throttles touches).
     pub fn get(&self, key: TileKey) -> rusqlite::Result<Option<CachedTile>> {
         let TileKey { source, z, x, y } = key;
@@ -308,7 +516,7 @@ impl TileCache {
             Some((b, p)) => (b, p == 1),
             None => (0, false),
         };
-        if !self.has_disk_headroom(tile.bytes - old_bytes) {
+        if !self.has_disk_headroom_conn(&inner.conn, tile.bytes - old_bytes) {
             self.disk_pressure_events.fetch_add(1, Ordering::Relaxed);
             return Ok(PutOutcome::Degraded);
         }
@@ -353,7 +561,7 @@ impl TileCache {
         let TileKey { source, z, x, y } = key;
         let inner = self.lock();
         inner.conn.execute(
-            "UPDATE tiles SET last_access = ?5 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
+            "UPDATE tiles SET last_access = MAX(last_access, ?5) WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
             params![source, z, x, y, now],
         )?;
         Ok(())
@@ -403,9 +611,14 @@ impl TileCache {
         if current <= cap_bytes {
             return Ok(());
         }
+        let target = if cap_bytes >= EVICTION_HYSTERESIS_BYTES.saturating_mul(2) {
+            cap_bytes.saturating_sub(EVICTION_HYSTERESIS_BYTES.min(cap_bytes / 100))
+        } else {
+            cap_bytes
+        };
         let freed = {
             let tx = inner.conn.unchecked_transaction()?;
-            let freed = Self::evict_unpinned_within(&tx, current, cap_bytes)?;
+            let freed = Self::evict_unpinned_within(&tx, current, target)?;
             tx.commit()?;
             freed
         };
@@ -417,6 +630,15 @@ impl TileCache {
             );
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_query_only_for_test(&self) {
+        let inner = self.lock();
+        inner
+            .conn
+            .execute_batch("PRAGMA query_only = ON")
+            .expect("test database accepts query_only mode");
     }
 
     /// Delete unpinned scroll rows selected by `subquery` (a `SELECT rowid ...` that must filter
@@ -473,10 +695,12 @@ impl TileCache {
     /// unchanged. Returns the freed bytes and the freed row count. Like the age sweep, this relies on
     /// the invariant that an unpinned row carries no `region_tiles` join row, so it leaves none orphaned.
     pub fn clear_unpinned(&self) -> rusqlite::Result<(i64, i64)> {
-        self.delete_unpinned_chunks(
+        let result = self.delete_unpinned_chunks(
             "SELECT rowid FROM tiles WHERE pinned = 0 LIMIT ?1",
             &[&DELETE_CHUNK as &dyn rusqlite::ToSql],
-        )
+        )?;
+        self.reclaim_free_pages()?;
+        Ok(result)
     }
 
     /// Store a batch of warm tiles pinned, in one transaction, with an explicit pre-store budget check.
@@ -484,8 +708,9 @@ impl TileCache {
     /// the next sized row would push the pinned set past `budget`, it stops and reports `capped`.
     /// `budget` is the EFFECTIVE pinned budget the caller passes for this warm (R for the position-warm
     /// pseudo-region, R - P for a real region, each cap-clamped). `cap` is the live cache byte cap.
-    /// Negative-cache rows (zero bytes) always store. The gate is on the PINNED byte total, never the
-    /// cache total: an unpinned scroll tile filling the cache does not trip a region warm; instead the
+    /// Negative-cache rows carry a conservative logical charge and use the same gates as positive
+    /// rows. The gate is on the PINNED byte total, never the cache total: an unpinned scroll tile
+    /// filling the cache does not trip a region warm; instead the
     /// make-room pass drops unpinned LRU rows down to the cap after the inserts. A row's pin
     /// contribution is the net delta (new bytes minus old bytes) when the row was ALREADY pinned, and
     /// the full new bytes when it was previously unpinned or absent (the tile newly enters the pinned
@@ -506,8 +731,9 @@ impl TileCache {
         region_id: Option<&str>,
         now: i64,
     ) -> rusqlite::Result<PutManyOutcome> {
-        let requested_growth: i64 = rows.iter().map(|row| row.tile.bytes.max(0)).sum();
-        if !self.has_disk_headroom(requested_growth) {
+        let mut inner = self.lock();
+        let requested_growth = Self::batch_physical_growth_conn(&inner.conn, rows)?;
+        if !self.has_disk_headroom_conn(&inner.conn, requested_growth) {
             self.disk_pressure_events.fetch_add(1, Ordering::Relaxed);
             return Ok(PutManyOutcome {
                 stored: 0,
@@ -515,11 +741,13 @@ impl TileCache {
                 capped: true,
             });
         }
-        let mut inner = self.lock();
         let base = inner.total_bytes;
         let pinned_base = inner.pinned_bytes;
+        let category_base = Self::category_bytes_conn(&inner.conn, region_id)?;
         let mut added = 0i64;
+        let mut reported_added = 0i64;
         let mut pinned_added = 0i64;
+        let mut category_added = 0i64;
         let mut stored = 0usize;
         let mut capped = false;
         let mut freed = 0i64;
@@ -533,6 +761,11 @@ impl TileCache {
                 let old_bytes = prev.map(|(b, _)| b).unwrap_or(0);
                 let was_pinned = prev.map(|(_, p)| p == 1).unwrap_or(false);
                 let delta = r.tile.bytes - old_bytes;
+                let was_in_category = Self::key_in_category_conn(
+                    &tx,
+                    TileKey::new(&r.source, r.z, r.x, r.y),
+                    region_id,
+                )?;
                 // The pin contribution is the net delta when the row was already pinned, else the full
                 // new bytes (the tile newly enters the pinned set).
                 let pin_delta = if was_pinned {
@@ -540,8 +773,14 @@ impl TileCache {
                 } else {
                     r.tile.bytes
                 };
-                // Only a net-positive pin contribution can cross the budget; the gate is on pinned bytes.
-                if pin_delta > 0 && pinned_base + pinned_added + pin_delta > budget {
+                if pin_delta > 0 && pinned_base + pinned_added + pin_delta > cap {
+                    capped = true;
+                    break;
+                }
+                let category_delta = if was_in_category { delta } else { r.tile.bytes };
+                // Category budgets are logical membership budgets. A tile already pinned by the other
+                // category still consumes this category's slice when its first join is added.
+                if category_delta > 0 && category_base + category_added + category_delta > budget {
                     capped = true;
                     break;
                 }
@@ -561,7 +800,9 @@ impl TileCache {
                     )?;
                 }
                 added += delta;
+                reported_added += delta.max(0);
                 pinned_added += pin_delta;
+                category_added += category_delta;
                 stored += 1;
             }
             // Make room: the inserts above flipped any re-pinned scroll row to pinned, so it is now
@@ -579,7 +820,7 @@ impl TileCache {
         inner.regions_dirty = true;
         Ok(PutManyOutcome {
             stored,
-            bytes_added: added,
+            bytes_added: reported_added,
             capped,
         })
     }
@@ -618,6 +859,96 @@ impl TileCache {
         Ok(())
     }
 
+    fn category_bytes_conn(conn: &Connection, region_id: Option<&str>) -> rusqlite::Result<i64> {
+        match region_id {
+            Some(id)
+                if id == crate::state::POSITION_WARM_REGION_ID
+                    || id.starts_with(POSITION_STAGING_REGION_PREFIX) =>
+            {
+                conn.query_row(
+                    "SELECT COALESCE(SUM(t.bytes), 0) FROM tiles t WHERE EXISTS (
+                    SELECT 1 FROM region_tiles rt WHERE rt.source = t.source AND rt.z = t.z
+                      AND rt.x = t.x AND rt.y = t.y AND (
+                        rt.region_id = ?1 OR substr(rt.region_id, 1, length(?2)) = ?2
+                      )
+                )",
+                    params![
+                        crate::state::POSITION_WARM_REGION_ID,
+                        POSITION_STAGING_REGION_PREFIX
+                    ],
+                    |row| row.get(0),
+                )
+            }
+            Some(_) => conn.query_row(
+                "SELECT COALESCE(SUM(t.bytes), 0) FROM tiles t WHERE EXISTS (
+                    SELECT 1 FROM region_tiles rt WHERE rt.source = t.source AND rt.z = t.z
+                      AND rt.x = t.x AND rt.y = t.y AND rt.region_id != ?1
+                      AND substr(rt.region_id, 1, length(?2)) != ?2
+                )",
+                params![
+                    crate::state::POSITION_WARM_REGION_ID,
+                    POSITION_STAGING_REGION_PREFIX
+                ],
+                |row| row.get(0),
+            ),
+            None => conn.query_row(
+                "SELECT COALESCE(SUM(bytes), 0) FROM tiles WHERE pinned = 1",
+                [],
+                |row| row.get(0),
+            ),
+        }
+    }
+
+    fn key_in_category_conn(
+        conn: &Connection,
+        key: TileKey<'_>,
+        region_id: Option<&str>,
+    ) -> rusqlite::Result<bool> {
+        let TileKey { source, z, x, y } = key;
+        match region_id {
+            Some(id)
+                if id == crate::state::POSITION_WARM_REGION_ID
+                    || id.starts_with(POSITION_STAGING_REGION_PREFIX) =>
+            {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM region_tiles WHERE source = ?1 AND z = ?2
+                    AND x = ?3 AND y = ?4 AND (
+                      region_id = ?5 OR substr(region_id, 1, length(?6)) = ?6
+                    ))",
+                    params![
+                        source,
+                        z,
+                        x,
+                        y,
+                        crate::state::POSITION_WARM_REGION_ID,
+                        POSITION_STAGING_REGION_PREFIX
+                    ],
+                    |row| row.get(0),
+                )
+            }
+            Some(_) => conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM region_tiles WHERE source = ?1 AND z = ?2
+                    AND x = ?3 AND y = ?4 AND region_id != ?5
+                    AND substr(region_id, 1, length(?6)) != ?6)",
+                params![
+                    source,
+                    z,
+                    x,
+                    y,
+                    crate::state::POSITION_WARM_REGION_ID,
+                    POSITION_STAGING_REGION_PREFIX
+                ],
+                |row| row.get(0),
+            ),
+            None => conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tiles WHERE source = ?1 AND z = ?2
+                    AND x = ?3 AND y = ?4 AND pinned = 1)",
+                params![source, z, x, y],
+                |row| row.get(0),
+            ),
+        }
+    }
+
     /// Mark an already-cached row pinned (eviction-exempt) without re-fetching or changing its
     /// bytes, keeping `pinned_bytes` in sync (the bytes are added only when the row was previously
     /// unpinned). Test-only: the warm path uses `pin_if_fresh` so the budget gate and the join-table
@@ -653,6 +984,28 @@ impl TileCache {
         budget: i64,
         region_id: Option<&str>,
     ) -> rusqlite::Result<bool> {
+        Ok(self.pin_if_fresh_capped(
+            key,
+            now,
+            fresh_secs,
+            negative_ttl_secs,
+            PinBudgets {
+                category_bytes: budget,
+                physical_bytes: i64::MAX,
+            },
+            region_id,
+        )? == FreshPinOutcome::Pinned)
+    }
+
+    pub fn pin_if_fresh_capped(
+        &self,
+        key: TileKey,
+        now: i64,
+        fresh_secs: i64,
+        negative_ttl_secs: i64,
+        budgets: PinBudgets,
+        region_id: Option<&str>,
+    ) -> rusqlite::Result<FreshPinOutcome> {
         let TileKey { source, z, x, y } = key;
         let mut inner = self.lock();
         let row: Option<(i64, i64)> = inner
@@ -664,24 +1017,28 @@ impl TileCache {
             )
             .optional()?;
         let Some((status, fetched_at)) = row else {
-            return Ok(false);
+            return Ok(FreshPinOutcome::MissingOrStale);
         };
         let fresh = status == 200 && now - fetched_at < fresh_secs;
         let neg = status != 200 && now - fetched_at < negative_ttl_secs;
         if !fresh && !neg {
-            return Ok(false);
+            return Ok(FreshPinOutcome::MissingOrStale);
         }
         let (tile_bytes, was_pinned): (i64, bool) = inner.conn.query_row(
             "SELECT bytes, pinned FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
             params![source, z, x, y], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? == 1)),
         ).optional()?.unwrap_or((0, false));
-        // Only a tile that newly enters the pinned set AND carries positive bytes can cross the budget;
-        // a free (zero-byte) negative-cache row is never refused on budget.
-        if !was_pinned && tile_bytes > 0 && inner.pinned_bytes + tile_bytes > budget {
-            return Ok(false);
+        let in_category = Self::key_in_category_conn(&inner.conn, key, region_id)?;
+        let category_bytes = Self::category_bytes_conn(&inner.conn, region_id)?;
+        if !in_category && tile_bytes > 0 && category_bytes + tile_bytes > budgets.category_bytes {
+            return Ok(FreshPinOutcome::Capped);
+        }
+        if !was_pinned && tile_bytes > 0 && inner.pinned_bytes + tile_bytes > budgets.physical_bytes
+        {
+            return Ok(FreshPinOutcome::Capped);
         }
         Self::pin_locked(&mut inner, key, region_id, was_pinned, tile_bytes)?;
-        Ok(true)
+        Ok(FreshPinOutcome::Pinned)
     }
 
     /// Pin an already-cached tile for a region, gating on the effective pinned `budget`. Returns
@@ -705,9 +1062,9 @@ impl TileCache {
             return Ok(false);
         };
         let was_pinned = pinned == 1;
-        // Only a tile that newly enters the pinned set AND carries positive bytes can cross the budget;
-        // a free (zero-byte) row is never refused on budget.
-        if !was_pinned && tile_bytes > 0 && inner.pinned_bytes + tile_bytes > budget {
+        let in_category = Self::key_in_category_conn(&inner.conn, key, region_id)?;
+        let category_bytes = Self::category_bytes_conn(&inner.conn, region_id)?;
+        if !in_category && tile_bytes > 0 && category_bytes + tile_bytes > budget {
             return Ok(false);
         }
         Self::pin_locked(&mut inner, key, region_id, was_pinned, tile_bytes)?;
@@ -721,45 +1078,32 @@ impl TileCache {
     /// set leaves no orphan join rows.
     pub fn delete_region(&self, region_id: &str) -> rusqlite::Result<()> {
         let mut inner = self.lock();
-        let mut freed = 0i64;
+        let freed: i64;
         {
             let tx = inner.conn.unchecked_transaction()?;
-            let tiles: Vec<(String, u32, u32, u32)> = {
-                let mut stmt =
-                    tx.prepare("SELECT source, z, x, y FROM region_tiles WHERE region_id = ?1")?;
-                let rows = stmt.query_map(params![region_id], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, u32>(1)?,
-                        r.get::<_, u32>(2)?,
-                        r.get::<_, u32>(3)?,
-                    ))
-                })?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()?
-            };
+            freed = tx.query_row(
+                "SELECT COALESCE(SUM(t.bytes), 0) FROM region_tiles removing JOIN tiles t
+                   ON removing.source = t.source AND removing.z = t.z
+                    AND removing.x = t.x AND removing.y = t.y
+                 WHERE removing.region_id = ?1 AND t.pinned = 1 AND NOT EXISTS (
+                   SELECT 1 FROM region_tiles other WHERE other.source = removing.source
+                    AND other.z = removing.z AND other.x = removing.x AND other.y = removing.y
+                    AND other.region_id != ?1
+                 )",
+                params![region_id],
+                |row| row.get(0),
+            )?;
             tx.execute(
                 "DELETE FROM region_tiles WHERE region_id = ?1",
                 params![region_id],
             )?;
-            for (source, z, x, y) in tiles {
-                let refs: i64 = tx.query_row(
-                    "SELECT COUNT(*) FROM region_tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
-                    params![source, z, x, y], |r| r.get(0),
-                )?;
-                if refs == 0 {
-                    let bytes: Option<i64> = tx.query_row(
-                        "SELECT bytes FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4 AND pinned = 1",
-                        params![source, z, x, y], |r| r.get(0),
-                    ).optional()?;
-                    if let Some(b) = bytes {
-                        tx.execute(
-                            "UPDATE tiles SET pinned = 0 WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
-                            params![source, z, x, y],
-                        )?;
-                        freed += b;
-                    }
-                }
-            }
+            tx.execute(
+                "UPDATE tiles SET pinned = 0 WHERE pinned = 1 AND NOT EXISTS (
+                   SELECT 1 FROM region_tiles rt WHERE rt.source = tiles.source AND rt.z = tiles.z
+                    AND rt.x = tiles.x AND rt.y = tiles.y
+                 )",
+                [],
+            )?;
             tx.commit()?;
         }
         inner.pinned_bytes -= freed;
@@ -768,59 +1112,68 @@ impl TileCache {
         Ok(())
     }
 
-    /// Atomically replace `target_region_id` with the fully downloaded staging region. Returns false
-    /// when the resulting pinned set would exceed `budget`; in that case the transaction is rolled back
-    /// and both regions remain unchanged. Tiles no longer referenced by any region are demoted to scroll.
-    pub fn promote_staged_region(
+    /// Atomically promote one or more staged regions, validating the physical cap and both logical
+    /// category budgets after every target replacement has been applied. A failed validation rolls the
+    /// entire transaction back, preserving all last-known-good targets.
+    pub fn promote_staged_regions(
         &self,
-        staging_region_id: &str,
-        target_region_id: &str,
-        budget: i64,
+        replacements: &[(String, String)],
+        real_budget: i64,
+        position_budget: i64,
+        cap: i64,
     ) -> rusqlite::Result<bool> {
         let mut inner = self.lock();
-        let pinned_base = inner.pinned_bytes;
-        let freed: i64;
         {
             let tx = inner.conn.unchecked_transaction()?;
-            freed = tx.query_row(
-                "SELECT COALESCE(SUM(t.bytes), 0)
-                 FROM region_tiles old JOIN tiles t
-                   ON old.source = t.source AND old.z = t.z AND old.x = t.x AND old.y = t.y
-                 WHERE old.region_id = ?1 AND t.pinned = 1 AND NOT EXISTS (
-                   SELECT 1 FROM region_tiles other
-                   WHERE other.source = old.source AND other.z = old.z
-                     AND other.x = old.x AND other.y = old.y AND other.region_id != ?1
-                 )",
-                params![target_region_id],
+            for (staging_region_id, target_region_id) in replacements {
+                tx.execute(
+                    "UPDATE tiles SET pinned = 0
+                     WHERE pinned = 1 AND (source, z, x, y) IN (
+                       SELECT old.source, old.z, old.x, old.y FROM region_tiles old
+                       WHERE old.region_id = ?1 AND NOT EXISTS (
+                         SELECT 1 FROM region_tiles other
+                         WHERE other.source = old.source AND other.z = old.z
+                           AND other.x = old.x AND other.y = old.y AND other.region_id != ?1
+                       )
+                     )",
+                    params![target_region_id],
+                )?;
+                tx.execute(
+                    "DELETE FROM region_tiles WHERE region_id = ?1",
+                    params![target_region_id],
+                )?;
+                tx.execute(
+                    "UPDATE region_tiles SET region_id = ?1 WHERE region_id = ?2",
+                    params![target_region_id, staging_region_id],
+                )?;
+                // A staging tile that was shared with its old target may have been demoted by the first
+                // UPDATE. Reassert pins for every promoted join before validating totals.
+                tx.execute(
+                    "UPDATE tiles SET pinned = 1 WHERE (source, z, x, y) IN (
+                       SELECT source, z, x, y FROM region_tiles WHERE region_id = ?1
+                     )",
+                    params![target_region_id],
+                )?;
+            }
+            let physical: i64 = tx.query_row(
+                "SELECT COALESCE(SUM(bytes), 0) FROM tiles WHERE pinned = 1",
+                [],
                 |row| row.get(0),
             )?;
-            let projected = pinned_base - freed;
-            if projected > budget {
+            let real =
+                Self::category_bytes_conn(&tx, Some(crate::state::BASEMAP_ASSETS_REGION_ID))?;
+            let position =
+                Self::category_bytes_conn(&tx, Some(crate::state::POSITION_WARM_REGION_ID))?;
+            if physical > cap || real > real_budget || position > position_budget {
                 return Ok(false);
             }
-            tx.execute(
-                "UPDATE tiles SET pinned = 0
-                 WHERE pinned = 1 AND (source, z, x, y) IN (
-                   SELECT old.source, old.z, old.x, old.y FROM region_tiles old
-                   WHERE old.region_id = ?1 AND NOT EXISTS (
-                     SELECT 1 FROM region_tiles other
-                     WHERE other.source = old.source AND other.z = old.z
-                       AND other.x = old.x AND other.y = old.y AND other.region_id != ?1
-                   )
-                 )",
-                params![target_region_id],
-            )?;
-            tx.execute(
-                "DELETE FROM region_tiles WHERE region_id = ?1",
-                params![target_region_id],
-            )?;
-            tx.execute(
-                "UPDATE region_tiles SET region_id = ?1 WHERE region_id = ?2",
-                params![target_region_id, staging_region_id],
-            )?;
             tx.commit()?;
         }
-        inner.pinned_bytes -= freed;
+        inner.pinned_bytes = inner.conn.query_row(
+            "SELECT COALESCE(SUM(bytes), 0) FROM tiles WHERE pinned = 1",
+            [],
+            |row| row.get(0),
+        )?;
         inner.regions_dirty = true;
         Ok(true)
     }
@@ -866,8 +1219,9 @@ impl TileCache {
              WHERE t.pinned = 1 AND EXISTS ( \
                SELECT 1 FROM region_tiles rt \
                WHERE rt.source = t.source AND rt.z = t.z AND rt.x = t.x AND rt.y = t.y \
-                 AND rt.region_id != ?1)",
-            params![position_warm_region_id],
+                 AND rt.region_id != ?1
+                 AND substr(rt.region_id, 1, length(?2)) != ?2)",
+            params![position_warm_region_id, POSITION_STAGING_REGION_PREFIX],
             |r| r.get(0),
         )?;
         inner.real_region_cache = value;
@@ -997,6 +1351,59 @@ mod tests {
         let f = NamedTempFile::new().unwrap();
         let c = TileCache::open(f.path()).unwrap();
         (f, c)
+    }
+
+    fn warm_row(source: &str, x: u32, bytes: i64) -> WarmRow {
+        WarmRow {
+            source: source.to_string(),
+            z: 0,
+            x,
+            y: 0,
+            tile: tile(bytes, 200, Some(vec![0; bytes as usize])),
+        }
+    }
+
+    #[test]
+    fn probe_accepts_both_empty_and_populated_databases() {
+        let (_f, c) = open();
+        c.probe().expect("an empty initialized database is healthy");
+        c.put(
+            TileKey::new("s", 0, 0, 0),
+            &tile(3, 200, Some(vec![1, 2, 3])),
+            false,
+            1,
+        )
+        .unwrap();
+        c.probe().expect("a populated database is healthy");
+    }
+
+    #[test]
+    fn zero_growth_batch_bypasses_the_disk_headroom_gate() {
+        let (_f, c) = open();
+        c.put(
+            TileKey::new("s", 0, 0, 0),
+            &tile(100, 200, Some(vec![0; 100])),
+            false,
+            1,
+        )
+        .unwrap();
+        let rows = vec![warm_row("s", 0, 100), warm_row("s", 0, 100)];
+        {
+            let inner = c.lock();
+            let growth = TileCache::batch_physical_growth_conn(&inner.conn, &rows).unwrap();
+            assert_eq!(
+                growth, 0,
+                "cache hits and same-size replacements need no new bytes"
+            );
+            assert!(
+                c.has_disk_headroom_conn(&inner.conn, growth),
+                "zero growth is accepted without consulting filesystem free space",
+            );
+        }
+        let outcome = c.put_many_pinned(&rows, 100, 100, Some("r1"), 2).unwrap();
+        assert_eq!(outcome.stored, 2);
+        assert!(!outcome.capped);
+        assert_eq!(c.stats().unwrap(), (1, 100, 100));
     }
 
     #[test]
@@ -1911,7 +2318,7 @@ mod tests {
     }
 
     #[test]
-    fn pin_if_fresh_pins_a_zero_byte_row_even_when_pinned_bytes_exceeds_budget() {
+    fn pin_if_fresh_charges_negative_rows_and_respects_the_budget() {
         let (_f, c) = open();
         let now = 1000i64;
         // Pin a real 100-byte tile so pinned_bytes = 100.
@@ -1925,22 +2332,46 @@ mod tests {
         c.put_many_pinned(&real, 2_000_000_000, 2_000_000_000, Some("r1"), now)
             .unwrap();
         assert_eq!(c.stats().unwrap().2, 100, "pinned_bytes starts at 100");
-        // A fresh negative-cache (zero-byte) row.
-        let neg = CachedTile {
-            fetched_at: now,
-            ..tile(0, 404, None)
-        };
+        // A fresh negative-cache row carries its conservative database charge.
+        let neg = CachedTile::negative(404, now);
         c.put(TileKey::new("s", 0, 1, 0), &neg, false, now).unwrap();
-        // Even with a budget BELOW the current pinned_bytes, a free row is never refused on budget.
-        assert!(
-            c.pin_if_fresh(TileKey::new("s", 0, 1, 0), now, 86_400, 600, 50, Some("r1"))
-                .unwrap(),
-            "a free zero-byte row is pinned even when pinned_bytes already exceeds the budget",
+        assert_eq!(
+            c.pin_if_fresh_capped(
+                TileKey::new("s", 0, 1, 0),
+                now,
+                86_400,
+                600,
+                PinBudgets {
+                    category_bytes: 100 + NEGATIVE_ROW_COST_BYTES - 1,
+                    physical_bytes: 2_000_000_000,
+                },
+                Some("r1"),
+            )
+            .unwrap(),
+            FreshPinOutcome::Capped,
+            "the negative row cannot bypass the category budget",
+        );
+        assert_eq!(c.stats().unwrap().2, 100, "a refused row remains unpinned");
+        assert_eq!(
+            c.pin_if_fresh_capped(
+                TileKey::new("s", 0, 1, 0),
+                now,
+                86_400,
+                600,
+                PinBudgets {
+                    category_bytes: 100 + NEGATIVE_ROW_COST_BYTES,
+                    physical_bytes: 100 + NEGATIVE_ROW_COST_BYTES,
+                },
+                Some("r1"),
+            )
+            .unwrap(),
+            FreshPinOutcome::Pinned,
+            "the exact category and physical budget accepts the charged row",
         );
         assert_eq!(
             c.stats().unwrap().2,
-            100,
-            "a zero-byte row adds nothing to pinned_bytes"
+            100 + NEGATIVE_ROW_COST_BYTES,
+            "the conservative charge contributes to pinned bytes",
         );
     }
 
@@ -2079,6 +2510,157 @@ mod tests {
     }
 
     #[test]
+    fn explicit_clear_checkpoints_and_returns_the_full_freelist_to_disk() {
+        let (file, cache) = open();
+        const BLOB_BYTES: usize = 512 * 1024;
+        for x in 0..16 {
+            cache
+                .put(
+                    TileKey::new("large", 0, x, 0),
+                    &tile(BLOB_BYTES as i64, 200, Some(vec![x as u8; BLOB_BYTES])),
+                    false,
+                    x as i64,
+                )
+                .unwrap();
+        }
+        cache.reclaim_free_pages().unwrap();
+        let before = std::fs::metadata(file.path()).unwrap().len();
+        assert!(before > 4 * 1024 * 1024, "test database grew: {before}");
+
+        let (freed_bytes, freed_rows) = cache.clear_unpinned().unwrap();
+        assert_eq!(freed_rows, 16);
+        assert_eq!(freed_bytes, (16 * BLOB_BYTES) as i64);
+        let after = std::fs::metadata(file.path()).unwrap().len();
+        let inner = cache.lock();
+        let freelist: i64 = inner
+            .conn
+            .pragma_query_value(None, "freelist_count", |row| row.get(0))
+            .unwrap();
+        let page_count: i64 = inner
+            .conn
+            .pragma_query_value(None, "page_count", |row| row.get(0))
+            .unwrap();
+        drop(inner);
+        assert!(
+            after < before / 2,
+            "database shrank from {before} to {after}; pages={page_count} freelist={freelist}"
+        );
+        assert_eq!(freelist, 0);
+    }
+
+    #[test]
+    fn opening_a_v0_5_0_cache_enables_auto_vacuum_without_losing_tiles() {
+        let file = NamedTempFile::new().unwrap();
+        {
+            let conn = Connection::open(file.path()).unwrap();
+            conn.execute_batch(include_str!("../tests/fixtures/v0.5.0-cache.sql"))
+                .unwrap();
+        }
+
+        let cache = TileCache::open(file.path()).unwrap();
+        let (rows, total_bytes, pinned_bytes) = cache.stats().unwrap();
+        assert_eq!((rows, total_bytes, pinned_bytes), (3, 9, 3));
+        let scroll = cache
+            .get(TileKey::new("legacy-scroll", 5, 10, 12))
+            .unwrap()
+            .unwrap();
+        assert_eq!(scroll.blob.as_deref(), Some(&[1, 2, 3, 4][..]));
+        assert_eq!(scroll.strong_etag, "\"legacy-scroll\"");
+        assert_eq!(cache.region_bytes("legacy-region-id").unwrap(), 3);
+        assert_eq!(cache.region_bytes("__warm_staging__legacy").unwrap(), 0);
+        let staging = cache
+            .get(TileKey::new("legacy-staging", 7, 30, 36))
+            .unwrap()
+            .unwrap();
+        let inner = cache.lock();
+        let staging_pinned: i64 = inner
+            .conn
+            .query_row(
+                "SELECT pinned FROM tiles WHERE source = 'legacy-staging'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(staging.blob.as_deref(), Some(&[0xdd, 0xee][..]));
+        assert_eq!(staging_pinned, 0);
+
+        let mode: i64 = inner
+            .conn
+            .pragma_query_value(None, "auto_vacuum", |row| row.get(0))
+            .unwrap();
+        let version: i64 = inner
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, 2, "legacy files are rebuilt with incremental vacuum");
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn disk_full_during_v0_5_0_conversion_defers_writes_and_retries_later() {
+        let file = NamedTempFile::new().unwrap();
+        {
+            let conn = Connection::open(file.path()).unwrap();
+            conn.execute_batch(include_str!("../tests/fixtures/v0.5.0-cache.sql"))
+                .unwrap();
+        }
+
+        let cache = TileCache::open_with_vacuum(file.path(), |_conn| {
+            Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
+                Some("simulated full disk".to_string()),
+            ))
+        })
+        .unwrap();
+        let mode = {
+            let inner = cache.lock();
+            inner
+                .conn
+                .pragma_query_value(None, "auto_vacuum", |row| row.get::<_, i64>(0))
+                .unwrap()
+        };
+        assert_eq!(mode, 0);
+        assert!(cache
+            .get(TileKey::new("legacy-scroll", 5, 10, 12))
+            .unwrap()
+            .is_some());
+        assert_eq!(cache.region_bytes("legacy-region-id").unwrap(), 3);
+        assert_eq!(cache.region_bytes("__warm_staging__legacy").unwrap(), 2);
+
+        cache
+            .put(
+                TileKey::new("large-scroll", 8, 40, 48),
+                &tile(1024 * 1024, 200, Some(vec![0x5a; 1024 * 1024])),
+                false,
+                160,
+            )
+            .unwrap();
+        let (freed_bytes, freed_rows) = cache.clear_unpinned().unwrap();
+        assert_eq!(freed_bytes, 1024 * 1024 + 4);
+        assert_eq!(freed_rows, 2);
+        drop(cache);
+        let deferred_size = std::fs::metadata(file.path()).unwrap().len();
+
+        let cache = TileCache::open(file.path()).unwrap();
+        cache.reclaim_free_pages().unwrap();
+        let converted_size = std::fs::metadata(file.path()).unwrap().len();
+        let mode = {
+            let inner = cache.lock();
+            inner
+                .conn
+                .pragma_query_value(None, "auto_vacuum", |row| row.get::<_, i64>(0))
+                .unwrap()
+        };
+        assert_eq!(mode, 2);
+        assert_eq!(cache.region_bytes("legacy-region-id").unwrap(), 3);
+        assert_eq!(cache.region_bytes("__warm_staging__legacy").unwrap(), 0);
+        assert!(
+            converted_size < deferred_size / 2,
+            "later conversion reclaimed the deleted rows: {deferred_size} to {converted_size}"
+        );
+    }
+
+    #[test]
     fn per_source_totals_sums_scroll_rows_per_source() {
         let (_f, c) = open();
         c.put(
@@ -2118,7 +2700,212 @@ mod tests {
     }
 
     #[test]
-    fn staged_region_promotion_is_atomic_and_respects_the_final_budget() {
+    fn real_and_position_categories_use_independent_logical_budgets() {
+        let (_f, c) = open();
+        let real = warm_row("real", 0, 80);
+        let position = warm_row("position", 0, 60);
+        assert_eq!(
+            c.put_many_pinned(&[real], 80, 200, Some("r1"), 1)
+                .unwrap()
+                .stored,
+            1,
+        );
+        assert_eq!(
+            c.put_many_pinned(
+                &[position],
+                60,
+                200,
+                Some(crate::state::POSITION_WARM_REGION_ID),
+                1,
+            )
+            .unwrap()
+            .stored,
+            1,
+        );
+        assert_eq!(
+            c.real_region_pinned_bytes(crate::state::POSITION_WARM_REGION_ID)
+                .unwrap(),
+            80
+        );
+        assert_eq!(
+            c.region_bytes(crate::state::POSITION_WARM_REGION_ID)
+                .unwrap(),
+            60,
+        );
+        assert_eq!(
+            c.stats().unwrap().2,
+            140,
+            "the physical cap counts both categories"
+        );
+    }
+
+    #[test]
+    fn a_shared_tile_consumes_each_categorys_logical_budget_once() {
+        let (_f, c) = open();
+        let shared = warm_row("s", 0, 40);
+        c.put_many_pinned(
+            &[shared],
+            40,
+            100,
+            Some(crate::state::POSITION_WARM_REGION_ID),
+            1,
+        )
+        .unwrap();
+        let shared = warm_row("s", 0, 40);
+        let capped = c
+            .put_many_pinned(&[shared], 39, 100, Some("r1"), 2)
+            .unwrap();
+        assert!(capped.capped);
+        assert_eq!(capped.stored, 0);
+        let shared = warm_row("s", 0, 40);
+        let accepted = c
+            .put_many_pinned(&[shared], 40, 100, Some("r1"), 3)
+            .unwrap();
+        assert!(!accepted.capped);
+        assert_eq!(accepted.stored, 1);
+        assert_eq!(
+            c.stats().unwrap().2,
+            40,
+            "the shared row is stored physically once"
+        );
+        assert_eq!(
+            c.real_region_pinned_bytes(crate::state::POSITION_WARM_REGION_ID)
+                .unwrap(),
+            40
+        );
+    }
+
+    #[test]
+    fn staging_respects_the_physical_cap_and_preserves_the_current_target() {
+        let (_f, c) = open();
+        c.put_many_pinned(
+            &[warm_row("position", 0, 60)],
+            60,
+            100,
+            Some(crate::state::POSITION_WARM_REGION_ID),
+            1,
+        )
+        .unwrap();
+        c.put_many_pinned(&[warm_row("old", 0, 20)], 40, 100, Some("r1"), 1)
+            .unwrap();
+        let staging = format!("{}job", STAGING_REGION_PREFIX);
+        let outcome = c
+            .put_many_pinned(&[warm_row("new", 0, 30)], 60, 100, Some(&staging), 2)
+            .unwrap();
+        assert!(outcome.capped);
+        assert_eq!(outcome.stored, 0);
+        assert_eq!(
+            c.region_bytes("r1").unwrap(),
+            20,
+            "the current target remains pinned"
+        );
+        assert_eq!(c.region_bytes(&staging).unwrap(), 0);
+        assert_eq!(c.stats().unwrap().2, 80);
+    }
+
+    #[test]
+    fn startup_discards_abandoned_staging_joins_and_allows_the_id_to_be_reused() {
+        let f = NamedTempFile::new().unwrap();
+        let staging = format!("{}job", STAGING_REGION_PREFIX);
+        {
+            let c = TileCache::open(f.path()).unwrap();
+            c.put_many_pinned(&[warm_row("old", 0, 10)], 100, 100, Some("r1"), 1)
+                .unwrap();
+            c.put_many_pinned(&[warm_row("stale", 0, 20)], 100, 100, Some(&staging), 1)
+                .unwrap();
+            assert_eq!(c.stats().unwrap().2, 30);
+        }
+        let c = TileCache::open(f.path()).unwrap();
+        assert_eq!(c.region_bytes(&staging).unwrap(), 0);
+        assert_eq!(c.region_bytes("r1").unwrap(), 10);
+        assert_eq!(
+            c.stats().unwrap().2,
+            10,
+            "the abandoned staging-only row is demoted"
+        );
+        let outcome = c
+            .put_many_pinned(&[warm_row("new", 0, 15)], 100, 100, Some(&staging), 2)
+            .unwrap();
+        assert_eq!(
+            outcome.stored, 1,
+            "a later boot can reuse the staging identifier safely"
+        );
+    }
+
+    #[test]
+    fn combined_main_and_asset_promotion_is_all_or_nothing() {
+        let (_f, c) = open();
+        c.put_many_pinned(&[warm_row("old-main", 0, 10)], 100, 100, Some("r1"), 1)
+            .unwrap();
+        c.put_many_pinned(
+            &[warm_row("old-assets", 0, 10)],
+            100,
+            100,
+            Some(crate::state::BASEMAP_ASSETS_REGION_ID),
+            1,
+        )
+        .unwrap();
+        let main_staging = format!("{}main", STAGING_REGION_PREFIX);
+        let asset_staging = format!("{}assets", STAGING_REGION_PREFIX);
+        c.put_many_pinned(
+            &[warm_row("new-main", 0, 20)],
+            100,
+            100,
+            Some(&main_staging),
+            2,
+        )
+        .unwrap();
+        c.put_many_pinned(
+            &[warm_row("new-assets", 0, 20)],
+            100,
+            100,
+            Some(&asset_staging),
+            2,
+        )
+        .unwrap();
+        let replacements = vec![
+            (main_staging.clone(), "r1".to_string()),
+            (
+                asset_staging.clone(),
+                crate::state::BASEMAP_ASSETS_REGION_ID.to_string(),
+            ),
+        ];
+        assert!(!c
+            .promote_staged_regions(&replacements, 39, 100, 100)
+            .unwrap());
+        assert_eq!(c.region_bytes("r1").unwrap(), 10);
+        assert_eq!(
+            c.region_bytes(crate::state::BASEMAP_ASSETS_REGION_ID)
+                .unwrap(),
+            10
+        );
+        assert_eq!(c.region_bytes(&main_staging).unwrap(), 20);
+        assert_eq!(c.region_bytes(&asset_staging).unwrap(), 20);
+
+        assert!(c
+            .promote_staged_regions(&replacements, 40, 100, 100)
+            .unwrap());
+        assert_eq!(c.region_bytes("r1").unwrap(), 20);
+        assert_eq!(
+            c.region_bytes(crate::state::BASEMAP_ASSETS_REGION_ID)
+                .unwrap(),
+            20
+        );
+        c.evict_to(40).unwrap();
+        assert!(
+            c.get(TileKey::new("old-assets", 0, 0, 0))
+                .unwrap()
+                .is_none(),
+            "the old asset generation is demoted only after successful replacement",
+        );
+        assert!(c
+            .get(TileKey::new("new-assets", 0, 0, 0))
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn staged_regions_promotion_is_atomic_and_respects_the_final_budgets() {
         let (_f, c) = open();
         let old = WarmRow {
             source: "s".into(),
@@ -2146,12 +2933,17 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!c.promote_staged_region("staging", "region", 19).unwrap());
+        let replacements = vec![("staging".to_string(), "region".to_string())];
+        assert!(!c
+            .promote_staged_regions(&replacements, 19, 100, 100)
+            .unwrap());
         assert_eq!(c.region_bytes("region").unwrap(), 10);
         assert_eq!(c.region_bytes("staging").unwrap(), 20);
         assert!(c.get(TileKey::new("s", 0, 0, 0)).unwrap().is_some());
 
-        assert!(c.promote_staged_region("staging", "region", 25).unwrap());
+        assert!(c
+            .promote_staged_regions(&replacements, 25, 100, 25)
+            .unwrap());
         assert_eq!(c.region_bytes("region").unwrap(), 20);
         assert_eq!(c.region_bytes("staging").unwrap(), 0);
         assert!(c.get(TileKey::new("s", 0, 0, 1)).unwrap().is_some());

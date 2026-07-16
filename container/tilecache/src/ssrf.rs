@@ -1,7 +1,7 @@
 //! SSRF guards for the egress proxy. The proxy is keyed by source id (never a client URL), redirects
 //! are disabled at the client, and every resolved upstream IP is checked here before connecting, so an
 //! allowlisted hostname that resolves (or rebinds) to a private, loopback, link-local, multicast, or
-//! unspecified address cannot turn the tokenless container into an SSRF pivot.
+//! unspecified address cannot turn the private egress container into an SSRF pivot.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -33,6 +33,7 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
                 || v6.is_unspecified()
                 || is_unique_local(v6)
                 || is_link_local_v6(v6)
+                || is_site_local_v6(v6)
                 // An IPv4-mapped address (::ffff:a.b.c.d) is checked against the v4 rules.
                 || v6.to_ipv4_mapped().map(|m| is_forbidden_ip(IpAddr::V4(m))).unwrap_or(false)
                 // 6to4 (2002::/16) and the well-known NAT64 prefix (64:ff9b::/96) embed a v4; decode it
@@ -42,6 +43,9 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
                 // offset varies by prefix length, so reject the whole /48 rather than decode it. The
                 // prefix is reserved and not globally routable, so no real public upstream falls in it.
                 || is_local_use_nat64(v6)
+                // Egress accepts ordinary global-unicast IPv6 only. This excludes documentation,
+                // benchmarking, discard-only, and other special-purpose ranges outside 2000::/3.
+                || !is_global_unicast_v6(v6)
         }
     }
 }
@@ -118,6 +122,16 @@ fn is_link_local_v6(ip: Ipv6Addr) -> bool {
     (ip.segments()[0] & 0xffc0) == 0xfe80
 }
 
+/// Deprecated fec0::/10 site-local space can still be routed on private networks.
+fn is_site_local_v6(ip: Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xffc0) == 0xfec0
+}
+
+fn is_global_unicast_v6(ip: Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xe000) == 0x2000
+        && (ip.segments()[0] != 0x2001 || ip.segments()[1] != 0x0db8)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +156,8 @@ mod tests {
         assert!(is_forbidden_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
         assert!(is_forbidden_ip(IpAddr::V6("fc00::1".parse().unwrap())));
         assert!(is_forbidden_ip(IpAddr::V6("fe80::1".parse().unwrap())));
+        assert!(is_forbidden_ip(IpAddr::V6("fec0::1".parse().unwrap())));
+        assert!(is_forbidden_ip(IpAddr::V6("2001:db8::1".parse().unwrap())));
         assert!(is_forbidden_ip(IpAddr::V6(
             "::ffff:127.0.0.1".parse().unwrap()
         )));

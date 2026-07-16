@@ -28,6 +28,21 @@ module.exports = {
   module: {
     rules: [
       {
+        test: /\.module\.css$/,
+        use: [
+          'style-loader',
+          {
+            loader: 'css-loader',
+            options: {
+              modules: {
+                localIdentName: 'cl-[local]-[hash:base64:5]',
+                namedExport: false
+              }
+            }
+          }
+        ]
+      },
+      {
         test: /\.tsx?$/,
         loader: 'babel-loader',
         exclude: /node_modules/,
@@ -70,7 +85,11 @@ module.exports = {
       // The panel uses React hooks only; it never imports react-dom (the admin
       // UI host owns rendering), so only react is shared.
       shared: {
-        react: { singleton: true, requiredVersion: '^19' }
+        react: {
+          singleton: true,
+          requiredVersion: '>=19.2.0 <20.0.0',
+          import: false
+        }
       }
     })
   ]

@@ -26,6 +26,8 @@ export interface ChartsConfig {
 
 /** The advanced group: settings most installs never change. */
 export interface AdvancedConfig {
+  /** Whether place-name lookup may contact the configured geocoding provider. */
+  geocodingEnabled: boolean
   /** The container image tag to run. Blank keeps the tag pinned to the plugin version. */
   imageTag: string
   /** Host path of an external drive to hold the cache. Blank keeps the cache on the data directory. */

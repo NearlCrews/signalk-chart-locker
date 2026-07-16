@@ -6,6 +6,7 @@ import type { ContainerConfig, ContainerUpdateService } from '../shared/types.js
 import { PLUGIN_ID, PLUGIN_REPO_SLUG } from '../shared/plugin-id.js'
 import { makeContainerHealthcheck, probeContainerHealth, type FetchLike } from './container-health.js'
 import { CACHE_CAP_STATIC_DEFAULT_GIB } from '../shared/cache-cap.js'
+import { migrateLegacyTilecacheTag } from '../shared/tilecache-tag.js'
 
 export type { FetchLike }
 
@@ -35,7 +36,7 @@ export const DEFAULT_TILECACHE_TAG = `v${PLUGIN_VERSION}`
 
 /** The single trim-and-default rule for the container image tag, shared by the container config and the update registration so the badge always reports the tag the container actually runs. */
 export function resolveTilecacheTag (rawTag?: string): string {
-  return rawTag?.trim() || DEFAULT_TILECACHE_TAG
+  return migrateLegacyTilecacheTag(rawTag) || DEFAULT_TILECACHE_TAG
 }
 
 /** Where signalk-container mounts the Signal K data directory inside the container (the durable default). */
@@ -45,7 +46,7 @@ const CACHE_DIR = `${SIGNALK_DATA_MOUNT}/chart-locker-tilecache`
 const TILECACHE_DB_PATH = `${CACHE_DIR}/cache.sqlite`
 /** Conservative default cap (GiB). Used as the fallback when free-space detection is unavailable.
  *  Sourced from the shared cache-cap module so the runtime byte math, the schema default, and the
- *  panel agree on the same fallback (a multiple of the 5 GiB step). */
+ *  panel agree on the same fallback (a multiple of the 4 GiB step). */
 export const DEFAULT_CACHE_CAP_GIB = CACHE_CAP_STATIC_DEFAULT_GIB
 
 const TILECACHE_HEALTHCHECK = makeContainerHealthcheck('/tilecache')
@@ -66,6 +67,10 @@ export interface TilecacheContainerOptions {
   capBytes?: number
   /** Scroll-tile TTL in seconds, seeded into the container env so the startup sweep has a value. */
   scrollTtlSecs?: number
+  /** Stable token shared only with the plugin's control-plane callers. */
+  controlToken?: string
+  /** Whether reverse geocoding may use network egress. Defaults to true. */
+  geocodingEnabled?: boolean
   /** Host path of a user-managed external volume (USB SSD or NVMe) to hold the cache; absent leaves it on the data mount. */
   externalCacheVolumeSource?: string
 }
@@ -79,11 +84,16 @@ export function buildTilecacheConfig (opts: TilecacheContainerOptions = {}): Con
     healthcheck: TILECACHE_HEALTHCHECK,
     resources: TILECACHE_RESOURCES,
     restart: 'unless-stopped',
+    // Distroless runs the binary as its nonroot uid/gid. Tell signalk-container which in-image
+    // ownership to map onto writable bind mounts instead of assuming a root-owned image.
+    user: { inImageUid: 65532, inImageGid: 65532 },
     signalkDataMount: SIGNALK_DATA_MOUNT,
     env: {
       TILECACHE_DB: TILECACHE_DB_PATH,
       TILECACHE_CAP_BYTES: String(cap),
-      TILECACHE_SCROLL_TTL_SECS: String(opts.scrollTtlSecs ?? 0)
+      TILECACHE_SCROLL_TTL_SECS: String(opts.scrollTtlSecs ?? 0),
+      TILECACHE_GEOCODING_ENABLED: opts.geocodingEnabled === false ? '0' : '1',
+      ...(opts.controlToken === undefined ? {} : { TILECACHE_CONTROL_TOKEN: opts.controlToken })
     }
   }
   if (opts.externalCacheVolumeSource !== undefined) {

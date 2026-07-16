@@ -5,12 +5,6 @@ export interface Position {
   longitude: number
 }
 
-/** The minimal fetch Response surface this plugin reads: an ok flag and a JSON body parser. */
-export interface FetchResponse {
-  ok: boolean
-  json(): Promise<unknown>
-}
-
 export interface ContainerRuntimeInfo {
   runtime: string
   version?: string

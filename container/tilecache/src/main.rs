@@ -46,6 +46,9 @@ async fn main() {
         }
     }
     let cache = Arc::new(open_or_recreate(Path::new(&db)));
+    if let Err(error) = cache.evict_to(cap) {
+        eprintln!("event=startup_cache_eviction_failed error={error}");
+    }
     let knobs = Knobs {
         cap_bytes: cap,
         scroll_ttl_secs,
@@ -59,10 +62,24 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
         .expect("bind the tilecache port");
-    axum::serve(listener, app(state))
-        .with_graceful_shutdown(shutdown_signal())
+    let shutdown_state = state.clone();
+    axum::serve(listener, app(state.clone()))
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            chart_locker_tilecache::warm::cancel_all_warms(&shutdown_state).await;
+        })
         .await
         .expect("serve");
+    if !chart_locker_tilecache::warm::wait_for_warms(&state, std::time::Duration::from_secs(25))
+        .await
+    {
+        eprintln!("event=warm_shutdown_drain_timeout");
+    }
+    if !chart_locker_tilecache::fetcher::wait_for_fills(&state, std::time::Duration::from_secs(10))
+        .await
+    {
+        eprintln!("event=fill_shutdown_drain_timeout");
+    }
 }
 
 /// Open the disposable cache DB, and on a failure that is not a stale schema (open() rebuilds the table
@@ -136,14 +153,23 @@ fn healthcheck() -> i32 {
             {
                 return 1;
             }
-            let mut response = [0u8; 64];
-            match stream.read(&mut response) {
-                Ok(count)
-                    if String::from_utf8_lossy(&response[..count]).starts_with("HTTP/1.1 200") =>
-                {
-                    0
+            let mut response = Vec::with_capacity(128);
+            let mut chunk = [0u8; 64];
+            while response.len() < 1024 {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => {
+                        response.extend_from_slice(&chunk[..count]);
+                        if response.windows(2).any(|window| window == b"\r\n") {
+                            break;
+                        }
+                    }
                 }
-                _ => 1,
+            }
+            if String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200") {
+                0
+            } else {
+                1
             }
         }
         Err(_) => 1,

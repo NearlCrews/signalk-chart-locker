@@ -43,3 +43,30 @@ test('ensureRuntimeReady is true when a runtime is detected', async () => {
   assert.equal(ready, true)
   assert.equal(app.errors.length, 0)
 })
+
+test('ensureRuntimeReady fails cleanly when manager readiness never settles', async () => {
+  const app = fakeApp()
+  const manager = fakeManager()
+  manager.whenReady = async () => await new Promise<void>(() => {})
+  const ready = await ensureRuntimeReady(app as never, manager, { timeoutMs: 5 })
+  assert.equal(ready, false)
+  assert.ok(app.errors.some((message) => message.includes('startup timeout')))
+})
+
+test('ensureRuntimeReady fails cleanly when manager readiness rejects', async () => {
+  const app = fakeApp()
+  const manager = fakeManager()
+  manager.whenReady = async () => { throw new Error('bridge unavailable') }
+  const ready = await ensureRuntimeReady(app as never, manager, { timeoutMs: 50 })
+  assert.equal(ready, false)
+  assert.ok(app.errors.some((message) => message.includes('bridge unavailable')))
+})
+
+test('ensureRuntimeReady fails cleanly when runtime detection throws', async () => {
+  const app = fakeApp()
+  const manager = fakeManager()
+  manager.getRuntime = () => { throw new Error('runtime bridge failed') }
+  const ready = await ensureRuntimeReady(app as never, manager, { timeoutMs: 50 })
+  assert.equal(ready, false)
+  assert.ok(app.errors.some((message) => message.includes('runtime bridge failed')))
+})

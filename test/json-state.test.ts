@@ -22,6 +22,16 @@ test('a corrupt file falls back rather than throwing', () => {
   const path = join(dir, 'x.json')
   writeFileSync(path, 'not json')
   assert.deepEqual(readJsonState(path, { ok: true }), { ok: true })
+  assert.equal(readdirSync(dir).some((name) => name.startsWith('x.json.corrupt-')), true)
+})
+
+test('a valid JSON value with the wrong root type is preserved and rejected', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'json-state-'))
+  const path = join(dir, 'x.json')
+  writeFileSync(path, 'null')
+  const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
+  assert.deepEqual(readJsonState(path, { ok: true }, { validate: isRecord }), { ok: true })
+  assert.equal(readdirSync(dir).some((name) => name.startsWith('x.json.corrupt-')), true)
 })
 
 test('a failed replacement keeps the previous complete document and removes its temporary file', () => {

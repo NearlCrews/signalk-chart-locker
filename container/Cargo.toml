@@ -6,3 +6,14 @@ resolver = "2"
 members = [
     "tilecache",
 ]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.95"
+license = "Apache-2.0"
+publish = false
+
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1

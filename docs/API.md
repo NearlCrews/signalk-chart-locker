@@ -9,10 +9,12 @@ not be exposed outside the Signal K host.
 Management routes under `/api` use the Signal K admin middleware. If the server cannot provide a
 security strategy, Chart Locker fails closed and does not mount them.
 
-The tile, style, readiness, and PMTiles GET routes are registered with Signal K's `readonly` access
-scope. They are available to authenticated `readonly`, `readwrite`, and administrator users. When
-Signal K security is disabled, they remain available to every client. Tile source identifiers come
-from the trusted source catalog, and PMTiles files must be present in the discovered registry.
+When Signal K exposes scoped plugin routers, the tile, style, readiness, and PMTiles GET routes use
+its `readonly` access scope and are available to authenticated `readonly`, `readwrite`, and
+administrator users. Released servers without that API keep the fallback routes inside their blanket
+administrator-only plugin mount. When Signal K security is disabled, the read routes remain available
+to every client. Tile source identifiers come from the trusted source catalog, and PMTiles files must
+be present in the discovered registry.
 
 Chart management, saved-region management, cache configuration, cache clearing, and reverse
 geocoding remain administrator-only. A 401 or 403 from an `/api` route should be checked against
@@ -103,9 +105,16 @@ Validation rules:
 - The server planning estimate must fit `regionsFreeBytes` before the region is persisted. The
   container also enforces actual tile-count and transferred-byte limits while downloading.
 
-A successful create response contains `{ "region": ..., "jobId": "..." }`. A successful re-download
-contains `{ "jobId": "..." }`. The plugin does not mark a re-download active until the container
-returns success with a non-empty identifier.
+A successful create response contains `{ "region": ..., "jobId": "..." }`, with
+`region.cachedBytes` initialized to `0`. Because warm starts are non-idempotent, an accepted create
+whose response is lost or lacks a valid identifier returns HTTP 202 with
+`{ "region": ..., "recovery": "pending" }`; that region also includes `cachedBytes: 0`.
+
+A successful re-download response contains `{ "jobId": "..." }`. An accepted re-download whose
+response is lost or lacks a valid identifier returns HTTP 202 with `{ "recovery": "pending" }`.
+
+In either recovery case, the durable region remains `downloading` while the plugin recovers the
+retained job by region ID. A deterministic container rejection does not enter recovery pending.
 
 ## Position warming
 
@@ -153,16 +162,19 @@ chart metadata as a successful update.
 ## Reverse geocoding
 
 `GET /api/geocode?lat=<latitude>&lon=<longitude>` relays a guarded request through the container to
-the allowlisted Nominatim service. Both query parameters are required. The endpoint sends only the
-coordinates needed to name a region.
+the allowlisted Nominatim service. Both query parameters are required. When geocoding is enabled, the
+endpoint sends only the requested point rounded to five decimal places. The container serializes all
+clients to at most one provider request per second and caches up to 256 successful coordinate lookups
+in memory for 24 hours. The cache does not survive a container restart. When `geocodingEnabled` is
+false, the private container endpoint and this proxy return 404 without contacting Nominatim.
 
 ## Common error statuses
 
 | Status | Meaning |
 | ------ | ------- |
 | 400 | Malformed input, invalid bounds, unknown sources, invalid estimate data, invalid zooms, or a region estimate above budget |
-| 404 | Unknown chart, region, source, or warm job |
-| 409 | PMTiles management is disabled by a provider conflict, a region warm is already active, or deletion could not stop an active warm |
+| 404 | Unknown chart, region, source, or warm job, or reverse geocoding is disabled |
+| 409 | PMTiles management is disabled by a provider conflict, the saved-region limit is reached, a region warm is already active, or deletion could not stop an active warm |
 | 429 | The container warm-job limit is active |
 | 502 | The container request failed or returned an invalid response |
 | 503 | The tile-cache container, its address, or a required internal service is temporarily unavailable |

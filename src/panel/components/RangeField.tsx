@@ -11,9 +11,16 @@
  */
 
 import type * as React from 'react'
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupControl,
+  LabeledField,
+  NumberInput,
+  RangeInput,
+  type FieldControlProps
+} from 'signalk-nearlcrews-ui'
 import { useNumberDraft } from '../hooks/use-number-draft.js'
-import LabeledField from './LabeledField.js'
-import { S } from '../styles.js'
 
 interface Props {
   /** Stable id linking the visible label to the slider. */
@@ -51,42 +58,85 @@ export default function RangeField ({
   unit,
   disabled
 }: Props): React.ReactElement {
+  return (
+    <LabeledField label={label} description={hint} layout='inline'>
+      <RangeControl
+        id={id}
+        label={label}
+        min={min}
+        max={max}
+        step={step}
+        unit={unit}
+        disabled={disabled}
+        value={value}
+        onChange={onChange}
+      />
+    </LabeledField>
+  )
+}
+
+interface RangeControlProps extends FieldControlProps {
+  label: string
+  value: number
+  onChange: (next: number) => void
+  min: number
+  max: number
+  step: number
+  unit?: string
+  disabled?: boolean
+}
+
+/** Composite control whose outer id lets LabeledField preserve the caller's stable slider id. */
+function RangeControl ({
+  id,
+  label,
+  value,
+  onChange,
+  min,
+  max,
+  step,
+  unit,
+  disabled,
+  required,
+  'aria-describedby': ariaDescribedBy,
+  'aria-errormessage': ariaErrorMessage,
+  'aria-invalid': ariaInvalid
+}: RangeControlProps): React.ReactElement {
   const draft = useNumberDraft(value, onChange, { min, max, integer: true, step })
-  const numberId = `${id}-number`
+  const numberId = `${id ?? 'range'}-number`
 
   return (
-    <LabeledField id={id} label={label} hint={hint}>
-      {(controlProps) => (
-        <div style={S.rangeRow}>
-          <input
-            id={controlProps.id}
-            aria-describedby={controlProps['aria-describedby']}
-            type='range'
-            min={min}
-            max={max}
-            step={step}
-            style={S.range}
-            disabled={disabled}
-            value={value}
-            onChange={(e) => onChange(Number(e.target.value))}
-          />
-          <input
-            id={numberId}
-            aria-label={`${label} exact value`}
-            aria-describedby={controlProps['aria-describedby']}
-            type='number'
-            min={min}
-            max={max}
-            step={step}
-            style={S.rangeNumber}
-            disabled={disabled}
-            value={draft.display}
-            onChange={(e) => draft.handleChange(e.target.value)}
-            onBlur={draft.handleBlur}
-          />
-          {unit !== undefined ? <span style={S.rangeUnit}>{unit}</span> : null}
-        </div>
-      )}
-    </LabeledField>
+    <InputGroup density='compact'>
+      <InputGroupControl width='grow'>
+        <RangeInput
+          id={id}
+          aria-describedby={ariaDescribedBy}
+          aria-errormessage={ariaErrorMessage}
+          aria-invalid={ariaInvalid}
+          required={required}
+          min={min}
+          max={max}
+          step={step}
+          disabled={disabled}
+          value={value}
+          onChange={(event) => onChange(Number(event.target.value))}
+        />
+      </InputGroupControl>
+      <InputGroupControl width='fixed'>
+        <NumberInput
+          id={numberId}
+          aria-label={`${label} exact value`}
+          aria-describedby={ariaDescribedBy}
+          min={min}
+          max={max}
+          step={step}
+          disabled={disabled}
+          value={draft.display}
+          onChange={(event) => draft.handleChange(event.target.value)}
+          onBlur={draft.handleBlur}
+        />
+        {unit !== undefined ? <InputGroupAddon>{unit}</InputGroupAddon> : null}
+      </InputGroupControl>
+    </InputGroup>
   )
 }

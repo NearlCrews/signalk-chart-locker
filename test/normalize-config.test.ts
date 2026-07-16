@@ -8,6 +8,7 @@ test('normalizeConfig yields the schema defaults for a never-configured plugin',
   assert.equal(config.tileCache.cacheCapGiB, 8)
   assert.equal(config.tileCache.regionsBudgetGiB, 0)
   assert.equal(config.charts.path, '')
+  assert.equal(config.advanced.geocodingEnabled, true)
   assert.equal(config.advanced.imageTag, '')
   assert.equal(config.advanced.cacheVolumeSource, '')
 })
@@ -30,12 +31,23 @@ test('normalizeConfig trims string fields and clamps a negative regions budget t
   const config = normalizeConfig({
     tileCache: { regionsBudgetGiB: -5 },
     charts: { path: '  charts/pmtiles  ' },
-    advanced: { imageTag: ' v1.2.3 ', cacheVolumeSource: ' /mnt/ssd ' }
+    advanced: { geocodingEnabled: false, imageTag: ' v1.2.3 ', cacheVolumeSource: ' /mnt/ssd ' }
   })
   assert.equal(config.tileCache.regionsBudgetGiB, 0)
   assert.equal(config.charts.path, 'charts/pmtiles')
+  assert.equal(config.advanced.geocodingEnabled, false)
   assert.equal(config.advanced.imageTag, 'v1.2.3')
   assert.equal(config.advanced.cacheVolumeSource, '/mnt/ssd')
+})
+
+test('normalizeConfig clears every prior release schema default so upgrades follow the plugin version', () => {
+  for (const tag of ['v0.1.0', 'v0.1.1', 'v0.2.0', 'v0.3.0', 'v0.3.1', 'v0.4.0', 'v0.4.1', 'v0.4.2', 'v0.4.3', 'v0.4.4', 'v0.5.0']) {
+    assert.equal(normalizeConfig({ advanced: { imageTag: ` ${tag} ` } }).advanced.imageTag, '', tag)
+  }
+})
+
+test('normalizeConfig defaults a malformed geocoding flag to enabled', () => {
+  assert.equal(normalizeConfig({ advanced: { geocodingEnabled: 'false' } }).advanced.geocodingEnabled, true)
 })
 
 test('commitNumberDraft snaps a typed cap to the step and stays within the bounds', () => {

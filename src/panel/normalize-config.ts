@@ -18,6 +18,7 @@ import {
   type ChartLockerConfig
 } from './config-types.js'
 import { snapToStep } from '../shared/cache-cap.js'
+import { migrateLegacyTilecacheTag } from '../shared/tilecache-tag.js'
 
 /** The raw object shape read out of the untyped configuration prop. */
 type RawGroup = Record<string, unknown> | undefined
@@ -53,6 +54,12 @@ function clampIntGiB (
 function readString (raw: RawGroup, key: string): string {
   const value = raw?.[key]
   return typeof value === 'string' ? value.trim() : ''
+}
+
+/** Read a boolean off the raw group, falling back when it is absent or malformed. */
+function readBoolean (raw: RawGroup, key: string, fallback: boolean): boolean {
+  const value = raw?.[key]
+  return typeof value === 'boolean' ? value : fallback
 }
 
 /**
@@ -99,7 +106,8 @@ export function normalizeConfig (configuration: unknown): ChartLockerConfig {
       path: readString(charts, 'path')
     },
     advanced: {
-      imageTag: readString(advanced, 'imageTag'),
+      geocodingEnabled: readBoolean(advanced, 'geocodingEnabled', true),
+      imageTag: migrateLegacyTilecacheTag(readString(advanced, 'imageTag')) ?? '',
       cacheVolumeSource: readString(advanced, 'cacheVolumeSource')
     }
   }

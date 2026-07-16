@@ -1,14 +1,13 @@
 /**
  * A controlled numeric field: a label, a number input backed by
  * `useNumberDraft` (so the field can be cleared mid-edit), and a paragraph of
- * hint text. Used by the saved-regions budget, which is a plain whole-number
- * stepper with no upper bound.
+ * hint text. Used for whole-number settings whose bounds, step, and fallback
+ * are supplied by each call site.
  */
 
 import type * as React from 'react'
+import { LabeledField, NumberInput, type FieldErrorLive } from 'signalk-nearlcrews-ui'
 import { useNumberDraft, type NumberDraftOptions } from '../hooks/use-number-draft.js'
-import LabeledField from './LabeledField.js'
-import { S } from '../styles.js'
 
 interface Props extends NumberDraftOptions {
   /** Stable id linking the visible label to the input. */
@@ -25,6 +24,10 @@ interface Props extends NumberDraftOptions {
   disabled?: boolean
   /** Numeric step the up/down arrows use. */
   step?: number
+  /** Validation message associated with the input. */
+  error?: React.ReactNode
+  /** How changes to the validation message are announced. */
+  errorLive?: FieldErrorLive
 }
 
 /** A label + number input + hint row, with a draft-while-editing buffer. */
@@ -36,6 +39,8 @@ export default function NumberField ({
   onChange,
   disabled,
   step,
+  error,
+  errorLive,
   min,
   max,
   integer,
@@ -44,21 +49,23 @@ export default function NumberField ({
   const draft = useNumberDraft(value, onChange, { min, max, integer, fallback, step })
 
   return (
-    <LabeledField id={id} label={label} hint={hint}>
-      {(controlProps) => (
-        <input
-          {...controlProps}
-          type='number'
-          min={min}
-          max={max}
-          step={step}
-          style={S.input}
-          disabled={disabled}
-          value={draft.display}
-          onChange={(e) => draft.handleChange(e.target.value)}
-          onBlur={draft.handleBlur}
-        />
-      )}
+    <LabeledField
+      label={label}
+      description={hint}
+      error={error}
+      errorLive={errorLive}
+      layout='inline'
+    >
+      <NumberInput
+        id={id}
+        min={min}
+        max={max}
+        step={step}
+        disabled={disabled}
+        value={draft.display}
+        onChange={(event) => draft.handleChange(event.target.value)}
+        onBlur={draft.handleBlur}
+      />
     </LabeledField>
   )
 }

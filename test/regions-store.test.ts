@@ -1,9 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadRegionsStore, saveRegionsStore, createCachedRegionsLoader, DEFAULT_REGIONS_STORE, type RegionsStore } from '../src/runtime/regions-store.js'
+import { loadRegionsStore, saveRegionsStore, mutateRegionsStore, createCachedRegionsLoader, reconcilePositionWarmSources, DEFAULT_REGIONS_STORE, MAX_SAVED_REGIONS, type RegionsStore } from '../src/runtime/regions-store.js'
 
 function tmp (): string {
   return mkdtempSync(join(tmpdir(), 'regions-store-'))
@@ -55,6 +55,13 @@ test('a corrupt file falls back to an empty store rather than throwing', () => {
   assert.equal(store.positionWarm.enabled, true)
 })
 
+test('a valid JSON scalar is preserved and falls back without throwing', () => {
+  const dir = tmp()
+  writeFileSync(join(dir, 'regions.json'), 'null')
+  assert.deepEqual(loadRegionsStore(dir).regions, [])
+  assert.ok(readdirSync(dir).some((name) => name.startsWith('regions.json.corrupt-')))
+})
+
 test('semantically malformed state is normalized without reaching runtime consumers', () => {
   const dir = tmp()
   writeFileSync(join(dir, 'regions.json'), JSON.stringify({
@@ -66,6 +73,77 @@ test('semantically malformed state is normalized without reaching runtime consum
   assert.deepEqual(store.regions, [])
   assert.deepEqual(store.positionWarm, DEFAULT_REGIONS_STORE.positionWarm)
   assert.equal(store.cacheScrollTtlDays, DEFAULT_REGIONS_STORE.cacheScrollTtlDays)
+  assert.ok(readdirSync(dir).some((name) => name.startsWith('regions.json.corrupt-')))
+})
+
+test('saved region display text, identifiers, and source IDs reject control characters and preserve the source state', () => {
+  const base = {
+    id: 'region-1',
+    name: 'Area',
+    bbox: [-1, -1, 1, 1],
+    sourceIds: ['seamark'],
+    minzoom: 1,
+    maxzoom: 2,
+    createdAt: 1,
+    lastDownloadedAt: null,
+    bytes: 0,
+    status: 'ready'
+  }
+  for (const region of [
+    { ...base, name: 'bad\u2029name' },
+    { ...base, id: 'bad\nid' },
+    { ...base, sourceIds: ['bad\u0085source'] }
+  ]) {
+    const dir = tmp()
+    writeFileSync(join(dir, 'regions.json'), JSON.stringify({ regions: [region] }))
+    assert.deepEqual(loadRegionsStore(dir).regions, [])
+    const backup = readdirSync(dir).find((name) => name.startsWith('regions.json.corrupt-'))
+    assert.ok(backup)
+    assert.match(readFileSync(join(dir, backup), 'utf8'), /bad/)
+  }
+})
+
+test('a malformed saved region is preserved before a later mutation writes normalized state', () => {
+  const dir = tmp()
+  const valid = {
+    id: 'keep',
+    name: 'Keep',
+    bbox: [-1, -1, 1, 1],
+    sourceIds: ['seamark'],
+    minzoom: 1,
+    maxzoom: 2,
+    createdAt: 1,
+    lastDownloadedAt: null,
+    bytes: 7,
+    status: 'ready'
+  }
+  writeFileSync(join(dir, 'regions.json'), JSON.stringify({ regions: [valid, { id: 'broken' }], cacheScrollTtlDays: 10 }))
+  mutateRegionsStore(dir, (store) => { store.cacheScrollTtlDays = 11 })
+  const loaded = loadRegionsStore(dir)
+  assert.equal(loaded.cacheScrollTtlDays, 11)
+  assert.deepEqual(loaded.regions, [valid])
+  const backup = readdirSync(dir).find((name) => name.startsWith('regions.json.corrupt-'))
+  assert.ok(backup)
+  assert.match(readFileSync(join(dir, backup), 'utf8'), /"broken"/)
+})
+
+test('self-heal detects a replacement identity even when its timestamp component is unchanged', () => {
+  const dir = tmp()
+  saveRegionsStore(dir, { ...DEFAULT_REGIONS_STORE, cacheScrollTtlDays: 10 })
+  let now = 0
+  let identity = '1:10:100:123456789'
+  const loader = createCachedRegionsLoader(dir, {
+    watch: false,
+    selfHealMs: 1,
+    now: () => now,
+    statIdentity: () => identity
+  })
+  assert.equal(loader.getStore().cacheScrollTtlDays, 10)
+  saveRegionsStore(dir, { ...DEFAULT_REGIONS_STORE, cacheScrollTtlDays: 20 })
+  identity = '1:11:100:123456789'
+  now = 2
+  assert.equal(loader.getStore().cacheScrollTtlDays, 20)
+  loader.stop()
 })
 
 test('fresh directory returns empty regions list and default position-warm', () => {
@@ -104,6 +182,16 @@ test('round-trips a saved region via saveRegionsStore and loadRegionsStore', () 
 
 test('the regions store defaults cacheScrollTtlDays to 30', () => {
   assert.equal(loadRegionsStore(tmp()).cacheScrollTtlDays, 30)
+})
+
+test('positionWarmBudgetBytes rejects malformed inputs and bounds valid reserves', async () => {
+  const { positionWarmBudgetBytes } = await import('../src/runtime/regions-store.js')
+  assert.equal(positionWarmBudgetBytes(Number.NaN), 0)
+  assert.equal(positionWarmBudgetBytes(Number.POSITIVE_INFINITY), 0)
+  assert.equal(positionWarmBudgetBytes(-1), 0)
+  assert.equal(positionWarmBudgetBytes(9), 0)
+  assert.equal(positionWarmBudgetBytes(15), 1)
+  assert.equal(positionWarmBudgetBytes(1024 ** 4), 64 * 1024 * 1024)
 })
 
 test('cacheScrollTtlDays round-trips through save and load', () => {
@@ -209,4 +297,47 @@ test('a stray top-level bbox never discards an existing regions array', () => {
   const store = loadRegionsStore(dir)
   assert.equal(store.regions.length, 1, 'the existing region is preserved and no legacy region is added')
   assert.deepEqual(store.regions[0], region, 'the existing region is unchanged')
+})
+
+test('loaded saved regions are bounded', () => {
+  const dir = tmp()
+  const regions = Array.from({ length: MAX_SAVED_REGIONS + 25 }, (_, index) => ({
+    id: `region-${index}`,
+    name: `Region ${index}`,
+    bbox: [-1, -1, 1, 1],
+    sourceIds: ['seamark'],
+    minzoom: 1,
+    maxzoom: 2,
+    createdAt: 1,
+    lastDownloadedAt: null,
+    bytes: 0,
+    status: 'ready'
+  }))
+  writeFileSync(join(dir, 'regions.json'), JSON.stringify({ regions }))
+  assert.equal(loadRegionsStore(dir).regions.length, MAX_SAVED_REGIONS)
+})
+
+test('source reconciliation removes stale automatic sources but preserves saved region metadata', () => {
+  const dir = tmp()
+  const region: RegionsStore['regions'][0] = {
+    id: 'keep',
+    name: 'Keep cached',
+    bbox: [-1, -1, 1, 1],
+    sourceIds: ['seamark', 'removed-source'],
+    minzoom: 1,
+    maxzoom: 2,
+    createdAt: 1,
+    lastDownloadedAt: 1,
+    bytes: 100,
+    status: 'ready'
+  }
+  saveRegionsStore(dir, {
+    ...DEFAULT_REGIONS_STORE,
+    regions: [region],
+    positionWarm: { ...DEFAULT_REGIONS_STORE.positionWarm, sources: ['seamark', 'removed-source'] }
+  })
+  assert.deepEqual(reconcilePositionWarmSources(dir, (id) => id === 'seamark'), ['removed-source'])
+  const store = loadRegionsStore(dir)
+  assert.deepEqual(store.positionWarm.sources, ['seamark'])
+  assert.deepEqual(store.regions[0]?.sourceIds, ['seamark', 'removed-source'])
 })

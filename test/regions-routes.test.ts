@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registerRegionsRoutes, type RegionsRouter, type RegionsRequest, type RegionsResponse } from '../src/http/regions-routes.js'
@@ -89,4 +89,19 @@ test('GET /api/cache/stats returns 502 when the container fetch fails (for examp
   const { res, out } = fakeRes()
   await routes.get('GET /api/cache/stats')!({ params: {}, body: undefined }, res)
   assert.equal(out.code, 502)
+})
+
+test('a plugin-state write failure returns one stable 500 response', async () => {
+  const { router, routes } = collector()
+  const dir = mkdtempSync(join(tmpdir(), 'pw-fail-'))
+  const notADirectory = join(dir, 'file')
+  writeFileSync(notADirectory, 'x')
+  registerRegionsRoutes(router, securedApp(), () => 'addr:8080', { dataDir: notADirectory })
+  const { res, out } = fakeRes()
+  await routes.get('POST /api/position-warm/config')!({
+    params: {},
+    body: { positionWarm: { enabled: false } }
+  }, res)
+  assert.equal(out.code, 500)
+  assert.deepEqual(out.body, { error: 'unable to persist plugin state' })
 })

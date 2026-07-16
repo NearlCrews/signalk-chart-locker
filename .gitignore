@@ -6,6 +6,10 @@ dist/
 public/
 target/
 __pycache__/
+playwright-report/
+test-results/
+.panel-stats.json
+package/
 
 # Storage spike generated GeoPackage sample (never commit; not in any tarball)
 container/storage-spike/data/

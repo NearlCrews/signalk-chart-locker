@@ -103,6 +103,16 @@ test('shouldWarm with a regions list is false when inside any region', () => {
   assert.equal(shouldWarm(pos, regions, settings, fresh, 1_000_000), false)
 })
 
+test('only ready and actively downloading regions suppress automatic warming', () => {
+  const bbox: LngLatBbox = [-123, 37, -122, 38]
+  for (const status of ['ready', 'downloading'] as const) {
+    assert.equal(shouldWarm(here, [{ ...region(bbox), status }], settings, fresh, 1_000_000), false, status)
+  }
+  for (const status of ['capped', 'error', 'needs-redownload'] as const) {
+    assert.equal(shouldWarm(here, [{ ...region(bbox), status }], settings, fresh, 1_000_000), true, status)
+  }
+})
+
 test('shouldWarm with an empty regions list fires on the first fix (migrated null bbox)', () => {
   const pos = { latitude: 0.5, longitude: 0.5 }
   assert.equal(shouldWarm(pos, [], settings, fresh, 1_000_000), true)

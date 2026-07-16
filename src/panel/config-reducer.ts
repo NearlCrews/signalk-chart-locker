@@ -20,6 +20,7 @@ export type ConfigAction =
   | { type: 'setCacheCapGiB', giB: number }
   | { type: 'setRegionsBudgetGiB', giB: number }
   | { type: 'setChartsPath', path: string }
+  | { type: 'setGeocodingEnabled', enabled: boolean }
   | { type: 'setImageTag', tag: string }
   | { type: 'setCacheVolumeSource', path: string }
   | { type: 'discard', config: ChartLockerConfig }
@@ -53,6 +54,8 @@ export function configReducer (state: ChartLockerConfig, action: ConfigAction): 
       return setGroupField<'tileCache', keyof TileCacheConfig>(state, 'tileCache', 'regionsBudgetGiB', action.giB)
     case 'setChartsPath':
       return setGroupField<'charts', keyof ChartsConfig>(state, 'charts', 'path', action.path)
+    case 'setGeocodingEnabled':
+      return setGroupField<'advanced', keyof AdvancedConfig>(state, 'advanced', 'geocodingEnabled', action.enabled)
     case 'setImageTag':
       return setGroupField<'advanced', keyof AdvancedConfig>(state, 'advanced', 'imageTag', action.tag)
     case 'setCacheVolumeSource':

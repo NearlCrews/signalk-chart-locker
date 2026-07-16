@@ -1,0 +1,11 @@
+**
+!container/
+!container/Cargo.toml
+!container/Cargo.lock
+!container/.cargo/
+!container/.cargo/**
+!container/tilecache/
+!container/tilecache/**
+!LICENSE-APACHE
+!THIRD_PARTY_NOTICES.md
+!RUST_THIRD_PARTY_LICENSES.md

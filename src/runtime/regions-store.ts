@@ -8,8 +8,9 @@ import { join } from 'node:path'
 import { statSync, watch, type FSWatcher } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import type { LngLatBbox } from 'signalk-chart-sources'
-import { readJsonState, writeJsonState } from './json-state.js'
+import { preserveInvalidJsonState, readJsonState, writeJsonState } from './json-state.js'
 import { nowUnixSecs } from '../shared/time.js'
+import { hasControlCharacter, normalizePrintableText } from '../shared/text.js'
 
 export interface PositionWarmSettings {
   enabled: boolean
@@ -70,14 +71,17 @@ const POSITION_WARM_BUDGET_CAP_BYTES = 64 * 1024 * 1024
 
 /** P, the position-warm reserve, derived from R: a small slice (10% of R, capped at 64 MiB). */
 export function positionWarmBudgetBytes (regionsBudgetBytes: number): number {
+  if (!Number.isFinite(regionsBudgetBytes) || regionsBudgetBytes <= 0) return 0
   return Math.min(Math.floor(regionsBudgetBytes * POSITION_WARM_BUDGET_FRACTION), POSITION_WARM_BUDGET_CAP_BYTES)
 }
 
 const STORE_FILE = 'regions.json'
-const MAX_WARM_ZOOM = 24
+export const MAX_WARM_ZOOM = 24
 const MAX_SOURCE_IDS = 64
 const MAX_SOURCE_ID_LENGTH = 256
-const MAX_REGION_ID_LENGTH = 128
+export const MAX_REGION_ID_LENGTH = 128
+export const MAX_SAVED_REGIONS = 128
+export const MAX_REGION_TOTAL_ENTRIES = MAX_SAVED_REGIONS + 8
 const REGION_STATUSES = new Set<RegionStatus>(['downloading', 'ready', 'capped', 'error', 'needs-redownload'])
 
 function isRecord (value: unknown): value is Record<string, unknown> {
@@ -94,7 +98,8 @@ function validBbox (value: unknown): value is LngLatBbox {
 
 function validSources (value: unknown): value is string[] {
   return Array.isArray(value) && value.length <= MAX_SOURCE_IDS &&
-    value.every((source) => typeof source === 'string' && source.trim() === source && source.length > 0 && source.length <= MAX_SOURCE_ID_LENGTH) &&
+    value.every((source) => typeof source === 'string' && source.trim() === source && source.length > 0 &&
+      source.length <= MAX_SOURCE_ID_LENGTH && !hasControlCharacter(source)) &&
     new Set(value).size === value.length
 }
 
@@ -117,33 +122,41 @@ function normalizePositionWarm (value: unknown): PositionWarmSettings {
   }
 }
 
+function parseRegionState (raw: unknown, ids: Set<string>): SavedRegion | undefined {
+  if (!isRecord(raw)) return undefined
+  const name = normalizePrintableText(raw.name, 120)
+  if (typeof raw.id !== 'string' || raw.id.length === 0 || raw.id.length > MAX_REGION_ID_LENGTH || hasControlCharacter(raw.id) || ids.has(raw.id) ||
+      name === undefined ||
+      !validBbox(raw.bbox) || !validSources(raw.sourceIds) || raw.sourceIds.length === 0 ||
+      typeof raw.minzoom !== 'number' || !Number.isInteger(raw.minzoom) || raw.minzoom < 0 || raw.minzoom > MAX_WARM_ZOOM ||
+      typeof raw.maxzoom !== 'number' || !Number.isInteger(raw.maxzoom) || raw.maxzoom < raw.minzoom || raw.maxzoom > MAX_WARM_ZOOM ||
+      !finiteBetween(raw.createdAt, 0, Number.MAX_SAFE_INTEGER) || !Number.isInteger(raw.createdAt) ||
+      !(raw.lastDownloadedAt === null || (finiteBetween(raw.lastDownloadedAt, 0, Number.MAX_SAFE_INTEGER) && Number.isInteger(raw.lastDownloadedAt))) ||
+      !finiteBetween(raw.bytes, 0, Number.MAX_SAFE_INTEGER) || !Number.isInteger(raw.bytes) ||
+      typeof raw.status !== 'string' || !REGION_STATUSES.has(raw.status as RegionStatus)) return undefined
+  ids.add(raw.id)
+  return {
+    id: raw.id,
+    name,
+    bbox: raw.bbox,
+    sourceIds: [...raw.sourceIds],
+    minzoom: raw.minzoom,
+    maxzoom: raw.maxzoom,
+    createdAt: raw.createdAt,
+    lastDownloadedAt: raw.lastDownloadedAt,
+    bytes: raw.bytes,
+    status: raw.status as RegionStatus
+  }
+}
+
 function normalizeRegions (value: unknown): SavedRegion[] {
   if (!Array.isArray(value)) return []
   const ids = new Set<string>()
   const regions: SavedRegion[] = []
   for (const raw of value) {
-    if (!isRecord(raw) || typeof raw.id !== 'string' || raw.id.length === 0 || raw.id.length > MAX_REGION_ID_LENGTH || ids.has(raw.id) ||
-        typeof raw.name !== 'string' || raw.name.trim().length === 0 || raw.name.trim().length > 120 ||
-        !validBbox(raw.bbox) || !validSources(raw.sourceIds) || raw.sourceIds.length === 0 ||
-        typeof raw.minzoom !== 'number' || !Number.isInteger(raw.minzoom) || raw.minzoom < 0 || raw.minzoom > MAX_WARM_ZOOM ||
-        typeof raw.maxzoom !== 'number' || !Number.isInteger(raw.maxzoom) || raw.maxzoom < raw.minzoom || raw.maxzoom > MAX_WARM_ZOOM ||
-        !finiteBetween(raw.createdAt, 0, Number.MAX_SAFE_INTEGER) || !Number.isInteger(raw.createdAt) ||
-        !(raw.lastDownloadedAt === null || (finiteBetween(raw.lastDownloadedAt, 0, Number.MAX_SAFE_INTEGER) && Number.isInteger(raw.lastDownloadedAt))) ||
-        !finiteBetween(raw.bytes, 0, Number.MAX_SAFE_INTEGER) || !Number.isInteger(raw.bytes) ||
-        typeof raw.status !== 'string' || !REGION_STATUSES.has(raw.status as RegionStatus)) continue
-    ids.add(raw.id)
-    regions.push({
-      id: raw.id,
-      name: raw.name.trim(),
-      bbox: raw.bbox,
-      sourceIds: [...raw.sourceIds],
-      minzoom: raw.minzoom,
-      maxzoom: raw.maxzoom,
-      createdAt: raw.createdAt,
-      lastDownloadedAt: raw.lastDownloadedAt,
-      bytes: raw.bytes,
-      status: raw.status as RegionStatus
-    })
+    if (regions.length >= MAX_SAVED_REGIONS) break
+    const region = parseRegionState(raw, ids)
+    if (region !== undefined) regions.push(region)
   }
   return regions
 }
@@ -152,6 +165,28 @@ function normalizeTtlDays (value: unknown): number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 365
     ? value
     : DEFAULT_REGIONS_STORE.cacheScrollTtlDays
+}
+
+function validPositionWarmState (value: unknown): boolean {
+  if (value === undefined) return true
+  if (!isRecord(value)) return false
+  return (value.enabled === undefined || typeof value.enabled === 'boolean') &&
+    (value.radiusMeters === undefined || finiteBetween(value.radiusMeters, 1, 100_000)) &&
+    (value.moveThresholdMeters === undefined || finiteBetween(value.moveThresholdMeters, 0, 100_000)) &&
+    (value.intervalSecs === undefined || finiteBetween(value.intervalSecs, 60, 86_400)) &&
+    (value.baseZoom === undefined || (typeof value.baseZoom === 'number' && Number.isInteger(value.baseZoom) && value.baseZoom >= 0 && value.baseZoom <= MAX_WARM_ZOOM)) &&
+    (value.sources === undefined || validSources(value.sources))
+}
+
+function hasSemanticCorruption (raw: Record<string, unknown>): boolean {
+  const regions = raw.regions
+  if (regions !== undefined) {
+    if (!Array.isArray(regions) || regions.length > MAX_SAVED_REGIONS) return true
+    const ids = new Set<string>()
+    if (!regions.every((region) => parseRegionState(region, ids) !== undefined)) return true
+  }
+  if (!validPositionWarmState(raw.positionWarm)) return true
+  return raw.cacheScrollTtlDays !== undefined && normalizeTtlDays(raw.cacheScrollTtlDays) !== raw.cacheScrollTtlDays
 }
 
 /** Detect a v2 shape (top-level `bbox` or `sources`), migrate to the regions list, write back, and
@@ -196,15 +231,22 @@ function migrateV2 (raw: Record<string, unknown>, dataDir: string): RegionsStore
 /** Read the persisted store, migrating a v2 box shape to a regions list if needed. Falls back to the
  * default on a missing or corrupt file. */
 export function loadRegionsStore (dataDir: string): RegionsStore {
-  const parsed = readJsonState<Record<string, unknown>>(join(dataDir, STORE_FILE), {})
+  const file = join(dataDir, STORE_FILE)
+  const parsed = readJsonState<Record<string, unknown>>(file, {}, { validate: isRecord })
+  const semanticCorruption = hasSemanticCorruption(parsed)
+  if (semanticCorruption) preserveInvalidJsonState(file)
   if ('bbox' in parsed || 'sources' in parsed) {
     return migrateV2(parsed, dataDir)
   }
-  return {
+  const store = {
     regions: normalizeRegions(parsed['regions']),
     positionWarm: normalizePositionWarm(parsed['positionWarm']),
     cacheScrollTtlDays: normalizeTtlDays(parsed['cacheScrollTtlDays'])
   }
+  // Keep the original beside a normalized replacement, so future mutations cannot erase valid entries
+  // merely because one sibling entry was malformed.
+  if (semanticCorruption) writeJsonState(file, store)
+  return store
 }
 
 /** A cached regions loader with a stop handle for its filesystem watcher. */
@@ -219,16 +261,23 @@ export interface CachedRegionsLoader {
  * fs.watch event converges instead of leaving the cache stale until the next write. */
 const REGIONS_SELF_HEAL_MS = 5000
 
+interface CachedRegionsLoaderOptions {
+  selfHealMs?: number
+  watch?: boolean
+  now?: () => number
+  statIdentity?: () => string
+}
+
 /** A loader that caches the parsed store so the position-warm loop, which calls getStore on every
  * navigation.position delta, does not read and parse the file per fix. An fs.watch on the data directory
  * marks the cache dirty on a write, so getStore does no I/O between writes; a throttled mtime re-stat
  * self-heals a dropped watch event (this project has seen fs.watch drop events on some platforms), and
  * is also the sole mechanism when the watcher cannot be established. Falls back to the store defaults
  * when the file is missing. Call stop() at plugin teardown to close the watcher. */
-export function createCachedRegionsLoader (dataDir: string): CachedRegionsLoader {
+export function createCachedRegionsLoader (dataDir: string, options: CachedRegionsLoaderOptions = {}): CachedRegionsLoader {
   const file = join(dataDir, STORE_FILE)
   let cached: RegionsStore | null = null
-  let cachedMtimeMs = -1
+  let cachedIdentity = '<not-loaded>'
   let dirty = true
   let lastStatMs = Number.NEGATIVE_INFINITY
   let watcher: FSWatcher | null = null
@@ -239,11 +288,12 @@ export function createCachedRegionsLoader (dataDir: string): CachedRegionsLoader
   // Native events are reliable on the Linux deployment target. On other platforms the throttled
   // stat below is the sole invalidation mechanism, avoiding delayed macOS events and a Node 24
   // Windows watcher assertion during teardown.
-  if (process.platform === 'linux') {
+  if (options.watch !== false && process.platform === 'linux') {
     try {
       watcher = watch(dataDir, (_event, filename) => {
         if (filename === null || filename === STORE_FILE) dirty = true
       })
+      watcher.unref()
       // An unhandled watcher error would throw; on error, drop the watcher and rely on the self-heal stat.
       watcher.on('error', () => { if (watcher !== null) { watcher.close(); watcher = null } })
     } catch {
@@ -251,34 +301,35 @@ export function createCachedRegionsLoader (dataDir: string): CachedRegionsLoader
     }
   }
 
-  const reload = (mtimeMs: number): RegionsStore => {
+  const reload = (identity: string): RegionsStore => {
     cached = loadRegionsStore(dataDir)
-    cachedMtimeMs = mtimeMs
+    cachedIdentity = identity
     dirty = false
     return cached
   }
 
-  const statMtime = (): number => {
+  const statIdentity = options.statIdentity ?? ((): string => {
     try {
-      return statSync(file).mtimeMs
+      const info = statSync(file, { bigint: true })
+      return `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}`
     } catch {
-      return -1
+      return '<missing>'
     }
-  }
+  })
 
   return {
     getStore (): RegionsStore {
-      const now = Date.now()
+      const now = (options.now ?? Date.now)()
       if (dirty || cached === null) {
         lastStatMs = now
-        return reload(statMtime())
+        return reload(statIdentity())
       }
       // Self-heal: re-stat at most once per interval so a missed watch event, or a run with no watcher,
       // still converges without doing I/O on every delta.
-      if (now - lastStatMs >= REGIONS_SELF_HEAL_MS) {
+      if (now - lastStatMs >= (options.selfHealMs ?? REGIONS_SELF_HEAL_MS)) {
         lastStatMs = now
-        const mtimeMs = statMtime()
-        if (mtimeMs !== cachedMtimeMs) return reload(mtimeMs)
+        const identity = statIdentity()
+        if (identity !== cachedIdentity) return reload(identity)
       }
       return cached
     },
@@ -308,9 +359,25 @@ export function mutateRegionsStore (dataDir: string, mutate: (store: RegionsStor
   return store
 }
 
+/** Remove unavailable catalog entries from automatic position warming while preserving saved regions. */
+export function reconcilePositionWarmSources (dataDir: string, sourceExists: (id: string) => boolean): string[] {
+  const store = loadRegionsStore(dataDir)
+  const unavailable = store.positionWarm.sources.filter((id) => !sourceExists(id))
+  if (unavailable.length === 0) return []
+  store.positionWarm = {
+    ...store.positionWarm,
+    sources: store.positionWarm.sources.filter(sourceExists)
+  }
+  saveRegionsStore(dataDir, store)
+  return unavailable
+}
+
 /** Append a region to the persisted store and write it back. */
 export function addRegion (dataDir: string, region: SavedRegion): void {
-  mutateRegionsStore(dataDir, (store) => { store.regions.push(region) })
+  mutateRegionsStore(dataDir, (store) => {
+    if (store.regions.length >= MAX_SAVED_REGIONS) throw new RangeError(`saved region limit is ${MAX_SAVED_REGIONS}`)
+    store.regions.push(region)
+  })
 }
 
 /** Patch a region in place by id and write the store back; a no-op when the id is absent. */

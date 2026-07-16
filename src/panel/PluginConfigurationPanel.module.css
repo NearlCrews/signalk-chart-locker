@@ -1,0 +1,60 @@
+.compatibilityMessage {
+  max-width: 48rem;
+  padding: 1rem;
+  border: 1px solid #b42318;
+  border-radius: 0.5rem;
+  color: #7a271a;
+  background: #fef3f2;
+}
+
+.compatibilityMessage h2,
+.compatibilityMessage p {
+  margin-block: 0;
+}
+
+.compatibilityMessage p {
+  margin-block-start: 0.5rem;
+}
+
+.secondaryText {
+  margin: 0;
+  color: var(--snui-color-text-muted);
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+.tableRegion {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  min-width: 34rem;
+  border-collapse: collapse;
+  color: var(--snui-color-text);
+  font-size: 0.875rem;
+}
+
+.table th,
+.table td {
+  padding: var(--snui-space-2);
+  border-block-end: 1px solid var(--snui-color-border);
+  text-align: start;
+}
+
+.table th {
+  font-weight: 700;
+}
+
+.table tbody tr:hover {
+  background: var(--snui-color-interactive-hover);
+}
+
+@media (forced-colors: active) {
+  .compatibilityMessage {
+    border-color: CanvasText;
+    color: CanvasText;
+    background: Canvas;
+  }
+}

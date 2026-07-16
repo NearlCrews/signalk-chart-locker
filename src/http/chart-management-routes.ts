@@ -4,7 +4,7 @@
 
 import type { ServerAPI } from '@signalk/server-api'
 import { type ChartRegistry, chartResource } from '../charts/chart-registry.js'
-import type { ChartOverride, OverrideStore } from '../charts/overrides.js'
+import { readChartOverride, type ChartOverride, type OverrideStore } from '../charts/overrides.js'
 import { ensureApiAdminGate } from '../shared/admin-gate.js'
 
 export interface ManagementRequest {
@@ -22,30 +22,8 @@ export interface ManagementRouter {
   post (path: string, handler: (req: ManagementRequest, res: ManagementResponse) => void | Promise<void>): void
 }
 
-function isRecord (value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
-
 function readOverride (body: unknown): ChartOverride | undefined {
-  if (!isRecord(body)) return undefined
-  const override: ChartOverride = {}
-  let recognized = false
-  if ('name' in body) {
-    if (typeof body.name !== 'string' || body.name.trim().length === 0 || body.name.trim().length > 120) return undefined
-    override.name = body.name.trim()
-    recognized = true
-  }
-  if ('description' in body) {
-    if (typeof body.description !== 'string' || body.description.trim().length > 1000) return undefined
-    override.description = body.description.trim()
-    recognized = true
-  }
-  if ('scale' in body) {
-    if (typeof body.scale !== 'number' || !Number.isFinite(body.scale) || body.scale <= 0 || body.scale > Number.MAX_SAFE_INTEGER) return undefined
-    override.scale = body.scale
-    recognized = true
-  }
-  return recognized ? override : undefined
+  return readChartOverride(body)
 }
 
 /** Mount the chart-management routes behind the admin gate. Returns whether they were mounted, so the
@@ -90,7 +68,15 @@ export function registerChartManagementRoutes (
       res.status(400).json({ error: 'Body must be an object with name, description, or scale.' })
       return
     }
-    overrides.set(req.params.id, override)
+    try {
+      // OverrideStore writes the next snapshot before publishing it in memory, so a failed write leaves
+      // both the live registry naming and the previous durable state unchanged.
+      overrides.set(req.params.id, override)
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined
+      res.status(code === 'ENOSPC' || code === 'EDQUOT' ? 507 : 500).json({ error: 'unable to persist chart override' })
+      return
+    }
     try {
       await onRescan()
       // Return the merged stored override, not just the posted patch, so the caller sees the effective value.

@@ -8,6 +8,7 @@ use bytes::Bytes;
 
 /// Cache-Control served for a cached tile (one day; the strong ETag drives revalidation).
 pub const TILE_CACHE_CONTROL: &str = "public, max-age=86400";
+pub const STALE_TILE_CACHE_CONTROL: &str = "public, max-age=0, must-revalidate";
 
 /// A Content-Type header value, falling back to a generic binary type when the string is not a legal
 /// header value. This fallback is meaningful only for Content-Type; other headers (the ETag) omit
@@ -34,9 +35,20 @@ pub fn tile_http_response(
     body: Bytes,
     if_none_match: Option<&str>,
 ) -> Response {
-    if if_none_match == Some(etag) {
+    if if_none_match.is_some_and(|value| crate::fetcher::etag_matches(value, etag)) {
         let mut h = HeaderMap::new();
         insert_etag(&mut h, etag);
+        h.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(if stale {
+                STALE_TILE_CACHE_CONTROL
+            } else {
+                TILE_CACHE_CONTROL
+            }),
+        );
+        if stale {
+            h.insert("x-tilecache", HeaderValue::from_static("stale"));
+        }
         return (StatusCode::NOT_MODIFIED, h).into_response();
     }
     let mut h = HeaderMap::new();
@@ -44,10 +56,54 @@ pub fn tile_http_response(
     insert_etag(&mut h, etag);
     h.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static(TILE_CACHE_CONTROL),
+        HeaderValue::from_static(if stale {
+            STALE_TILE_CACHE_CONTROL
+        } else {
+            TILE_CACHE_CONTROL
+        }),
     );
     if stale {
         h.insert("x-tilecache", HeaderValue::from_static("stale"));
     }
     (StatusCode::OK, h, body).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_not_modified_keeps_validator_and_revalidation_headers() {
+        let response = tile_http_response(
+            "image/png",
+            "\"current\"",
+            true,
+            Bytes::from_static(b"body"),
+            Some("\"other\", W/\"current\""),
+        );
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(response.headers()[header::ETAG], "\"current\"");
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            STALE_TILE_CACHE_CONTROL,
+        );
+        assert_eq!(response.headers()["x-tilecache"], "stale");
+    }
+
+    #[test]
+    fn fresh_response_uses_the_normal_cache_policy() {
+        let response = tile_http_response(
+            "image/png",
+            "\"current\"",
+            false,
+            Bytes::from_static(b"body"),
+            None,
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            TILE_CACHE_CONTROL
+        );
+        assert!(!response.headers().contains_key("x-tilecache"));
+    }
 }

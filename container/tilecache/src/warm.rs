@@ -6,7 +6,7 @@
 //! below the shared `EGRESS_CONCURRENCY`, so a large warm cannot starve interactive tile reads. The job
 //! registry is in memory, cleared on completion plus a TTL.
 
-use crate::cache::{CachedTile, TileKey, WarmRow};
+use crate::cache::{CachedTile, FreshPinOutcome, PinBudgets, TileKey, WarmRow};
 use crate::fetcher::{acceptable_content_type, fetch_upstream, strong_etag};
 use crate::geom::{tile_count_in_bbox, tiles_iter};
 use crate::source::{ChartSource, UpstreamTemplate};
@@ -20,12 +20,23 @@ pub const WARM_CONCURRENCY: usize = 3;
 /// Reject an absurd projected tile count upfront, defeating an enumeration denial of service.
 pub const WARM_TILE_HARD_CAP: u64 = 2_000_000;
 /// Maximum concurrently RUNNING warm jobs. The admin regions route and the position-warm loop can
-/// both drive /warm, so the cap prevents runaway goroutine pressure even with both active.
-pub const MAX_ACTIVE_WARM_JOBS: usize = 4;
+/// both drive /warm, so the cap prevents runaway task and retained-batch pressure.
+pub const MAX_ACTIVE_WARM_JOBS: usize = 2;
+pub const MAX_WARM_SOURCES: usize = 64;
 /// How long a finished job stays queryable before the registry reaps it.
 pub const WARM_JOB_TTL_SECS: i64 = 3600;
+pub const MAX_RETAINED_WARM_JOBS: usize = 128;
 /// Rows flushed per batched transaction (microSD-friendly; safe under WAL and synchronous = NORMAL).
 const WARM_BATCH: usize = 64;
+/// Bound buffered response bodies independently of row count for memory-constrained hosts. A batch
+/// can exceed this threshold by at most one maximum-size body before it is flushed.
+pub(crate) const WARM_BATCH_BYTES: i64 = 4 * 1024 * 1024;
+pub(crate) const MAX_RETAINED_WARM_BATCH_BYTES: usize =
+    WARM_BATCH_BYTES as usize + crate::state::DEFAULT_MAX_BLOB_BYTES;
+/// Completed fetch results release their warm permit before the driver removes them from its JoinSet,
+/// so account for one maximum-size body per global warm permit in addition to buffered batches.
+pub(crate) const MAX_RETAINED_COMPLETED_WARM_RESULTS_BYTES: usize =
+    WARM_CONCURRENCY * crate::state::DEFAULT_MAX_BLOB_BYTES;
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -47,6 +58,8 @@ pub struct WarmJob {
     pub cancel: Arc<AtomicBool>,
     pub finished_at: Option<i64>,
     pub region_id: Option<String>,
+    pub created_at: i64,
+    pub order: u64,
 }
 
 pub struct WarmRequest {
@@ -67,12 +80,49 @@ pub enum StartError {
     BadZoom(String),
     TooMany(u64),
     TooManyJobs,
+    MultipleStyleSources,
     RegionBusy,
+    BadRegion(String),
+    ShuttingDown,
+}
+
+pub fn valid_region_id(region_id: &str) -> bool {
+    if region_id == crate::state::POSITION_WARM_REGION_ID {
+        return true;
+    }
+    let bytes = region_id.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 128
+        && region_id != crate::state::BASEMAP_ASSETS_REGION_ID
+        && !region_id.starts_with(crate::cache::STAGING_REGION_PREFIX)
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// Validate the generated warm job identifier before using caller input as an in-memory map key.
+pub fn valid_job_id(job_id: &str) -> bool {
+    let Some(rest) = job_id.strip_prefix("warm-") else {
+        return false;
+    };
+    let Some((boot_id, order)) = rest.rsplit_once('-') else {
+        return false;
+    };
+    boot_id.len() == 32
+        && boot_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && !order.is_empty()
+        && order.len() <= 20
+        && order.bytes().all(|byte| byte.is_ascii_digit())
+        && order.parse::<u64>().is_ok()
 }
 
 /// Validate the request, create the job, spawn the warm driver, and return the job id.
 pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, StartError> {
-    if req.sources.is_empty() {
+    let _config_guard = state.config_update.lock().await;
+    if state.shutdown_requested.load(Ordering::Acquire) {
+        return Err(StartError::ShuttingDown);
+    }
+    if req.sources.is_empty() || req.sources.len() > MAX_WARM_SOURCES {
         return Err(StartError::UnknownSource("no sources".into()));
     }
     if req.minzoom > req.maxzoom {
@@ -101,13 +151,31 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
     }) {
         return Err(StartError::BadBbox(format!("invalid bbox set {bboxes:?}")));
     }
-    // Every source must be in the allowlist; a style source has no tile path.
+    if req
+        .region_id
+        .as_deref()
+        .is_some_and(|id| !valid_region_id(id))
+    {
+        return Err(StartError::BadRegion(
+            "invalid or reserved region id".into(),
+        ));
+    }
+    // Every distinct source must be in the allowlist; duplicate ids do not multiply work.
     let mut total = 0u64;
+    let mut style_sources = 0usize;
+    let mut requested_ids = std::collections::HashSet::new();
     {
         let map = state.sources.read().await;
         for s in &req.sources {
+            if !requested_ids.insert(s.id.clone()) {
+                continue;
+            }
             match map.get(&s.id) {
                 Some(known) if matches!(known.upstream, UpstreamTemplate::Style { .. }) => {
+                    style_sources += 1;
+                    if style_sources > 1 {
+                        return Err(StartError::MultipleStyleSources);
+                    }
                     // The style is not fetched yet, so count one sub-source's worth at the registry
                     // vector maxzoom for the hard-cap gate; run() enumerates each learned sub-source.
                     let clamp = known
@@ -147,7 +215,8 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
         }
     }
 
-    let id = format!("warm-{}", state.warm_seq.fetch_add(1, Ordering::Relaxed));
+    let order = state.warm_seq.fetch_add(1, Ordering::Relaxed);
+    let id = format!("warm-{}-{order}", state.boot_id);
     let cancel = Arc::new(AtomicBool::new(false));
     let job = Arc::new(tokio::sync::Mutex::new(WarmJob {
         total,
@@ -159,6 +228,8 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
         cancel: cancel.clone(),
         finished_at: None,
         region_id: req.region_id.clone(),
+        created_at: now_secs(),
+        order,
     }));
     {
         let mut jobs = state.warm_jobs.write().await;
@@ -185,12 +256,15 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
     // Resolve the allowlisted source definitions (not the client-sent ones) so the warm uses the trusted config.
     let resolved: Vec<ChartSource> = {
         let map = state.sources.read().await;
+        let mut seen = std::collections::HashSet::new();
         req.sources
             .iter()
+            .filter(|source| seen.insert(source.id.clone()))
             .filter_map(|s| map.get(&s.id).cloned())
             .collect()
     };
     let st = state.clone();
+    state.warm_task_count.fetch_add(1, Ordering::AcqRel);
     tokio::spawn(run(
         st,
         job,
@@ -201,6 +275,7 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
             zmax: req.maxzoom,
             region_id: req.region_id,
             job_id: id.clone(),
+            config_generation: state.config_generation.load(Ordering::Acquire),
         },
     ));
     Ok(id)
@@ -216,6 +291,44 @@ pub async fn warm_snapshot(state: &AppState, job_id: &str) -> Option<serde_json:
     }))
 }
 
+/// Return the newest retained warm for a region, including its id, so a client can recover after the
+/// POST was accepted but its response was lost.
+pub async fn warm_snapshot_for_region(
+    state: &AppState,
+    region_id: &str,
+) -> Option<serde_json::Value> {
+    let jobs: Vec<(String, Arc<tokio::sync::Mutex<WarmJob>>)> = state
+        .warm_jobs
+        .read()
+        .await
+        .iter()
+        .map(|(id, job)| (id.clone(), job.clone()))
+        .collect();
+    let mut newest: Option<(String, u64, serde_json::Value)> = None;
+    for (job_id, job) in jobs {
+        let job = job.lock().await;
+        if job.region_id.as_deref() != Some(region_id) {
+            continue;
+        }
+        let snapshot = serde_json::json!({
+            "jobId": job_id.clone(),
+            "total": job.total,
+            "done": job.done,
+            "skipped": job.skipped,
+            "bytes": job.bytes,
+            "errors": job.errors,
+            "state": job.state,
+        });
+        if newest
+            .as_ref()
+            .is_none_or(|(_, order, _)| job.order > *order)
+        {
+            newest = Some((job_id, job.order, snapshot));
+        }
+    }
+    newest.map(|(_, _, snapshot)| snapshot)
+}
+
 /// Request cooperative cancellation; returns false when the id is unknown.
 pub async fn cancel_warm(state: &AppState, job_id: &str) -> bool {
     match state.warm_jobs.read().await.get(job_id) {
@@ -225,6 +338,30 @@ pub async fn cancel_warm(state: &AppState, job_id: &str) -> bool {
         }
         None => false,
     }
+}
+
+pub async fn cancel_all_warms(state: &AppState) {
+    state.shutdown_requested.store(true, Ordering::Release);
+    let jobs: Vec<_> = state.warm_jobs.read().await.values().cloned().collect();
+    for job in jobs {
+        job.lock().await.cancel.store(true, Ordering::Release);
+    }
+}
+
+pub async fn wait_for_warms(state: &AppState, timeout: std::time::Duration) -> bool {
+    tokio::time::timeout(timeout, async {
+        loop {
+            let notified = state.warm_task_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if state.warm_task_count.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .is_ok()
 }
 
 /// Cancel every running warm for a logical region and wait until its driver has stopped writing.
@@ -255,7 +392,7 @@ async fn acquire_warm_permit(
     cancel: &AtomicBool,
 ) -> Option<tokio::sync::OwnedSemaphorePermit> {
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Acquire) || state.shutdown_requested.load(Ordering::Acquire) {
             return None;
         }
         match tokio::time::timeout(
@@ -281,13 +418,32 @@ fn reap(jobs: &mut std::collections::HashMap<String, Arc<tokio::sync::Mutex<Warm
             .unwrap_or(true),
         Err(_) => true,
     });
+    if jobs.len() <= MAX_RETAINED_WARM_JOBS {
+        return;
+    }
+    let mut finished: Vec<(String, u64)> = jobs
+        .iter()
+        .filter_map(|(id, job)| {
+            let guard = job.try_lock().ok()?;
+            guard.finished_at.map(|_| (id.clone(), guard.order))
+        })
+        .collect();
+    finished.sort_by_key(|(_, order)| *order);
+    for (id, _) in finished
+        .into_iter()
+        .take(jobs.len().saturating_sub(MAX_RETAINED_WARM_JOBS))
+    {
+        jobs.remove(&id);
+    }
 }
 
 enum Fetched {
     Tile(WarmRow),
     Negative(WarmRow),
     Skipped,
+    Capped,
     Error,
+    Cancelled,
 }
 
 struct RunSpec {
@@ -297,6 +453,16 @@ struct RunSpec {
     zmax: u32,
     region_id: Option<String>,
     job_id: String,
+    config_generation: u64,
+}
+
+struct WarmTaskGuard(AppState);
+
+impl Drop for WarmTaskGuard {
+    fn drop(&mut self) {
+        self.0.warm_task_count.fetch_sub(1, Ordering::AcqRel);
+        self.0.warm_task_notify.notify_waiters();
+    }
 }
 
 #[derive(Clone)]
@@ -315,7 +481,7 @@ fn effective_budget(st: &AppState, region_id: Option<&str>) -> i64 {
     let r = st.live_regions_budget.load(Ordering::Relaxed);
     let p = st.live_position_warm_budget.load(Ordering::Relaxed);
     let raw = if region_id == Some(crate::state::POSITION_WARM_REGION_ID) {
-        r
+        p
     } else {
         r - p
     };
@@ -328,26 +494,25 @@ fn replacement_budget(st: &AppState, region_id: Option<&str>, credit: i64) -> i6
         .min(st.live_cap_bytes.load(Ordering::Relaxed).max(0))
 }
 
-// Expand a style source into one synthetic XYZ sub-source per learned in-style source, keyed
-// style:{source}:{name} so the warm writes the exact key the vector-tile serve route reads. Each
-// sub-source is clamped to the minimum of the registry vector_maxzoom and the learned source maxzoom,
-// so the enumeration never requests a tile above what the upstream serves. A non-style source passes
-// through unchanged.
-async fn expand_warm_sources(st: &AppState, sources: Vec<ChartSource>) -> (Vec<ChartSource>, u64) {
+// Expand a style source into one synthetic XYZ sub-source per learned in-style source. The cache key
+// includes the configuration generation so a warm writes the exact key the vector-tile serve route
+// reads without allowing old style assets to bleed into a new configuration. Each sub-source is
+// clamped to the minimum of the registry vector_maxzoom and the learned source maxzoom, so the
+// enumeration never requests a tile above what the upstream serves. A non-style source passes through
+// unchanged.
+async fn expand_warm_sources(
+    st: &AppState,
+    sources: Vec<ChartSource>,
+) -> Result<Vec<ChartSource>, ()> {
     let mut out = Vec::new();
-    let mut failed = 0u64;
     for source in sources {
         if !matches!(source.upstream, UpstreamTemplate::Style { .. }) {
             out.push(source);
             continue;
         }
         if !crate::style::ensure_style_learned(st, &source.id).await {
-            eprintln!(
-                "tilecache: warm: style source {} failed to learn; its basemap tiles are omitted from this region",
-                source.id
-            );
-            failed += 1;
-            continue;
+            eprintln!("event=warm_style_learn_failed source={}", source.id);
+            return Err(());
         }
         let learned = { st.style_state.read().await.get(&source.id).cloned() };
         let Some(learned) = learned else {
@@ -355,9 +520,11 @@ async fn expand_warm_sources(st: &AppState, sources: Vec<ChartSource>) -> (Vec<C
                 "tilecache: warm: style source {} learned but has no state; its basemap tiles are omitted",
                 source.id
             );
-            failed += 1;
-            continue;
+            return Err(());
         };
+        if learned.source_tiles.is_empty() {
+            return Err(());
+        }
         let registry_max = source.vector_maxzoom.unwrap_or(source.maxzoom);
         for (name, templates) in &learned.source_tiles {
             let Some(template) = templates.first() else {
@@ -369,7 +536,7 @@ async fn expand_warm_sources(st: &AppState, sources: Vec<ChartSource>) -> (Vec<C
                 .copied()
                 .unwrap_or(registry_max);
             out.push(ChartSource {
-                id: format!("style:{}:{}", source.id, name),
+                id: crate::style::vector_cache_source_at(&source.id, name, learned.generation),
                 title: source.title.clone(),
                 upstream: UpstreamTemplate::Xyz {
                     url_template: template.clone(),
@@ -384,7 +551,11 @@ async fn expand_warm_sources(st: &AppState, sources: Vec<ChartSource>) -> (Vec<C
             });
         }
     }
-    (out, failed)
+    if out.is_empty() {
+        Err(())
+    } else {
+        Ok(out)
+    }
 }
 
 // Glyph codepoint ranges to warm: U+0000 through U+2FFF in 256-wide blocks (48 ranges), enough for
@@ -402,24 +573,37 @@ impl Drop for AssetsFlag<'_> {
 
 // Flush a batch of assets pinned under the given region, additive (no delete_region). The assets warm
 // does not touch the region job, so this calls put_many_pinned directly. A capped result is logged.
-async fn flush_pinned(st: &AppState, batch: &mut Vec<WarmRow>, region: &str) {
+async fn flush_pinned(st: &AppState, batch: &mut Vec<WarmRow>, region: &str, budget: i64) -> bool {
     let now = now_secs();
-    let budget = effective_budget(st, Some(region));
     let cap = st.live_cap_bytes.load(Ordering::Relaxed);
     // A capped outcome (the assets did not all fit under the budget) is dropped here; the next basemap
     // warm completes the set cache-first. Runs on the blocking pool so the batched write and its eviction
     // scan do not stall the reactor.
     let cache = st.cache.clone();
     let rows = std::mem::take(batch);
+    let rows_len = rows.len();
     let region_owned = region.to_string();
     match tokio::task::spawn_blocking(move || {
-        let result = cache.put_many_pinned(&rows, budget, cap, Some(&region_owned), now);
-        crate::fetcher::log_cache_err(&cache, "cache_write_failed", result);
+        cache.put_many_pinned(&rows, budget, cap, Some(&region_owned), now)
     })
     .await
     {
-        Ok(()) => {}
-        Err(e) => eprintln!("event=cache_task_failed operation=assets_flush error={e}"),
+        Ok(Ok(outcome)) if !outcome.capped && outcome.stored == rows_len => true,
+        Ok(Ok(outcome)) => {
+            eprintln!(
+                "event=basemap_assets_capped stored={} requested={} capped={}",
+                outcome.stored, rows_len, outcome.capped
+            );
+            false
+        }
+        Ok(Err(error)) => {
+            eprintln!("event=cache_write_failed operation=assets_flush error={error}");
+            false
+        }
+        Err(e) => {
+            eprintln!("event=cache_task_failed operation=assets_flush error={e}");
+            false
+        }
     }
 }
 
@@ -428,73 +612,132 @@ async fn flush_pinned(st: &AppState, batch: &mut Vec<WarmRow>, region: &str) {
 // WarmRow with the synthetic key. Builds the WarmRow directly rather than through warm_one because the
 // sprite JSON is rejected by the tile content-type gate. The caller holds the warm-semaphore permit for
 // this task (like warm_one), so this does not take one.
+struct WarmAssetSpec<'a> {
+    cache_source: &'a str,
+    x: u32,
+    url: &'a str,
+    kind: crate::style::StyleAssetKind,
+    allowed: &'a [String],
+    region: &'a str,
+}
+
 async fn warm_one_asset(
     st: &AppState,
-    cache_source: &str,
-    x: u32,
-    url: &str,
-    allowed: &[String],
-    region: &str,
-) -> Option<WarmRow> {
+    spec: WarmAssetSpec<'_>,
+    cancel: Arc<AtomicBool>,
+) -> Result<Option<WarmRow>, ()> {
+    let WarmAssetSpec {
+        cache_source,
+        x,
+        url,
+        kind,
+        allowed,
+        region,
+    } = spec;
+    if cancel.load(Ordering::Acquire) || st.shutdown_requested.load(Ordering::Acquire) {
+        return Err(());
+    }
     let now = now_secs();
     // Skip-but-pin a fresh cached asset under one lock, on the blocking pool so the warm's SQLite does not
     // stall the reactor.
-    let cache = st.cache.clone();
-    let cache_source_owned = cache_source.to_string();
-    let region_owned = region.to_string();
-    let fresh_secs = st.knobs.fresh_secs;
-    let neg_ttl = st.knobs.negative_ttl_secs;
-    let budget = effective_budget(st, Some(region));
-    let pinned = tokio::task::spawn_blocking(move || {
-        cache.pin_if_fresh(
-            TileKey::new(&cache_source_owned, 0, x, 0),
-            now,
-            fresh_secs,
-            neg_ttl,
-            budget,
-            Some(&region_owned),
-        )
-    })
-    .await;
-    match pinned {
-        Ok(Ok(true)) => return None,
-        Ok(Ok(false)) => {}
-        Ok(Err(e)) => eprintln!("tilecache: assets pin_if_fresh failed: {e}"),
-        Err(e) => eprintln!("tilecache: assets pin_if_fresh task failed: {e}"),
+    let cached_asset_is_safe = match st.cache_get(cache_source, 0, x, 0).await {
+        Ok(Some(tile)) if tile.status == 200 => crate::style::valid_style_asset(
+            kind,
+            &tile.content_type,
+            tile.blob.as_deref().unwrap_or_default(),
+        ),
+        Ok(_) => true,
+        Err(_) => false,
+    };
+    if cached_asset_is_safe {
+        let cache = st.cache.clone();
+        let cache_source_owned = cache_source.to_string();
+        let region_owned = region.to_string();
+        let fresh_secs = st.knobs.fresh_secs;
+        let neg_ttl = st.knobs.negative_ttl_secs;
+        let budget = effective_budget(st, Some(region));
+        let st_cap = st.live_cap_bytes.load(Ordering::Relaxed);
+        let pinned = tokio::task::spawn_blocking(move || {
+            cache.pin_if_fresh_capped(
+                TileKey::new(&cache_source_owned, 0, x, 0),
+                now,
+                fresh_secs,
+                neg_ttl,
+                PinBudgets {
+                    category_bytes: budget,
+                    physical_bytes: st_cap,
+                },
+                Some(&region_owned),
+            )
+        })
+        .await;
+        match pinned {
+            Ok(Ok(FreshPinOutcome::Pinned)) => return Ok(None),
+            Ok(Ok(FreshPinOutcome::MissingOrStale)) => {}
+            Ok(Ok(FreshPinOutcome::Capped)) => return Err(()),
+            Ok(Err(e)) => {
+                eprintln!("tilecache: assets pin_if_fresh failed: {e}");
+                return Err(());
+            }
+            Err(e) => {
+                eprintln!("tilecache: assets pin_if_fresh task failed: {e}");
+                return Err(());
+            }
+        }
     }
-    if !crate::style::host_allowed(url, allowed) {
-        return None;
+    if !crate::style::style_url_allowed(url, allowed, st.knobs.allow_private_egress) {
+        return Err(());
     }
     // A missing asset (404 or 204) is not pinned: a pinned negative is never evicted, so it would
     // permanently mask a glyph range or sprite variant the upstream later begins serving. Leaving it
     // uncached lets the next basemap warm and the live route refetch it, so only a 200 is stored.
-    match crate::fetcher::fetch_upstream(st, cache_source, url, None).await {
-        Ok((200, f)) => Some(WarmRow {
-            source: cache_source.to_string(),
-            z: 0,
-            x,
-            y: 0,
-            tile: CachedTile {
-                content_type: f.content_type,
-                strong_etag: crate::fetcher::strong_etag(&f.body),
-                upstream_validator: None,
-                status: 200,
-                fetched_at: now,
-                last_access: now,
-                bytes: f.body.len() as i64,
-                blob: Some(f.body),
-            },
-        }),
+    let fetch = crate::fetcher::fetch_upstream(st, cache_source, url, None);
+    tokio::pin!(fetch);
+    let fetched = loop {
+        tokio::select! {
+            result = &mut fetch => break Some(result),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                if cancel.load(Ordering::Acquire) || st.shutdown_requested.load(Ordering::Acquire) {
+                    break None;
+                }
+            }
+        }
+    };
+    match fetched {
+        None => Err(()),
+        Some(Ok((200, f))) => {
+            if !crate::style::valid_style_asset(kind, &f.content_type, &f.body) {
+                eprintln!("tilecache: warm asset {url} returned an unsafe body; skipped");
+                return Err(());
+            }
+            let fetched_at = now_secs();
+            Ok(Some(WarmRow {
+                source: cache_source.to_string(),
+                z: 0,
+                x,
+                y: 0,
+                tile: CachedTile {
+                    content_type: f.content_type,
+                    strong_etag: crate::fetcher::strong_etag(&f.body),
+                    upstream_validator: f.validator,
+                    status: 200,
+                    fetched_at,
+                    last_access: fetched_at,
+                    bytes: f.body.len() as i64,
+                    blob: Some(f.body),
+                },
+            }))
+        }
         // A 404 or 204 is an expected sparse-coverage miss (left uncached above); anything else is a
         // fetch failure worth a log line, matching the other warm fetch paths in this file.
-        Ok((404, _)) | Ok((204, _)) => None,
-        Ok((status, _)) => {
+        Some(Ok((404, _))) | Some(Ok((204, _))) => Ok(None),
+        Some(Ok((status, _))) => {
             eprintln!("tilecache: warm asset {url} returned status {status}; skipped");
-            None
+            Err(())
         }
-        Err(_) => {
+        Some(Err(_)) => {
             eprintln!("tilecache: warm asset {url} fetch failed (offline or blocked); skipped");
-            None
+            Err(())
         }
     }
 }
@@ -503,22 +746,44 @@ async fn warm_one_asset(
 // __basemap_assets__. Single-flight via the AppState flag (reset on every exit by the RAII guard).
 // Each asset is skipped when already fresh-pinned, so this is idempotent and recovers a partial set.
 // It never touches the region job's counters and bounds its fan-out through the warm semaphore.
-async fn warm_basemap_assets(st: &AppState, style_source: &str) {
-    if st
-        .assets_warming
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return; // another basemap warm is already fetching the set
+async fn stage_basemap_assets(
+    st: &AppState,
+    style_source: &str,
+    job_id: &str,
+    cancel: Arc<AtomicBool>,
+) -> Result<String, ()> {
+    loop {
+        if st
+            .assets_warming
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            break;
+        }
+        if cancel.load(Ordering::Acquire) || st.shutdown_requested.load(Ordering::Acquire) {
+            return Err(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     let _flag = AssetsFlag(&st.assets_warming);
+    if cancel.load(Ordering::Acquire) || st.shutdown_requested.load(Ordering::Acquire) {
+        return Err(());
+    }
 
-    let region = crate::state::BASEMAP_ASSETS_REGION_ID;
+    let target_region = crate::state::BASEMAP_ASSETS_REGION_ID;
+    let region = format!("{}assets-{job_id}", crate::cache::STAGING_REGION_PREFIX);
+    let replacement_credit = {
+        let cache = st.cache.clone();
+        tokio::task::spawn_blocking(move || cache.region_bytes(target_region).unwrap_or(0))
+            .await
+            .unwrap_or(0)
+    };
+    let budget = replacement_budget(st, Some(target_region), replacement_credit);
     // Snapshot the learned templates and the allowed hosts, then drop the read guards before fetching.
-    let (glyph_template, fontstacks, sprite_base, allowed) = {
+    let (glyph_template, fontstacks, sprite_base, allowed, generation) = {
         let ss = st.style_state.read().await;
         let Some(s) = ss.get(style_source) else {
-            return;
+            return Err(());
         };
         let allowed = match st
             .sources
@@ -528,39 +793,54 @@ async fn warm_basemap_assets(st: &AppState, style_source: &str) {
             .map(|c| c.upstream.clone())
         {
             Some(UpstreamTemplate::Style { allowed_hosts, .. }) => allowed_hosts,
-            _ => return,
+            _ => return Err(()),
         };
         (
             s.glyphs.clone(),
             s.fontstacks.clone(),
             s.sprite_base.clone(),
             allowed,
+            s.generation,
         )
     };
 
     // Build the full asset job list (each glyph range per fontstack, plus the sprite variants) as
-    // (cache_source, synthetic x, upstream url) triples. The cache_source is shared through an Arc so a
+    // (cache_source, synthetic x, upstream URL, asset kind) tuples. The cache_source is shared through
+    // an Arc so a
     // fontstack's 48 ranges (and the 4 sprite variants) reuse one allocation rather than cloning the
     // String per job.
-    let mut jobs: Vec<(Arc<str>, u32, String)> = Vec::new();
+    let mut jobs: Vec<(Arc<str>, u32, String, crate::style::StyleAssetKind)> = Vec::new();
     if let Some(template) = glyph_template {
         for fontstack in &fontstacks {
-            let cache_source: Arc<str> =
-                Arc::from(crate::style::glyph_cache_source(style_source, fontstack));
-            let encoded = crate::style::encode_fontstack(fontstack);
+            let cache_source: Arc<str> = Arc::from(crate::style::glyph_cache_source_at(
+                style_source,
+                fontstack,
+                generation,
+            ));
             for range_start in (0..GLYPH_RANGE_END).step_by(GLYPH_RANGE_STEP as usize) {
                 let range = format!("{range_start}-{}.pbf", range_start + GLYPH_RANGE_STEP - 1);
-                let url = template
-                    .replace("{fontstack}", &encoded)
-                    .replace("{range}.pbf", &range);
-                jobs.push((cache_source.clone(), range_start, url));
+                let url = crate::style::expand_glyph_url(&template, fontstack, &range);
+                jobs.push((
+                    cache_source.clone(),
+                    range_start,
+                    url,
+                    crate::style::StyleAssetKind::Glyph,
+                ));
             }
         }
     }
     if let Some(base) = sprite_base {
-        let cache_source: Arc<str> = Arc::from(crate::style::sprite_cache_source(style_source));
+        let cache_source: Arc<str> = Arc::from(crate::style::sprite_cache_source_at(
+            style_source,
+            generation,
+        ));
         for (idx, suffix) in crate::style::SPRITE_VARIANTS {
-            jobs.push((cache_source.clone(), idx, format!("{base}{suffix}")));
+            let kind = if suffix.ends_with(".json") {
+                crate::style::StyleAssetKind::SpriteJson
+            } else {
+                crate::style::StyleAssetKind::SpritePng
+            };
+            jobs.push((cache_source.clone(), idx, format!("{base}{suffix}"), kind));
         }
     }
 
@@ -568,43 +848,97 @@ async fn warm_basemap_assets(st: &AppState, style_source: &str) {
     // uses), collecting the fetched rows into batches that flush at WARM_BATCH. Serial before, so a
     // fontstack's 48 glyph ranges each blocked on the prior fetch.
     let allowed = Arc::new(allowed);
-    let region_arc: Arc<str> = Arc::from(region);
+    let region_arc: Arc<str> = Arc::from(region.as_str());
     let mut batch: Vec<WarmRow> = Vec::with_capacity(WARM_BATCH);
-    let mut set: tokio::task::JoinSet<Option<WarmRow>> = tokio::task::JoinSet::new();
-    for (cache_source, x, url) in jobs {
-        let permit = match st.warm_semaphore.clone().acquire_owned().await {
-            Ok(p) => p,
-            Err(_) => break,
+    let mut set: tokio::task::JoinSet<Result<Option<WarmRow>, ()>> = tokio::task::JoinSet::new();
+    let mut success = true;
+    for (cache_source, x, url, kind) in jobs {
+        let permit = match acquire_warm_permit(st, &cancel).await {
+            Some(permit) => permit,
+            None => {
+                success = false;
+                break;
+            }
         };
         let st2 = st.clone();
         let allowed2 = allowed.clone();
         let region2 = region_arc.clone();
+        let task_cancel = cancel.clone();
         set.spawn(async move {
             let _permit = permit;
-            warm_one_asset(&st2, &cache_source, x, &url, &allowed2, &region2).await
+            warm_one_asset(
+                &st2,
+                WarmAssetSpec {
+                    cache_source: &cache_source,
+                    x,
+                    url: &url,
+                    kind,
+                    allowed: &allowed2,
+                    region: &region2,
+                },
+                task_cancel,
+            )
+            .await
         });
         while let Some(done) = set.try_join_next() {
-            if let Ok(Some(row)) = done {
-                push_and_maybe_flush(st, &mut batch, region, row).await;
+            match done {
+                Ok(Ok(Some(row))) => {
+                    success &= push_and_maybe_flush(st, &mut batch, &region, budget, row).await;
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(())) | Err(_) => {
+                    success = false;
+                    break;
+                }
             }
+        }
+        if !success {
+            break;
         }
     }
     while let Some(done) = set.join_next().await {
-        if let Ok(Some(row)) = done {
-            push_and_maybe_flush(st, &mut batch, region, row).await;
+        match done {
+            Ok(Ok(Some(row))) => {
+                success &= push_and_maybe_flush(st, &mut batch, &region, budget, row).await;
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(())) | Err(_) => success = false,
         }
     }
-    if !batch.is_empty() {
-        flush_pinned(st, &mut batch, region).await;
+    if cancel.load(Ordering::Acquire) || st.shutdown_requested.load(Ordering::Acquire) {
+        success = false;
     }
+    if success && !batch.is_empty() {
+        success &= flush_pinned(st, &mut batch, &region, budget).await;
+    }
+    if !success {
+        let cache = st.cache.clone();
+        let staging = region.clone();
+        let _ = tokio::task::spawn_blocking(move || cache.delete_region(&staging)).await;
+        return Err(());
+    }
+    Ok(region)
 }
 
-// Push a fetched asset row into the batch, flushing the batch pinned when it reaches WARM_BATCH. Shared
-// by the two JoinSet drain loops in warm_basemap_assets so the push-and-flush step lives in one place.
-async fn push_and_maybe_flush(st: &AppState, batch: &mut Vec<WarmRow>, region: &str, row: WarmRow) {
+fn warm_batch_should_flush(batch: &[WarmRow]) -> bool {
+    batch.len() >= WARM_BATCH
+        || batch.iter().map(|row| row.tile.bytes.max(0)).sum::<i64>() >= WARM_BATCH_BYTES
+}
+
+// Push a fetched asset row into the batch, flushing the batch when it reaches either the row or byte
+// bound. Shared by the two JoinSet drain loops so the push-and-flush step lives in one place.
+async fn push_and_maybe_flush(
+    st: &AppState,
+    batch: &mut Vec<WarmRow>,
+    region: &str,
+    budget: i64,
+    row: WarmRow,
+) -> bool {
     batch.push(row);
-    if batch.len() >= WARM_BATCH {
-        flush_pinned(st, batch, region).await;
+    if warm_batch_should_flush(batch) {
+        flush_pinned(st, batch, region, budget).await
+    } else {
+        true
     }
 }
 
@@ -617,6 +951,7 @@ async fn warm_one(
     x: u32,
     y: u32,
     region: &WarmRegionContext,
+    cancel: Arc<AtomicBool>,
 ) -> Fetched {
     let now = now_secs();
     // pin_if_fresh does the freshness check, the budget gate, and the pin under one lock, closing the
@@ -628,63 +963,133 @@ async fn warm_one(
     let fresh_secs = st.knobs.fresh_secs;
     let neg_ttl = st.knobs.negative_ttl_secs;
     let budget = replacement_budget(st, region.target.as_deref(), region.replacement_credit);
+    let st_cap = st.live_cap_bytes.load(Ordering::Relaxed);
     let pinned = tokio::task::spawn_blocking(move || {
-        cache.pin_if_fresh(
+        cache.pin_if_fresh_capped(
             TileKey::new(&source_id, z, x, y),
             now,
             fresh_secs,
             neg_ttl,
-            budget,
+            PinBudgets {
+                category_bytes: budget,
+                physical_bytes: st_cap,
+            },
             region_owned.as_deref(),
         )
     })
     .await;
     match pinned {
-        Ok(Ok(true)) => return Fetched::Skipped,
-        Ok(Ok(false)) => {} // absent, stale, or over budget: fall through to fetch (the flush gate decides)
+        Ok(Ok(FreshPinOutcome::Pinned)) => return Fetched::Skipped,
+        Ok(Ok(FreshPinOutcome::MissingOrStale)) => {}
+        Ok(Ok(FreshPinOutcome::Capped)) => return Fetched::Capped,
         Ok(Err(e)) => eprintln!("tilecache: warm pin_if_fresh failed: {e}"),
         Err(e) => eprintln!("tilecache: warm pin_if_fresh task failed: {e}"),
     }
+    // Share the same per-key flight as live tile and style routes. Re-check after taking it because a
+    // live request or overlapping warm may have stored and pinned the tile while this task waited.
+    let flight_key = crate::fetcher::inflight_key(&source.id, z, x, y);
+    let Some(flight) = st.inflight_lock(&flight_key).await else {
+        return Fetched::Error;
+    };
+    let _flight_guard = flight.lock().await;
+    let cache = st.cache.clone();
+    let source_id = source.id.clone();
+    let region_owned = region.storage.as_deref().map(str::to_string);
+    let fresh_secs = st.knobs.fresh_secs;
+    let neg_ttl = st.knobs.negative_ttl_secs;
+    let budget = replacement_budget(st, region.target.as_deref(), region.replacement_credit);
+    let st_cap = st.live_cap_bytes.load(Ordering::Relaxed);
+    match tokio::task::spawn_blocking(move || {
+        cache.pin_if_fresh_capped(
+            TileKey::new(&source_id, z, x, y),
+            now_secs(),
+            fresh_secs,
+            neg_ttl,
+            PinBudgets {
+                category_bytes: budget,
+                physical_bytes: st_cap,
+            },
+            region_owned.as_deref(),
+        )
+    })
+    .await
+    {
+        Ok(Ok(FreshPinOutcome::Pinned)) => {
+            st.inflight_finish(&flight_key, &flight).await;
+            return Fetched::Skipped;
+        }
+        Ok(Ok(FreshPinOutcome::Capped)) => {
+            st.inflight_finish(&flight_key, &flight).await;
+            return Fetched::Capped;
+        }
+        Ok(Ok(FreshPinOutcome::MissingOrStale)) => {}
+        Ok(Err(error)) => eprintln!("event=warm_pin_recheck_failed error={error}"),
+        Err(error) => eprintln!("event=warm_pin_recheck_task_failed error={error}"),
+    }
     let url = match expand_upstream(source, z, x, y) {
         Ok(u) => u,
-        Err(_) => return Fetched::Error,
+        Err(_) => {
+            st.inflight_finish(&flight_key, &flight).await;
+            return Fetched::Error;
+        }
     };
-    match fetch_upstream(st, &source.id, &url, None).await {
-        Ok((200, f)) => {
-            if f.body.len() > st.knobs.max_blob_bytes || !acceptable_content_type(&f.content_type) {
-                return Fetched::Error;
+    let fetch = fetch_upstream(st, &source.id, &url, None);
+    tokio::pin!(fetch);
+    let fetched = loop {
+        tokio::select! {
+            result = &mut fetch => break Some(result),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                if cancel.load(Ordering::Acquire) || st.shutdown_requested.load(Ordering::Acquire) {
+                    break None;
+                }
             }
-            Fetched::Tile(WarmRow {
+        }
+    };
+    let result = match fetched {
+        None => Fetched::Cancelled,
+        Some(Ok((200, f))) => {
+            if f.body.len() > st.knobs.max_blob_bytes || !acceptable_content_type(&f.content_type) {
+                Fetched::Error
+            } else {
+                let fetched_at = now_secs();
+                Fetched::Tile(WarmRow {
+                    source: source.id.clone(),
+                    z,
+                    x,
+                    y,
+                    tile: CachedTile {
+                        content_type: f.content_type,
+                        strong_etag: strong_etag(&f.body),
+                        upstream_validator: f.validator,
+                        status: 200,
+                        fetched_at,
+                        last_access: fetched_at,
+                        bytes: f.body.len() as i64,
+                        blob: Some(f.body),
+                    },
+                })
+            }
+        }
+        Some(Ok((404, _))) | Some(Ok((204, _))) => {
+            let fetched_at = now_secs();
+            Fetched::Negative(WarmRow {
                 source: source.id.clone(),
                 z,
                 x,
                 y,
-                tile: CachedTile {
-                    content_type: f.content_type,
-                    strong_etag: strong_etag(&f.body),
-                    upstream_validator: f.validator,
-                    status: 200,
-                    fetched_at: now,
-                    last_access: now,
-                    bytes: f.body.len() as i64,
-                    blob: Some(f.body),
-                },
+                tile: CachedTile::negative(404, fetched_at),
             })
         }
-        Ok((404, _)) | Ok((204, _)) => Fetched::Negative(WarmRow {
-            source: source.id.clone(),
-            z,
-            x,
-            y,
-            tile: CachedTile::negative(404, now),
-        }),
-        _ => Fetched::Error,
-    }
+        Some(_) => Fetched::Error,
+    };
+    st.inflight_finish(&flight_key, &flight).await;
+    result
 }
 
 // The warm driver: enumerate lazily, bound in-flight fetches to WARM_CONCURRENCY via owned permits and a
 // JoinSet, drain results into a batch, and flush each batch pinned with the pre-store budget check.
 async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, spec: RunSpec) {
+    let _task_guard = WarmTaskGuard(st.clone());
     let RunSpec {
         sources,
         bboxes,
@@ -692,12 +1097,27 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, spec: RunSpec)
         zmax,
         region_id,
         job_id,
+        config_generation,
     } = spec;
+    if st.config_generation.load(Ordering::Acquire) != config_generation {
+        let mut job = job.lock().await;
+        job.state = WarmState::Error;
+        job.finished_at = Some(now_secs());
+        drop(job);
+        if let Some(region_id) = region_id.as_ref() {
+            st.active_warm_regions.lock().await.remove(region_id);
+        }
+        return;
+    }
     // A replacement downloads into a job-specific staging region. The last known-good target remains
     // pinned until every requested tile has completed and the staging set can be promoted atomically.
-    let staging_region_id = region_id
-        .as_ref()
-        .map(|_| format!("__warm_staging__{job_id}"));
+    let staging_region_id = region_id.as_ref().map(|region| {
+        if region == crate::state::POSITION_WARM_REGION_ID {
+            format!("{}{job_id}", crate::cache::POSITION_STAGING_REGION_PREFIX)
+        } else {
+            format!("{}{job_id}", crate::cache::STAGING_REGION_PREFIX)
+        }
+    });
     let replacement_credit = if let Some(rid) = region_id.clone() {
         let cache = st.cache.clone();
         tokio::task::spawn_blocking(move || cache.region_bytes(&rid).unwrap_or(0))
@@ -717,15 +1137,22 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, spec: RunSpec)
         .iter()
         .find(|s| matches!(s.upstream, UpstreamTemplate::Style { .. }))
         .map(|s| s.id.clone());
-    // Expand any style source into synthetic XYZ sub-sources keyed style:{source}:{name} (learning the
-    // style once), so the enumeration and the pin path below run unchanged for the basemap.
-    let (sources, style_learn_failures) = expand_warm_sources(&st, sources).await;
-    // A style source that failed to learn is dropped from the enumeration, so record it as a job error;
-    // otherwise the region reports Done with done == total and reads as fully cached when its basemap
-    // never warmed and will not render offline.
-    if style_learn_failures > 0 {
-        job.lock().await.errors += style_learn_failures;
-    }
+    // Expand any style source into generation-aware synthetic XYZ sub-sources (learning the style
+    // once), so the enumeration and the pin path below run unchanged for the basemap.
+    let sources = match expand_warm_sources(&st, sources).await {
+        Ok(sources) => sources,
+        Err(()) => {
+            let mut job = job.lock().await;
+            job.errors += 1;
+            job.state = WarmState::Error;
+            job.finished_at = Some(now_secs());
+            drop(job);
+            if let Some(region_id) = region_id.as_ref() {
+                st.active_warm_regions.lock().await.remove(region_id);
+            }
+            return;
+        }
+    };
     // Re-gate on the true enumerated total now that a style source has expanded into one sub-source per
     // in-style source: the pre-spawn hard-cap check in start_warm counts a style as a single sub-source,
     // so a multi-source style could otherwise enumerate past WARM_TILE_HARD_CAP. Also correct the job
@@ -738,7 +1165,7 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, spec: RunSpec)
                 .map(move |bbox| tile_count_in_bbox(s, *bbox, zmin, zmax))
         })
         .sum();
-    if expanded_total > WARM_TILE_HARD_CAP {
+    if expanded_total == 0 || expanded_total > WARM_TILE_HARD_CAP {
         eprintln!("tilecache: warm expanded to {expanded_total} tiles, over the {WARM_TILE_HARD_CAP} hard cap; aborting");
         let mut j = job.lock().await;
         j.total = expanded_total;
@@ -764,6 +1191,10 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, spec: RunSpec)
         let source_arc = Arc::new(source.clone());
         for bbox in &bboxes {
             for (z, x, y) in tiles_iter(source, *bbox, zmin, zmax) {
+                if st.config_generation.load(Ordering::Acquire) != config_generation {
+                    final_state = WarmState::Error;
+                    break 'outer;
+                }
                 if cancel.load(Ordering::Relaxed) {
                     final_state = WarmState::Cancelled;
                     break 'outer;
@@ -782,17 +1213,33 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, spec: RunSpec)
                 let st2 = st.clone();
                 let source2 = source_arc.clone();
                 let region = region_context.clone();
+                let task_cancel = cancel.clone();
                 set.spawn(async move {
                     let _permit = permit;
-                    warm_one(&st2, &source2, z, x, y, &region).await
+                    warm_one(&st2, &source2, z, x, y, &region, task_cancel).await
                 });
                 // Drain any finished tasks without blocking, keeping memory flat.
                 while let Some(done) = set.try_join_next() {
-                    if let Ok(f) = done {
-                        if !accumulate(&st, &job, &mut batch, f, &region_context, &mut final_state)
+                    match done {
+                        Ok(f) => {
+                            if !accumulate(
+                                &st,
+                                &job,
+                                &mut batch,
+                                f,
+                                &region_context,
+                                &mut final_state,
+                            )
                             .await
-                        {
-                            // capped: stop spawning and draining.
+                            {
+                                cancel.store(true, Ordering::Relaxed);
+                                break 'outer;
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("event=warm_task_failed error={error}");
+                            job.lock().await.errors += 1;
+                            final_state = WarmState::Error;
                             cancel.store(true, Ordering::Relaxed);
                             break 'outer;
                         }
@@ -801,14 +1248,10 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, spec: RunSpec)
             }
         }
     }
-    if final_state != WarmState::Done {
-        set.abort_all();
-    }
     // Join remaining in-flight tasks.
     loop {
         if cancel.load(Ordering::Relaxed) && final_state == WarmState::Done {
             final_state = WarmState::Cancelled;
-            set.abort_all();
         }
         let done = match tokio::time::timeout(std::time::Duration::from_millis(50), set.join_next())
             .await
@@ -817,11 +1260,17 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, spec: RunSpec)
             Ok(None) => break,
             Err(_) => continue,
         };
-        if let Ok(f) = done {
-            if final_state == WarmState::Done
-                && !accumulate(&st, &job, &mut batch, f, &region_context, &mut final_state).await
-            {
-                break;
+        match done {
+            Ok(f) if final_state == WarmState::Done => {
+                if !accumulate(&st, &job, &mut batch, f, &region_context, &mut final_state).await {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("event=warm_task_failed error={error}");
+                job.lock().await.errors += 1;
+                final_state = WarmState::Error;
             }
         }
     }
@@ -844,40 +1293,107 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, spec: RunSpec)
     if final_state == WarmState::Done && job.lock().await.errors > 0 {
         final_state = WarmState::Error;
     }
+    if final_state == WarmState::Done {
+        let progress = job.lock().await;
+        if progress.done.saturating_add(progress.skipped) != progress.total {
+            eprintln!(
+                "event=warm_incomplete done={} skipped={} total={}",
+                progress.done, progress.skipped, progress.total
+            );
+            final_state = WarmState::Error;
+        }
+    }
 
-    // Promote only a complete staging set. Every other outcome removes staging pins and leaves the
-    // target region untouched, so a failed re-download cannot destroy working offline coverage.
-    if let (Some(staging), Some(target)) = (staging_region_id.as_deref(), region_id.as_deref()) {
-        if final_state == WarmState::Done {
-            let cache = st.cache.clone();
-            let staging = staging.to_string();
-            let target = target.to_string();
-            let budget = effective_budget(&st, Some(&target));
-            match tokio::task::spawn_blocking(move || {
-                cache.promote_staged_region(&staging, &target, budget)
-            })
-            .await
-            {
-                Ok(Ok(true)) => {}
-                Ok(Ok(false)) => final_state = WarmState::Capped,
-                Ok(Err(e)) => {
-                    eprintln!("event=cache_region_promote_failed error={e}");
-                    final_state = WarmState::Error;
-                }
-                Err(e) => {
-                    eprintln!("event=cache_task_failed operation=region_promote error={e}");
-                    final_state = WarmState::Error;
+    // Stage required assets only after every tile batch has succeeded. Their target and the saved-region
+    // target are promoted in one SQLite transaction so neither last-known-good set can advance alone.
+    let mut asset_staging: Option<String> = None;
+    if final_state == WarmState::Done
+        && st.config_generation.load(Ordering::Acquire) != config_generation
+    {
+        final_state = WarmState::Error;
+    }
+    if final_state == WarmState::Done {
+        if let Some(style_id) = style_source_id.as_deref() {
+            match stage_basemap_assets(&st, style_id, &job_id, cancel.clone()).await {
+                Ok(staging) => asset_staging = Some(staging),
+                Err(()) => {
+                    if cancel.load(Ordering::Acquire) {
+                        final_state = WarmState::Cancelled;
+                    } else {
+                        job.lock().await.errors += 1;
+                        final_state = WarmState::Error;
+                    }
                 }
             }
         }
-        if final_state != WarmState::Done {
+    }
+    let mut replacements = Vec::new();
+    if let (Some(staging), Some(target)) = (staging_region_id.clone(), region_id.clone()) {
+        replacements.push((staging, target));
+    }
+    if let Some(staging) = asset_staging.clone() {
+        replacements.push((staging, crate::state::BASEMAP_ASSETS_REGION_ID.to_string()));
+    }
+    if final_state == WarmState::Done
+        && st.config_generation.load(Ordering::Acquire) != config_generation
+    {
+        final_state = WarmState::Error;
+    }
+    let promotion_config_guard = if final_state == WarmState::Done && !replacements.is_empty() {
+        Some(st.config_update.lock().await)
+    } else {
+        None
+    };
+    if promotion_config_guard.is_some()
+        && st.config_generation.load(Ordering::Acquire) != config_generation
+    {
+        final_state = WarmState::Error;
+    }
+    if final_state == WarmState::Done && !replacements.is_empty() {
+        let cache = st.cache.clone();
+        let replacements_for_task = replacements.clone();
+        let cap = st.live_cap_bytes.load(Ordering::Relaxed).max(0);
+        let regions = st
+            .live_regions_budget
+            .load(Ordering::Relaxed)
+            .min(cap)
+            .max(0);
+        let position = st
+            .live_position_warm_budget
+            .load(Ordering::Relaxed)
+            .min(regions)
+            .max(0);
+        match tokio::task::spawn_blocking(move || {
+            cache.promote_staged_regions(
+                &replacements_for_task,
+                (regions - position).max(0),
+                position,
+                cap,
+            )
+        })
+        .await
+        {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => final_state = WarmState::Capped,
+            Ok(Err(error)) => {
+                eprintln!("event=cache_region_promote_failed error={error}");
+                final_state = WarmState::Error;
+            }
+            Err(error) => {
+                eprintln!("event=cache_task_failed operation=region_promote error={error}");
+                final_state = WarmState::Error;
+            }
+        }
+    }
+    drop(promotion_config_guard);
+    if final_state != WarmState::Done {
+        for (staging, _) in replacements {
             let cache = st.cache.clone();
-            let staging = staging.to_string();
             match tokio::task::spawn_blocking(move || cache.delete_region(&staging)).await {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => eprintln!("event=cache_staging_cleanup_failed error={e}"),
-                Err(e) => {
-                    eprintln!("event=cache_task_failed operation=staging_cleanup error={e}")
+                Ok(Err(error)) => eprintln!("event=cache_staging_cleanup_failed error={error}"),
+                Err(error) => {
+                    eprintln!("event=cache_task_failed operation=staging_cleanup error={error}")
                 }
             }
         }
@@ -889,14 +1405,6 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, spec: RunSpec)
     }
     if let Some(region_id) = region_id.as_ref() {
         st.active_warm_regions.lock().await.remove(region_id);
-    }
-    // Fold the one-time global assets warm in after a successful basemap region warm. The job is
-    // already marked Done so the panel shows the region complete; the assets warm runs on this task
-    // with its own counters and pins under __basemap_assets__.
-    if final_state == WarmState::Done {
-        if let Some(style_id) = style_source_id {
-            warm_basemap_assets(&st, &style_id).await;
-        }
     }
 }
 
@@ -912,7 +1420,7 @@ async fn accumulate(
     match f {
         Fetched::Tile(row) | Fetched::Negative(row) => {
             batch.push(row);
-            if batch.len() >= WARM_BATCH {
+            if warm_batch_should_flush(batch) {
                 return flush(
                     st,
                     job,
@@ -930,9 +1438,17 @@ async fn accumulate(
             job.lock().await.skipped += 1;
             true
         }
+        Fetched::Capped => {
+            *final_state = WarmState::Capped;
+            false
+        }
         Fetched::Error => {
             job.lock().await.errors += 1;
             true
+        }
+        Fetched::Cancelled => {
+            *final_state = WarmState::Cancelled;
+            false
         }
     }
 }
@@ -989,7 +1505,9 @@ mod tests {
     use crate::cache::TileCache;
     use crate::source::{ChartSource, UpstreamTemplate};
     use crate::state::Knobs;
+    use axum::extract::Path;
     use axum::http::header;
+    use axum::response::IntoResponse;
     use axum::{routing::get, Router};
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -1075,22 +1593,168 @@ mod tests {
         st.live_cap_bytes.store(1000, Ordering::Relaxed);
         st.live_regions_budget.store(5000, Ordering::Relaxed);
         st.live_position_warm_budget.store(0, Ordering::Relaxed);
-        // A real region's effective budget clamps to the cap, not to R - P.
+        // A real region's R - P slice clamps to the cap.
         assert_eq!(
             effective_budget(&st, Some("r1")),
             1000,
             "R - P clamps to the cap"
         );
-        // The position-warm pseudo-region clamps to the cap too.
+        // The position-warm pseudo-region receives only P, so P = 0 disables it independently of R.
+        assert_eq!(
+            effective_budget(&st, Some(crate::state::POSITION_WARM_REGION_ID)),
+            0,
+            "position warm uses P, not R",
+        );
+        st.live_position_warm_budget.store(5000, Ordering::Relaxed);
         assert_eq!(
             effective_budget(&st, Some(crate::state::POSITION_WARM_REGION_ID)),
             1000,
-            "R clamps to the cap",
+            "P clamps to the cap",
         );
         // A negative R - P floors at 0.
         st.live_regions_budget.store(100, Ordering::Relaxed);
         st.live_position_warm_budget.store(500, Ordering::Relaxed);
         assert_eq!(effective_budget(&st, Some("r1")), 0, "R - P floors at 0");
+    }
+
+    #[test]
+    fn byte_threshold_flushes_before_a_large_warm_batch_exhausts_memory() {
+        let row = |x, bytes| WarmRow {
+            source: "s".into(),
+            z: 0,
+            x,
+            y: 0,
+            tile: CachedTile {
+                content_type: "image/png".into(),
+                strong_etag: String::new(),
+                upstream_validator: None,
+                status: 200,
+                fetched_at: 0,
+                last_access: 0,
+                bytes,
+                blob: None,
+            },
+        };
+        let mut batch = vec![row(0, WARM_BATCH_BYTES - 1)];
+        assert!(!warm_batch_should_flush(&batch));
+        batch.push(row(1, 1));
+        assert!(
+            warm_batch_should_flush(&batch),
+            "the byte threshold flushes well before the 64-row bound",
+        );
+    }
+
+    #[tokio::test]
+    async fn warm_asset_fetch_rejects_active_types_and_malformed_sprite_json() {
+        let app = Router::new()
+            .route(
+                "/bad-json",
+                get(|| async { ([(header::CONTENT_TYPE, "application/json")], "{bad") }),
+            )
+            .route(
+                "/bad-png",
+                get(|| async { ([(header::CONTENT_TYPE, "image/svg+xml")], "<svg/>") }),
+            )
+            .route(
+                "/bad-glyph",
+                get(|| async { ([(header::CONTENT_TYPE, "text/html")], "<script/>") }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let db = NamedTempFile::new().unwrap();
+        let st = state(&db, dev(), xyz(addr, "img")).await;
+        let allowed = vec!["127.0.0.1".to_string()];
+        for (x, path, kind) in [
+            (0, "bad-json", crate::style::StyleAssetKind::SpriteJson),
+            (1, "bad-png", crate::style::StyleAssetKind::SpritePng),
+            (2, "bad-glyph", crate::style::StyleAssetKind::Glyph),
+        ] {
+            let result = warm_one_asset(
+                &st,
+                WarmAssetSpec {
+                    cache_source: "unsafe-assets",
+                    x,
+                    url: &format!("http://{addr}/{path}"),
+                    kind,
+                    allowed: &allowed,
+                    region: "r1",
+                },
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await;
+            assert!(result.is_err(), "{path}");
+            assert!(
+                st.cache
+                    .get(TileKey::new("unsafe-assets", 0, x, 0))
+                    .unwrap()
+                    .is_none(),
+                "{path} was not cached"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn region_recovery_uses_monotonic_order_for_same_second_jobs() {
+        let db = NamedTempFile::new().unwrap();
+        let st = state(&db, dev(), xyz(stub().await, "img")).await;
+        let make_job = |order| {
+            Arc::new(tokio::sync::Mutex::new(WarmJob {
+                total: order,
+                done: 0,
+                skipped: 0,
+                bytes: 0,
+                errors: 0,
+                state: WarmState::Done,
+                cancel: Arc::new(AtomicBool::new(false)),
+                finished_at: Some(42),
+                region_id: Some("same-region".into()),
+                created_at: 42,
+                order,
+            }))
+        };
+        st.warm_jobs
+            .write()
+            .await
+            .insert("older".into(), make_job(7));
+        st.warm_jobs
+            .write()
+            .await
+            .insert("newer".into(), make_job(8));
+        let snapshot = warm_snapshot_for_region(&st, "same-region").await.unwrap();
+        assert_eq!(snapshot["jobId"], "newer");
+    }
+
+    #[tokio::test]
+    async fn warm_start_waits_for_a_coherent_config_generation() {
+        let address = stub().await;
+        let db = NamedTempFile::new().unwrap();
+        let st = state(&db, dev(), xyz(address, "img")).await;
+        let guard = st.config_update.lock().await;
+        let task_state = st.clone();
+        let source = st.sources.read().await["s"].clone();
+        let start = tokio::spawn(async move {
+            start_warm(
+                &task_state,
+                WarmRequest {
+                    sources: vec![source],
+                    bbox: [-1.0, -1.0, 1.0, 1.0],
+                    additional_bbox: None,
+                    minzoom: 0,
+                    maxzoom: 0,
+                    region_id: Some("serialized".into()),
+                },
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            st.warm_jobs.read().await.is_empty(),
+            "no job captures an in-progress config update",
+        );
+        drop(guard);
+        let job_id = start.await.unwrap().unwrap();
+        assert_eq!(wait_done(&st, &job_id).await["state"], "done");
     }
 
     #[test]
@@ -1589,6 +2253,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn warm_rejects_multiple_style_sources_before_asset_staging() {
+        let addr = style_stub().await;
+        let db = NamedTempFile::new().unwrap();
+        let first = style_source(addr);
+        let st = state(&db, dev(), first.clone()).await;
+        let mut second = first.clone();
+        second.id = "second-basemap".into();
+        st.sources
+            .write()
+            .await
+            .insert(second.id.clone(), second.clone());
+
+        let result = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![first, second],
+                bbox: [-1.0, -1.0, 1.0, 1.0],
+                additional_bbox: None,
+                minzoom: 0,
+                maxzoom: 1,
+                region_id: Some("r1".into()),
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(StartError::MultipleStyleSources)));
+        assert!(st.warm_jobs.read().await.is_empty());
+        assert!(st.active_warm_regions.lock().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn warm_pins_basemap_vector_tiles_under_the_style_cache_key() {
         let addr = style_stub().await;
         let db = NamedTempFile::new().unwrap();
@@ -1614,9 +2308,12 @@ mod tests {
             "at least one vector tile warmed"
         );
         st.cache.evict_to(0).unwrap();
+        let generation = st.style_state.read().await["basemap"].generation;
+        let vector_key =
+            crate::style::vector_cache_source_at("basemap", "openmaptiles", generation);
         assert!(
             st.cache
-                .get(TileKey::new("style:basemap:openmaptiles", 0, 0, 0))
+                .get(TileKey::new(&vector_key, 0, 0, 0))
                 .unwrap()
                 .is_some(),
             "the basemap vector tile is pinned under the style cache key"
@@ -1644,9 +2341,12 @@ mod tests {
         .unwrap();
         let snap = wait_done(&st, &job).await;
         assert_eq!(snap["state"], "done");
+        let generation = st.style_state.read().await["basemap"].generation;
+        let vector_key =
+            crate::style::vector_cache_source_at("basemap", "openmaptiles", generation);
         assert!(
             st.cache
-                .get(TileKey::new("style:basemap:openmaptiles", 15, 0, 0))
+                .get(TileKey::new(&vector_key, 15, 0, 0))
                 .unwrap()
                 .is_none(),
             "no tile above the native maxzoom"
@@ -1667,7 +2367,21 @@ mod tests {
             }))
             .route("/t/{z}/{x}/{y}", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![8u8, 8, 8, 8]) }))
             .route("/fonts/{fontstack}/{range}", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![7u8, 7, 7]) }))
-            .route("/sprites/{name}", get(|| async { ([(header::CONTENT_TYPE, "application/json")], r#"{"ok":1}"#) }));
+            .route(
+                "/sprites/{name}",
+                get(|Path(name): Path<String>| async move {
+                    if name.ends_with(".png") {
+                        ([(header::CONTENT_TYPE, "image/png")], vec![137, 80, 78, 71])
+                            .into_response()
+                    } else {
+                        (
+                            [(header::CONTENT_TYPE, "application/json")],
+                            r#"{"ok":1}"#,
+                        )
+                            .into_response()
+                    }
+                }),
+            );
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -1675,8 +2389,101 @@ mod tests {
         addr
     }
 
-    // The assets warm runs after the region job is marked Done, so wait_done returns before the assets
-    // pin; poll the assets region until it holds bytes.
+    async fn style_stub_with_slow_assets(started: Arc<AtomicBool>) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let a = addr;
+        let glyph_started = started.clone();
+        let app = Router::new()
+            .route(
+                "/style",
+                get(move || async move {
+                    ([(header::CONTENT_TYPE, "application/json")], format!(
+                        r#"{{"version":8,"glyphs":"http://{a}/fonts/{{fontstack}}/{{range}}.pbf","sources":{{"openmaptiles":{{"type":"vector","url":"http://{a}/tiles.json"}}}},"layers":[{{"id":"l","type":"symbol","layout":{{"text-font":["Noto Sans Regular"]}}}}]}}"#))
+                }),
+            )
+            .route(
+                "/tiles.json",
+                get(move || async move {
+                    ([(header::CONTENT_TYPE, "application/json")], format!(r#"{{"tiles":["http://{a}/t/{{z}}/{{x}}/{{y}}.pbf"],"maxzoom":14}}"#))
+                }),
+            )
+            .route(
+                "/t/{z}/{x}/{y}",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "application/x-protobuf")],
+                        vec![8u8; 4],
+                    )
+                }),
+            )
+            .route(
+                "/fonts/{fontstack}/{range}",
+                get(move || {
+                    let started = glyph_started.clone();
+                    async move {
+                        started.store(true, Ordering::Release);
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        (
+                            [(header::CONTENT_TYPE, "application/x-protobuf")],
+                            vec![7u8; 3],
+                        )
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_slow_asset_staging_and_cleans_staging() {
+        let started = Arc::new(AtomicBool::new(false));
+        let addr = style_stub_with_slow_assets(started.clone()).await;
+        let db = NamedTempFile::new().unwrap();
+        let st = state(&db, dev(), style_source(addr)).await;
+        let source = st.sources.read().await["basemap"].clone();
+        let job = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![source],
+                bbox: [-0.5, -0.5, 0.5, 0.5],
+                additional_bbox: None,
+                minzoom: 0,
+                maxzoom: 0,
+                region_id: Some("cancel-assets".into()),
+            },
+        )
+        .await
+        .unwrap();
+        for _ in 0..200 {
+            if started.load(Ordering::Acquire) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            started.load(Ordering::Acquire),
+            "asset staging reached the slow provider"
+        );
+        let began = std::time::Instant::now();
+        assert!(cancel_warm(&st, &job).await);
+        let snapshot = wait_done(&st, &job).await;
+        assert_eq!(snapshot["state"], "cancelled");
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(2),
+            "cancellation does not wait for the 30-second asset response",
+        );
+        assert_eq!(st.cache.region_bytes("cancel-assets").unwrap(), 0);
+        assert_eq!(
+            st.cache
+                .region_bytes(crate::state::BASEMAP_ASSETS_REGION_ID)
+                .unwrap(),
+            0,
+        );
+    }
+
+    // Poll the assets region until it holds bytes. This also keeps the helper robust if completion
+    // bookkeeping changes independently of the asset transaction.
     async fn wait_assets(st: &AppState) {
         for _ in 0..200 {
             if st
@@ -1714,12 +2521,13 @@ mod tests {
         let snap = wait_done(&st, &job).await;
         assert_eq!(snap["state"], "done");
         wait_assets(&st).await;
-        let gk = crate::style::glyph_cache_source("basemap", "Noto Sans Regular");
+        let generation = st.style_state.read().await["basemap"].generation;
+        let gk = crate::style::glyph_cache_source_at("basemap", "Noto Sans Regular", generation);
         assert!(
             st.cache.get(TileKey::new(&gk, 0, 0, 0)).unwrap().is_some(),
             "a glyph range is pinned under the assets region"
         );
-        let sk = crate::style::sprite_cache_source("basemap");
+        let sk = crate::style::sprite_cache_source_at("basemap", generation);
         assert!(
             st.cache.get(TileKey::new(&sk, 0, 0, 0)).unwrap().is_some(),
             "the sprite json is pinned"
@@ -1818,7 +2626,7 @@ mod tests {
         let st = state(&db, dev(), style_source(addr)).await;
         // Pre-pin one glyph range under the assets region (simulating a prior partial run); the warm
         // must skip it (cache-first) and fill the rest.
-        let gk = crate::style::glyph_cache_source("basemap", "Noto Sans Regular");
+        let gk = crate::style::glyph_cache_source_at("basemap", "Noto Sans Regular", 0);
         let now = crate::state::now_secs();
         let seeded = CachedTile {
             content_type: "application/x-protobuf".into(),

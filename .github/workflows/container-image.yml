@@ -1,71 +1,241 @@
 name: Container image
 
-# Builds and pushes the tilecache container image to ghcr on a version tag (or on demand). The plugin
-# pulls ghcr.io/<owner>/signalk-chart-locker-tilecache, so this publishes that exact name. Prep only:
-# nothing here runs until a v* tag is pushed or the workflow is dispatched.
+# A tag push is the normal image-first release path. A manual run is accepted only when the
+# workflow is dispatched against an existing tag that exactly matches package.json. Stable versions
+# update latest; prereleases never do.
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  image:
+  validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+        working-directory: container
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+        working-directory: container
+      - run: cargo test --locked --workspace --all-features
+        working-directory: container
+      - run: cargo build --locked --release --bin tilecache --all-features
+        working-directory: container
+      - name: Exercise the Node and Rust control contract
+        run: TILECACHE_BIN="$PWD/target/release/tilecache" npm --prefix .. run test:node-rust-contract
+        working-directory: container
+      - name: Audit the locked Rust dependency graph
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit --file Cargo.lock
+        working-directory: container
+      - name: Verify Rust third-party notices
+        run: npm run licenses:rust:check
+
+  image:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: chart-locker-container-image-promotion
+      cancel-in-progress: false
     permissions:
+      attestations: write
       contents: read
+      id-token: write
       packages: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
 
-      - name: Assert the tag matches the plugin version
-        # On a tag push the plugin requests v${package.version}, so the tag and the version must agree
-        # or the published image and the tag the plugin pulls diverge. Fail fast on a mismatch.
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Derive and validate release metadata
+        id: release
         env:
-          REF_NAME: ${{ github.ref_name }}
+          PUBLISH_LATEST: ${{ github.event_name == 'push' }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/release-metadata.mjs
+
+      - name: Record the source commit
+        id: source
         run: |
-          want="v$(node -p "require('./package.json').version")"
-          if [ "$REF_NAME" != "$want" ]; then
-            echo "tag $REF_NAME does not match the plugin version ($want); aborting" >&2
-            exit 1
-          fi
-
-      - name: Compute the lowercase image name
-        # ghcr requires a lowercase path; github.repository_owner can be mixed case. Pass it through env
-        # (never interpolate a context value straight into a run shell).
-        env:
-          OWNER: ${{ github.repository_owner }}
-        run: echo "IMAGE=ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/signalk-chart-locker-tilecache" >> "$GITHUB_ENV"
+          echo "created=$(git show --no-patch --format=%cI HEAD)" >> "$GITHUB_OUTPUT"
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
-        # The Dockerfile compiles Rust inside the target stage, so the linux/arm64 build needs
-        # emulation on the amd64 runner or the arm64 RUN dies with exec format error.
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to ghcr
-        uses: docker/login-action@v4
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v7
+      - name: Build and push the multiarchitecture image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
-          # The Dockerfile COPYs Cargo.toml, .cargo, and tilecache relative to the container dir, so the
-          # context is container and the file is named explicitly (the default container/Dockerfile does
-          # not exist).
-          context: container
+          context: .
           file: container/tilecache/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          # A plain (non-attestation) manifest so podman can pull it without an OCI referrers lookup.
-          # BuildKit still writes the Dockerfile HEALTHCHECK into the image config on every platform.
+          # Keep the runnable index free of synthetic attestation manifests. Signed provenance and
+          # SBOM attestations are attached as OCI referrers after both architectures pass their smoke test.
           provenance: false
-          tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ github.ref_name }}
+          sbom: false
+          labels: |
+            org.opencontainers.image.created=${{ steps.source.outputs.created }}
+            org.opencontainers.image.description=Chart Locker tile cache service
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.revision=${{ steps.source.outputs.revision }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=Chart Locker tilecache
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+          # Build to a run-scoped staging tag. The immutable version tag and optional latest tag are
+          # attached only after smoke tests, signing, SBOM generation, and attestations succeed.
+          tags: ${{ steps.release.outputs.image }}:build-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Smoke-test both staged architectures
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          for architecture in amd64 arm64; do
+            name="chart-locker-smoke-${architecture}"
+            docker run --detach --name "$name" --platform "linux/${architecture}" "${IMAGE}@${IMAGE_DIGEST}"
+            healthy=false
+            for attempt in $(seq 1 45); do
+              state="$(docker inspect --format '{{.State.Status}}' "$name")"
+              health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$name")"
+              if [ "$health" = healthy ]; then
+                healthy=true
+                break
+              fi
+              if [ "$state" = exited ] || [ "$health" = unhealthy ] || [ "$health" = missing ]; then
+                break
+              fi
+              sleep 2
+            done
+            if [ "$healthy" != true ]; then
+              docker logs "$name" || true
+              docker inspect "$name"
+              docker rm --force "$name"
+              echo "linux/${architecture} image did not become healthy" >&2
+              exit 1
+            fi
+            license_dir="$RUNNER_TEMP/chart-locker-licenses-${architecture}"
+            rm -rf "$license_dir"
+            mkdir -p "$license_dir"
+            docker cp "$name:/usr/share/licenses/chart-locker/." "$license_dir"
+            for license_file in LICENSE-APACHE THIRD_PARTY_NOTICES.md RUST_THIRD_PARTY_LICENSES.md; do
+              test -s "$license_dir/$license_file"
+            done
+            rm -rf "$license_dir"
+            docker rm --force "$name"
+          done
+
+      - name: Record the tested platform digests
+        id: manifests
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: node scripts/container-manifest-metadata.mjs
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.1
+
+      - name: Sign the tested image index
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${IMAGE_DIGEST}"
+
+      - name: Install Syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: v1.46.0
+
+      - name: Generate an SPDX SBOM for each architecture
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          SYFT: ${{ steps.syft.outputs.cmd }}
+        run: |
+          "$SYFT" scan "${IMAGE}@${IMAGE_DIGEST}" --platform linux/amd64 --output spdx-json=tilecache-amd64.spdx.json
+          "$SYFT" scan "${IMAGE}@${IMAGE_DIGEST}" --platform linux/arm64 --output spdx-json=tilecache-arm64.spdx.json
+
+      - name: Upload the SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tilecache-sbom-${{ steps.release.outputs.tag }}
+          path: tilecache-*.spdx.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Attest tested image provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ${{ steps.release.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          # Artifact metadata storage records are available only to organization-owned repositories.
+          create-storage-record: false
+
+      - name: Attest the amd64 image SBOM
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ${{ steps.release.outputs.image }}
+          subject-digest: ${{ steps.manifests.outputs.amd64_digest }}
+          sbom-path: tilecache-amd64.spdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest the arm64 image SBOM
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ${{ steps.release.outputs.image }}
+          subject-digest: ${{ steps.manifests.outputs.arm64_digest }}
+          sbom-path: tilecache-arm64.spdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Refresh repository version tags
+        run: git fetch --force origin 'refs/tags/v*:refs/tags/v*'
+
+      - name: Select monotonic release tags
+        id: promotion
+        env:
+          CANDIDATE_TAGS: ${{ steps.release.outputs.tags }}
+          IMAGE: ${{ steps.release.outputs.image }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: node scripts/select-container-promotion-tags.mjs
+
+      - name: Promote the prepared digest to release tags
+        env:
+          FINAL_TAGS: ${{ steps.promotion.outputs.tags }}
+          IMAGE: ${{ steps.release.outputs.image }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: node scripts/promote-container-image.mjs

@@ -27,8 +27,8 @@ export const CACHE_CAP_LOW_FREE_PERCENTAGE = 0.5
  * non-positive step yields 0, so callers clamp to the minimum afterward.
  */
 export function floorToStep (value: number, step: number): number {
-  if (!Number.isFinite(value) || step <= 0) return 0
-  return Math.floor(value / step) * step
+  if (!Number.isFinite(value) || !Number.isFinite(step) || step <= 0) return 0
+  return Math.max(0, Math.floor(value / step) * step)
 }
 
 /**
@@ -36,7 +36,7 @@ export function floorToStep (value: number, step: number): number {
  * grid so the slider and the number box agree. A non-finite value or a non-positive step yields 0.
  */
 export function snapToStep (value: number, step: number): number {
-  if (!Number.isFinite(value) || step <= 0) return 0
+  if (!Number.isFinite(value) || !Number.isFinite(step) || step <= 0) return 0
   return Math.round(value / step) * step
 }
 

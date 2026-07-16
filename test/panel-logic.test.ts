@@ -9,7 +9,7 @@ function baseConfig (): ChartLockerConfig {
   return {
     tileCache: { cacheCapGiB: 8, regionsBudgetGiB: 0 },
     charts: { path: '' },
-    advanced: { imageTag: '', cacheVolumeSource: '' }
+    advanced: { geocodingEnabled: true, imageTag: '', cacheVolumeSource: '' }
   }
 }
 
@@ -32,6 +32,14 @@ test('configReducer discard replaces the whole state with the given config', () 
   const state = baseConfig()
   const restored = baseConfig()
   assert.equal(configReducer(state, { type: 'discard', config: restored }), restored)
+})
+
+test('configReducer changes the geocoding setting without rebuilding other groups', () => {
+  const state = baseConfig()
+  const next = configReducer(state, { type: 'setGeocodingEnabled', enabled: false })
+  assert.notEqual(next.advanced, state.advanced)
+  assert.equal(next.tileCache, state.tileCache)
+  assert.equal(next.advanced.geocodingEnabled, false)
 })
 
 test('saveButtonDisabled: disabled only when clean and already configured', () => {

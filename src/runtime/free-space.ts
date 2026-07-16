@@ -20,5 +20,10 @@ export interface StatfsResult {
  */
 export function readFreeGiB (dataDir: string, statfs: (path: string) => StatfsResult = statfsSync): number {
   const { bsize, bavail } = statfs(dataDir)
-  return Math.floor((bsize * bavail) / (1024 ** 3))
+  if (!Number.isSafeInteger(bsize) || bsize <= 0 || !Number.isSafeInteger(bavail) || bavail < 0) {
+    throw new RangeError('statfs returned invalid block size or available-block count')
+  }
+  const bytes = bsize * bavail
+  if (!Number.isSafeInteger(bytes) || bytes < 0) throw new RangeError('statfs free-space byte count is outside the safe integer range')
+  return Math.floor(bytes / (1024 ** 3))
 }

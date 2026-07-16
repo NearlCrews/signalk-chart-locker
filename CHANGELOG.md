@@ -6,10 +6,100 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Exercise the built configuration-panel remote in Chromium, Firefox, WebKit, and mobile Chromium,
+  including save and discard behavior, field-linked validation, operational loading and failure
+  states, keyboard and focus behavior, theme migration, destructive confirmation, Axe checks,
+  320-pixel layouts, coarse-pointer targets, and the unsupported-browser message. The official
+  Signal K integration jobs also start server 2.24.0 with signalk-container 1.20.0 and the latest of
+  both, execute the real Admin application in Chrome, and mount the installed production panel
+  remote. The release workflow repeats that real-host check using the exact tarball selected for npm.
+- Build container images only after locked Rust tests, Clippy, RustSec checks, and the release-binary
+  Node and Rust control contract pass. Both published architectures must become healthy and contain
+  their license inventory before the version tag is attached. Tested images receive a keyless Cosign
+  signature, GitHub build-provenance and per-architecture SPDX SBOM attestations, and downloadable
+  amd64 and arm64 SBOMs.
+- Generate and verify a complete third-party license report from the locked Rust runtime dependency
+  graph. The report ships in both the npm package and tile-cache image.
+
+### Changed
+
+- Build the configuration panel on the accessible, theme-aware `signalk-nearlcrews-ui` 0.2.0
+  primitives, migrate the former `cl-theme` preference into the shared theme key, replace the
+  blocking scroll-cache confirmation with a focus-managed inline confirmation, and consume the core
+  React singleton from the Signal K Admin Module Federation host. Signal K server 2.24.0 is now the
+  minimum supported version because it provides the required React 19.2 Admin host by default.
+- Embed the shared scoped design contract in each panel remote. Total production JavaScript grows
+  from 16,474 to 25,014 gzip bytes while the consumer panel chunk shrinks; a 25 KiB build gate now
+  prevents unreviewed growth. Webpack stats verify that core React comes from the host and that the
+  shared UI library remains bundled.
+- Require native CSS `@scope` support for the configuration panel. Supported browser floors are
+  Chromium and Edge 118, Firefox 146, and Safari 17.4. Older engines receive a browser-update
+  message instead of an unstyled panel.
+- Publish the exact checksum-verified tarball produced by the complete release gates through npm
+  trusted publishing. npm publication now verifies the matching image's architectures, source
+  revision, healthcheck, signature, provenance, and SBOM before it can run. Stable packages use the
+  `latest` dist-tag, while prereleases use `next`. Container promotion is serialized and refuses to
+  move `latest` when a higher stable version tag exists. Weekly retention removes only old package
+  versions whose tags are all abandoned run-scoped build tags.
+- Align the Rust workspace MSRV, local toolchain, CI, and container builder on Rust 1.95.0, which is
+  required by the locked SQLite binding's configuration macro.
+- Make Nominatim region auto-naming optional through the Advanced geocoding control. Enabled lookups
+  are globally limited to one request per second and cached in memory for 24 hours; disabling the
+  control prevents coordinate egress without blocking saved-region downloads.
+- Treat every image tag saved as a default by versions 0.1.0 through 0.5.0 as inherited during
+  upgrade, so direct and skipped-version upgrades launch the matching 0.6.0 container. Other explicit
+  development and custom image tags remain unchanged.
+
 ### Fixed
 
-- Register tile, style, readiness, and PMTiles GET routes with Signal K's `readonly` access scope so
-  authenticated chartplotter users can load charts while management routes remain administrator-only.
+- Register tile, style, readiness, and PMTiles GET routes with Signal K's `readonly` access scope when
+  the server supports scoped plugin routers, while retaining the secure administrator-only fallback
+  on released servers without that API.
+- Keep PMTiles discovery and serving inside the configured Signal K directory through symlinked path
+  components, directory replacement, identifier collisions, file replacement during metadata reads,
+  and path swaps after registration. Discovery coalesces event storms, cancels stale scans during
+  shutdown, closes descriptors on stream failures and disconnects, and reports rescan errors instead
+  of publishing stale chart metadata. Range and HEAD responses use identity-checked descriptors,
+  strong ETags, bounded metadata, and `X-Content-Type-Options: nosniff`.
+- Make plugin lifecycle, mutual-exclusion transitions, persistent-state updates, container-manager
+  calls, and every buffered container control response bounded and restart-safe. Startup and teardown
+  are abortable, failed durable writes leave live state unchanged, corrupt state files are preserved
+  for diagnosis, malformed state is normalized before use, and oversized, invalid UTF-8, malformed,
+  or stalled control responses fail without partial state.
+- Reject raw and percent-encoded traversal in tile and style proxy paths. Rewritten style documents
+  are byte-bounded, and malformed or oversized upstream JSON fails without a partial response.
+- Reconcile saved-region jobs in the background, including warm starts whose response was lost,
+  terminal results that no browser polled, authoritative byte totals after replacement, bounded
+  retries, and clean cancellation during stop. Rejected, capped, cancelled, or failed replacements
+  preserve the last usable pins.
+- Include `cachedBytes` in both normal and recovery-pending saved-region creation responses, matching
+  the list response contract consumed by Binnacle.
+- Apply cache-cap reductions and warm promotions coherently. A physical cap below pinned bytes is
+  rejected without publishing candidate settings, eviction removes only eligible scroll data,
+  cleared SQLite pages are returned to the filesystem, startup enforces the configured cap, and
+  staged region plus basemap coverage is promoted only when every final budget fits.
+- Convert v0.5.0 SQLite cache files to incremental auto-vacuum without deleting existing scroll
+  tiles, pinned region coverage, or region membership. If disk pressure prevents the one-time
+  preserving conversion, startup continues with the usable cache and retries on a later restart.
+- Restrict repository-root container builds to the Rust workspace inputs and required license files,
+  excluding local build output, dependencies, Git metadata, release artifacts, and scratch files.
+- Bound container request admission, retained response bodies, background fills, warm fan-out, and
+  single-flight keys while reserving independent health capacity. Shutdown now cancels and drains
+  warm and fill work instead of abandoning in-flight cache mutations.
+
+### Security
+
+- Authenticate every mutating tile-cache route with a persistent random 32-byte control token that is
+  created atomically, stored with mode 0600, passed only to the private container, and omitted from
+  public APIs and logs.
+- Validate upstream destinations at URL and DNS-connection time, disable redirects, and reject
+  loopback, private, link-local, carrier-grade NAT, multicast, unspecified, transition-encoded, and
+  other special-use IPv4 and IPv6 targets to close SSRF and DNS-rebinding paths.
+- Run the digest-pinned distroless runtime as unprivileged UID and GID 65532 with only `/data`
+  writable. Tile caching accepts only inert raster and vector-protobuf MIME types, so HTML, XML, SVG,
+  and unsafe legacy cache entries are neither stored nor served as tiles.
 
 <a id="v050"></a>
 

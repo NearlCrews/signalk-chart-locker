@@ -1,16 +1,15 @@
 /**
  * Panel footer: the Save and Discard controls plus a dirty / just-saved
- * indicator. Save is disabled when the configuration is unchanged AND the
- * plugin has already been configured at least once. When the plugin has never
- * been saved (unconfigured), Save stays enabled so the user can persist
- * defaults to enable the plugin without making a throwaway edit first.
+ * indicator. Save is disabled for invalid configuration, or when the
+ * configuration is unchanged and the plugin has already been configured.
+ * When the plugin has never been saved, Save stays enabled so the user can
+ * persist defaults without making a throwaway edit first.
  */
 
 import type * as React from 'react'
-import { memo } from 'react'
-import SaveStatus from './SaveStatus.js'
+import { memo, useRef } from 'react'
+import { ActionBar, Button, StatusIndicator, type StatusTone } from 'signalk-nearlcrews-ui'
 import { saveButtonDisabled } from '../footer-bar-state.js'
-import { S } from '../styles.js'
 
 interface Props {
   dirty: boolean
@@ -20,7 +19,7 @@ interface Props {
    * state so the user can persist defaults to enable the plugin.
    */
   unconfigured: boolean
-  /** Epoch milliseconds of the last successful save, or null. Drives the "Saved" pill. */
+  /** Epoch milliseconds of the last successful save, or null. Drives the temporary Saved status. */
   justSavedAt: number | null
   onSave: () => void
   onDiscard: () => void
@@ -29,23 +28,64 @@ interface Props {
 
 /**
  * The configuration panel's footer bar. Memoized: the panel root keeps the
- * two callbacks identity-stable, so a keystroke in a field re-renders the
- * footer only when the dirty flag or unconfigured state actually flips.
+ * two callbacks identity-stable, so field edits re-render the footer only when
+ * its dirty, configured, validity, or saved-notice state changes.
  */
 export default memo(function FooterBar ({ dirty, unconfigured, justSavedAt, onSave, onDiscard, valid = true }: Props): React.ReactElement {
   const saveDisabled = !valid || saveButtonDisabled(dirty, unconfigured)
+  const statusRef = useRef<HTMLDivElement>(null)
+  const statusTone: StatusTone = !valid
+    ? 'danger'
+    : dirty
+      ? 'warning'
+      : justSavedAt !== null
+        ? 'success'
+        : unconfigured
+          ? 'info'
+          : 'neutral'
+  const statusText = !valid
+    ? 'Fix validation errors before saving.'
+    : dirty
+      ? 'Unsaved changes'
+      : justSavedAt !== null
+        ? 'Saved'
+        : unconfigured
+          ? 'Save to enable the plugin.'
+          : 'No unsaved changes'
+
+  const runAndFocusStatus = (action: () => void): void => {
+    action()
+    window.requestAnimationFrame(() => statusRef.current?.focus())
+  }
+
   return (
-    <div style={S.footer}>
-      <button type='button' style={S.btnPrimary} onClick={onSave} disabled={saveDisabled}>
-        Save
-      </button>
-      <button type='button' style={S.btnSecondary} onClick={onDiscard} disabled={!dirty}>
-        Discard
-      </button>
-      <SaveStatus dirty={dirty} justSavedAt={justSavedAt} />
-      {unconfigured && !dirty
-        ? <span style={S.hint}>Save to enable the plugin.</span>
-        : null}
-    </div>
+    <ActionBar
+      sticky
+      data-panel-action-bar=''
+      statusRef={statusRef}
+      status={
+        <StatusIndicator
+          tone={statusTone}
+          role={valid ? 'status' : undefined}
+          aria-live={valid ? 'polite' : 'off'}
+        >
+          {statusText}
+        </StatusIndicator>
+      }
+      actions={
+        <>
+          <Button
+            variant='primary'
+            onClick={() => runAndFocusStatus(onSave)}
+            disabled={saveDisabled}
+          >
+            Save
+          </Button>
+          <Button onClick={() => runAndFocusStatus(onDiscard)} disabled={!dirty}>
+            Discard
+          </Button>
+        </>
+      }
+    />
   )
 })

@@ -81,7 +81,7 @@ test('doStart does not register charts when the third-party plugin is enabled, a
     assert.equal(providers.length, 0)
     const statusMessage = app.status.find((s) => /signalk-pmtiles-plugin/i.test(s))
     assert(statusMessage !== undefined, 'Status should contain pmtiles-plugin conflict note')
-    assert(/127\.0\.0\.1:8080/.test(statusMessage), 'Status should contain router address')
+    assert(/Tilecache container unavailable/.test(statusMessage), 'Status should explain that no container address resolved')
     assert(/signalk-pmtiles-plugin/i.test(statusMessage), 'Status should contain conflict note')
   } finally {
     await plugin.stop()
@@ -116,6 +116,29 @@ test('registerWithRouter mounts chart reads through the readonly access scope', 
     assert.equal(typeof readonlyRoutes['/pmtiles/:file'], 'function')
     assert.equal(routerRoutes['/tiles/ready'], undefined)
     assert.equal(routerRoutes['/pmtiles/:file'], undefined)
+  } finally {
+    clearGlobals()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('registerWithRouter safely falls back when scoped plugin routers are unavailable', async () => {
+  const root = await configRoot()
+  setContainerManager(fakeManager())
+  const { app } = chartApp(root)
+  const plugin = createPlugin(app as never)
+  const routerRoutes: Record<string, unknown> = {}
+  try {
+    plugin.registerWithRouter?.({
+      get: (p: string, h: unknown) => { routerRoutes[p] = h },
+      post: (p: string, h: unknown) => { routerRoutes[p] = h },
+      delete: (p: string, h: unknown) => { routerRoutes[p] = h }
+    } as never)
+    assert.equal(typeof routerRoutes['/tiles/ready'], 'function')
+    assert.equal(typeof routerRoutes['/tile/:source/:z/:x/:y'], 'function')
+    assert.equal(typeof routerRoutes['/style/:source'], 'function')
+    assert.equal(typeof routerRoutes['/style/:source/*'], 'function')
+    assert.equal(typeof routerRoutes['/pmtiles/:file'], 'function')
   } finally {
     clearGlobals()
     await rm(root, { recursive: true, force: true })
@@ -160,6 +183,39 @@ test('registerWithRouter mounts management routes when a security strategy is pr
     assert.equal(typeof routerRoutes['/api/charts'], 'function', '/api/charts must be registered with a security strategy')
     assert.equal(typeof routerRoutes['/api/charts/:id/override'], 'function', '/api/charts/:id/override must be registered with a security strategy')
   } finally {
+    clearGlobals()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('live third-party enable and disable transitions clear and restore chart resources', async () => {
+  const root = await configRoot()
+  const configFile = join(root, 'plugin-config-data', 'pmtiles-chart-provider.json')
+  await mkdir(join(root, 'plugin-config-data'), { recursive: true })
+  await writeFile(join(root, 'charts', 'pmtiles', 'good.pmtiles'), buildPmtilesFixture())
+  await writeFile(configFile, JSON.stringify({ enabled: false }))
+  setContainerManager(fakeManager())
+  const { app, providers } = chartApp(root)
+  const plugin = createPlugin(app as never)
+  const resources = async (): Promise<Record<string, unknown>> => {
+    const provider = providers[0] as { methods: { listResources: () => Promise<Record<string, unknown>> } }
+    return provider.methods.listResources()
+  }
+  const waitUntil = async (predicate: () => Promise<boolean>): Promise<void> => {
+    const deadline = Date.now() + 3000
+    while (!(await predicate()) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))
+    assert.equal(await predicate(), true)
+  }
+  try {
+    await plugin.start({}, () => {})
+    assert.equal(Object.keys(await resources()).length, 1)
+    await writeFile(configFile, JSON.stringify({ enabled: true }))
+    await waitUntil(async () => Object.keys(await resources()).length === 0)
+    await writeFile(configFile, JSON.stringify({ enabled: false }))
+    await waitUntil(async () => Object.keys(await resources()).length === 1)
+    assert.equal(providers.length, 1, 'the resource provider is registered only once')
+  } finally {
+    await plugin.stop()
     clearGlobals()
     await rm(root, { recursive: true, force: true })
   }

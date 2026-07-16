@@ -33,6 +33,7 @@ pub enum FetchOutcome {
     Hit(TileResponse),
     NotModified {
         etag: String,
+        stale: bool,
     },
     /// A negatively cached or upstream sparse-coverage response (status without a body).
     Empty {
@@ -46,10 +47,21 @@ pub enum FetchOutcome {
 }
 
 pub(crate) fn acceptable_content_type(ct: &str) -> bool {
-    let ct = ct.to_ascii_lowercase();
-    ct.starts_with("image/")
-        || ct.starts_with("application/x-protobuf")
-        || ct.starts_with("application/vnd.mapbox-vector-tile")
+    let media_type = ct
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        media_type.as_str(),
+        "image/png"
+            | "image/jpeg"
+            | "image/webp"
+            | "image/avif"
+            | "application/x-protobuf"
+            | "application/vnd.mapbox-vector-tile"
+    )
 }
 
 /// At most one last_access write per tile per hour, so a pan does not turn every warm-tile read into a
@@ -85,15 +97,9 @@ pub(crate) fn log_cache_err<T>(
     }
 }
 
-/// Run a cache write off the reactor on the blocking pool, so a SQLite write never stalls an async
-/// worker alongside live tile reads. When `detached`, the JoinHandle is dropped so a best-effort write
-/// (the LRU touch) runs without delaying the caller; otherwise the caller awaits it and a task-join
-/// failure is logged under `label`.
-async fn run_cache_write(label: &str, detached: bool, f: impl FnOnce() + Send + 'static) {
+/// Run a cache write off the reactor on the blocking pool and await its completion.
+async fn run_cache_write(label: &str, f: impl FnOnce() + Send + 'static) {
     let handle = tokio::task::spawn_blocking(f);
-    if detached {
-        return;
-    }
     if let Err(e) = handle.await {
         eprintln!("event=cache_task_failed operation={label} error={e}");
     }
@@ -101,7 +107,7 @@ async fn run_cache_write(label: &str, detached: bool, f: impl FnOnce() + Send + 
 
 /// The single-flight key for a tile, shared by `fill` and `get_tile` so the stale-while-revalidate
 /// spawn guard keys on exactly the string `fill` registers under.
-fn inflight_key(source_id: &str, z: u32, x: u32, y: u32) -> String {
+pub(crate) fn inflight_key(source_id: &str, z: u32, x: u32, y: u32) -> String {
     format!("{source_id}/{z}/{x}/{y}")
 }
 
@@ -118,13 +124,25 @@ fn to_response(tile: &CachedTile, stale: bool) -> TileResponse {
 /// Serve a cached 200: a matching If-None-Match answers NotModified, anything else the body.
 /// One owner for the choice so a conditional-request change cannot drift across the serve sites.
 fn respond_cached(tile: &CachedTile, if_none_match: Option<&str>, stale: bool) -> FetchOutcome {
-    if if_none_match == Some(tile.strong_etag.as_str()) {
+    if if_none_match.is_some_and(|value| etag_matches(value, &tile.strong_etag)) {
         FetchOutcome::NotModified {
             etag: tile.strong_etag.clone(),
+            stale,
         }
     } else {
         FetchOutcome::Hit(to_response(tile, stale))
     }
+}
+
+/// RFC 9110 weak comparison for If-None-Match, including wildcard and comma-separated fields.
+pub(crate) fn etag_matches(header_value: &str, current: &str) -> bool {
+    fn opaque(value: &str) -> &str {
+        value.trim().strip_prefix("W/").unwrap_or(value.trim())
+    }
+    header_value
+        .split(',')
+        .map(str::trim)
+        .any(|candidate| candidate == "*" || opaque(candidate) == opaque(current))
 }
 
 /// Fetch the upstream at the source's adaptive timeout, returning (status, fetched) or a `FetchError`.
@@ -157,9 +175,14 @@ pub(crate) async fn fetch_upstream(
                 let validator = resp
                     .headers()
                     .get(reqwest::header::ETAG)
-                    .or_else(|| resp.headers().get(reqwest::header::LAST_MODIFIED))
                     .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_string());
+                    .map(|value| format!("etag:{value}"))
+                    .or_else(|| {
+                        resp.headers()
+                            .get(reqwest::header::LAST_MODIFIED)
+                            .and_then(|v| v.to_str().ok())
+                            .map(|value| format!("last-modified:{value}"))
+                    });
                 // A body-read failure (including a mid-body stall on a degraded upstream) maps to
                 // Transport. For a slow WMS the stall is before headers, so classifying the rare mid-body
                 // failure as Transport rather than Timeout is acceptable and never negative-caches.
@@ -224,7 +247,7 @@ async fn store_200(
     let cache = state.cache.clone();
     let cap = state.live_cap_bytes.load(Ordering::Relaxed);
     let source_owned = source_id.to_string();
-    run_cache_write("tile store", false, move || {
+    run_cache_write("tile store", move || {
         log_cache_err(
             &cache,
             "cache_write_failed",
@@ -233,8 +256,8 @@ async fn store_200(
         log_cache_err(&cache, "cache_eviction_failed", cache.evict_to(cap));
     })
     .await;
-    if if_none_match == Some(etag.as_str()) {
-        return FetchOutcome::NotModified { etag };
+    if if_none_match.is_some_and(|value| etag_matches(value, &etag)) {
+        return FetchOutcome::NotModified { etag, stale: false };
     }
     FetchOutcome::Hit(TileResponse {
         status: 200,
@@ -256,13 +279,15 @@ async fn negative_cache(
     let now = now_secs();
     let tile = CachedTile::negative(status as i64, now);
     let cache = state.cache.clone();
+    let state_cap = state.live_cap_bytes.load(Ordering::Relaxed);
     let source_owned = source_id.to_string();
-    run_cache_write("negative-cache store", false, move || {
+    run_cache_write("negative-cache store", move || {
         log_cache_err(
             &cache,
             "cache_write_failed",
             cache.put(TileKey::new(&source_owned, z, x, y), &tile, false, now),
-        )
+        );
+        log_cache_err(&cache, "cache_eviction_failed", cache.evict_to(state_cap));
     })
     .await;
     FetchOutcome::Empty { status }
@@ -300,7 +325,7 @@ pub async fn get_tile(
     let now = now_secs();
 
     // Cache-first: the paths served inline (no upstream fetch, so no spawn).
-    if let Ok(Some(tile)) = state.cache.get(TileKey::new(source_id, z, x, y)) {
+    if let Ok(Some(tile)) = state.cache_get(source_id, z, x, y).await {
         if tile.status != 200 {
             if now - tile.fetched_at < state.knobs.negative_ttl_secs {
                 return FetchOutcome::Empty {
@@ -308,21 +333,31 @@ pub async fn get_tile(
                 };
             }
             // An expired negative falls through to a fresh fill.
+        } else if !acceptable_content_type(&tile.content_type) {
+            // Older versions admitted every image/* media type. Never serve a legacy active payload
+            // such as SVG from the authenticated plugin origin; treat it as a miss so a safe upstream
+            // response can replace the row while preserving any region pins.
+            eprintln!(
+                "event=unsafe_cached_tile_ignored source={source_id} z={z} x={x} y={y} content_type={}",
+                tile.content_type
+            );
         } else if now - tile.fetched_at < state.knobs.fresh_secs {
             // Throttle the LRU write so a pan does not write to the microSD on every warm-tile read, and
             // run it detached on the blocking pool so the best-effort last_access bump never delays the
             // cache hit or blocks the reactor on a SQLite write.
             if now - tile.last_access >= TOUCH_THROTTLE_SECS {
-                let cache = state.cache.clone();
-                let source_owned = source_id.to_string();
-                run_cache_write("touch", true, move || {
-                    log_cache_err(
-                        &cache,
-                        "cache_touch_failed",
-                        cache.touch(TileKey::new(&source_owned, z, x, y), now),
-                    )
-                })
-                .await;
+                if let Some(permit) = state.try_touch_permit() {
+                    let cache = state.cache.clone();
+                    let source_owned = source_id.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        log_cache_err(
+                            &cache,
+                            "cache_touch_failed",
+                            cache.touch(TileKey::new(&source_owned, z, x, y), now),
+                        );
+                    });
+                }
             }
             return respond_cached(&tile, if_none_match.as_deref(), false);
         } else if state.upstream_health.is_slow(source_id)
@@ -337,7 +372,7 @@ pub async fn get_tile(
             // this handler, so a client disconnect cannot cancel it.
             let key = inflight_key(source_id, z, x, y);
             if !state.inflight_contains(&key).await {
-                spawn_fill(state, source_id, z, x, y, url, if_none_match.clone());
+                let _ = spawn_fill(state, source_id, z, x, y, url, if_none_match.clone());
             }
             // A matching validator answers 304 with the stale etag rather than shipping the stale body.
             return respond_cached(&tile, if_none_match.as_deref(), true);
@@ -359,16 +394,48 @@ fn spawn_fill(
     y: u32,
     url: String,
     if_none_match: Option<String>,
-) -> tokio::task::JoinHandle<FetchOutcome> {
-    tokio::spawn(fill(
-        state.clone(),
-        source_id.to_string(),
+) -> Option<tokio::task::JoinHandle<FetchOutcome>> {
+    let permit = state.try_fill_permit()?;
+    let state = state.clone();
+    let spec = FillSpec {
+        source_id: source_id.to_string(),
         z,
         x,
         y,
         url,
         if_none_match,
-    ))
+    };
+    state.fill_task_count.fetch_add(1, Ordering::AcqRel);
+    let task_guard = FillTaskGuard(state.clone());
+    Some(tokio::spawn(async move {
+        let _task_guard = task_guard;
+        fill(state, spec, permit).await
+    }))
+}
+
+struct FillTaskGuard(AppState);
+
+impl Drop for FillTaskGuard {
+    fn drop(&mut self) {
+        self.0.fill_task_count.fetch_sub(1, Ordering::AcqRel);
+        self.0.fill_task_notify.notify_waiters();
+    }
+}
+
+pub async fn wait_for_fills(state: &AppState, timeout: Duration) -> bool {
+    tokio::time::timeout(timeout, async {
+        loop {
+            let notified = state.fill_task_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if state.fill_task_count.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .is_ok()
 }
 
 /// Spawn a `fill` and await its outcome, mapping a task-join failure to Unavailable. Used for the miss
@@ -382,7 +449,10 @@ async fn fill_and_await(
     url: String,
     if_none_match: Option<String>,
 ) -> FetchOutcome {
-    match spawn_fill(state, source_id, z, x, y, url, if_none_match).await {
+    let Some(handle) = spawn_fill(state, source_id, z, x, y, url, if_none_match) else {
+        return FetchOutcome::Unavailable;
+    };
+    match handle.await {
         Ok(outcome) => outcome,
         Err(e) => {
             eprintln!("tilecache: fill task failed: {e}");
@@ -396,28 +466,42 @@ async fn fill_and_await(
 /// spawns this so a browser or proxy disconnect cannot cancel the fetch: the task runs to completion and
 /// stores the tile, and the next request serves it from cache, so blank areas self-heal. One function
 /// serves both the miss and the stale-revalidation path, so revalidation is single-flight coalesced too.
-async fn fill(
-    state: AppState,
+struct FillSpec {
     source_id: String,
     z: u32,
     x: u32,
     y: u32,
     url: String,
     if_none_match: Option<String>,
+}
+
+async fn fill(
+    state: AppState,
+    spec: FillSpec,
+    _fill_permit: tokio::sync::OwnedSemaphorePermit,
 ) -> FetchOutcome {
+    let FillSpec {
+        source_id,
+        z,
+        x,
+        y,
+        url,
+        if_none_match,
+    } = spec;
     let key = inflight_key(&source_id, z, x, y);
-    let lock = state.inflight_lock(&key).await;
+    let Some(lock) = state.inflight_lock(&key).await else {
+        return FetchOutcome::Unavailable;
+    };
     let _guard = lock.lock().await;
     let now = now_secs();
     // Re-check under the lock: the winning flight may have filled the cache while we waited. Losers
     // coalesce onto a fresh 200 or a fresh negative here and never refetch.
-    let existing = state
-        .cache
-        .get(TileKey::new(&source_id, z, x, y))
-        .ok()
-        .flatten();
+    let existing = state.cache_get(&source_id, z, x, y).await.ok().flatten();
     if let Some(tile) = &existing {
-        if tile.status == 200 && now - tile.fetched_at < state.knobs.fresh_secs {
+        if tile.status == 200
+            && acceptable_content_type(&tile.content_type)
+            && now - tile.fetched_at < state.knobs.fresh_secs
+        {
             state.inflight_finish(&key, &lock).await;
             return respond_cached(tile, if_none_match.as_deref(), false);
         }
@@ -428,21 +512,29 @@ async fn fill(
             };
         }
     }
-    let outcome = if let Some(tile) = existing.filter(|t| t.status == 200) {
+    let outcome = if let Some(tile) =
+        existing.filter(|t| t.status == 200 && acceptable_content_type(&t.content_type))
+    {
         // A stale 200: revalidate with the stored validator, else serve stale within the max-stale bound.
         match fetch_upstream(&state, &source_id, &url, tile.upstream_validator.as_deref()).await {
             Ok((304, _)) => {
+                let refreshed_at = now_secs();
                 let mut refreshed = tile.clone();
-                refreshed.fetched_at = now;
-                refreshed.last_access = now;
+                refreshed.fetched_at = refreshed_at;
+                refreshed.last_access = refreshed_at;
                 // Off the reactor like store_200: the freshness-bump write is a SQLite write.
                 let cache = state.cache.clone();
                 let source_owned = source_id.clone();
-                run_cache_write("revalidation refresh", false, move || {
+                run_cache_write("revalidation refresh", move || {
                     log_cache_err(
                         &cache,
                         "cache_write_failed",
-                        cache.put(TileKey::new(&source_owned, z, x, y), &refreshed, false, now),
+                        cache.put(
+                            TileKey::new(&source_owned, z, x, y),
+                            &refreshed,
+                            false,
+                            refreshed_at,
+                        ),
                     )
                 })
                 .await;
@@ -464,7 +556,7 @@ async fn fill(
             // the stale tile while it is within the max-stale bound.
             _ => {
                 if now - tile.fetched_at < state.knobs.max_stale_secs {
-                    FetchOutcome::Hit(to_response(&tile, true))
+                    respond_cached(&tile, if_none_match.as_deref(), true)
                 } else {
                     FetchOutcome::Unavailable
                 }
@@ -493,7 +585,7 @@ async fn fill(
                 // Offline or timed out: serve any cached 200 within the max-stale bound. The single-flight
                 // lock does not cover the warm engine's batch flush, so a concurrent region or position warm
                 // can have stored a 200 for this key since the re-check.
-                match state.cache.get(TileKey::new(&source_id, z, x, y)) {
+                match state.cache_get(&source_id, z, x, y).await {
                     Ok(Some(tile))
                         if tile.status == 200
                             && now_secs() - tile.fetched_at < state.knobs.max_stale_secs =>
@@ -544,6 +636,41 @@ mod tests {
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
+    #[test]
+    fn if_none_match_uses_rfc_weak_list_and_wildcard_matching() {
+        assert!(etag_matches("*", "\"current\""));
+        assert!(etag_matches(
+            "\"other\", W/\"current\", \"third\"",
+            "\"current\"",
+        ));
+        assert!(etag_matches("\"current\"", "W/\"current\""));
+        assert!(!etag_matches("\"other\", W/\"third\"", "\"current\""));
+    }
+
+    #[test]
+    fn tile_content_types_allow_only_inert_rasters_and_vector_protobuf() {
+        for content_type in [
+            "image/png",
+            "image/jpeg; charset=binary",
+            "IMAGE/WEBP",
+            "image/avif",
+            "application/x-protobuf",
+            "application/vnd.mapbox-vector-tile; version=2",
+        ] {
+            assert!(acceptable_content_type(content_type), "{content_type}");
+        }
+        for content_type in [
+            "image/svg+xml",
+            "image/svg+xml; charset=utf-8",
+            "image/gif",
+            "text/html",
+            "application/xhtml+xml",
+            "image/png,text/html",
+        ] {
+            assert!(!acceptable_content_type(content_type), "{content_type}");
+        }
+    }
+
     // Bind an ephemeral loopback port, serve the router in the background, and pause briefly so the
     // listener is accepting before the first request.
     async fn serve_router(app: Router) -> SocketAddr {
@@ -572,6 +699,19 @@ mod tests {
             .route(
                 "/xml",
                 get(|| async { ([(header::CONTENT_TYPE, "text/xml")], "<ServiceException/>") }),
+            )
+            .route(
+                "/svg",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "image/svg+xml")],
+                        r#"<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>"#,
+                    )
+                }),
+            )
+            .route(
+                "/html",
+                get(|| async { ([(header::CONTENT_TYPE, "text/html")], "<script></script>") }),
             )
             .route("/missing", get(|| async { StatusCode::NOT_FOUND }));
         serve_router(app).await
@@ -692,16 +832,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_a_non_image_200_and_does_not_store_it() {
+    async fn rejects_active_or_non_tile_200_responses_and_does_not_store_them() {
         let hits = Arc::new(AtomicUsize::new(0));
         let addr = spawn_stub(hits).await;
+        for path in ["xml", "svg", "html"] {
+            let db = NamedTempFile::new().unwrap();
+            let st = state_with(
+                &db,
+                dev_knobs(),
+                xyz_source(format!("http://{addr}/{path}")),
+            )
+            .await;
+            assert!(matches!(
+                get_tile(&st, "s", 0, 0, 0, None).await,
+                FetchOutcome::Unavailable
+            ));
+            assert!(
+                st.cache.get(TileKey::new("s", 0, 0, 0)).unwrap().is_none(),
+                "{path} response was not cached"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_legacy_cached_svg_is_never_served_and_is_replaced_by_a_safe_tile() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_stub(hits.clone()).await;
         let db = NamedTempFile::new().unwrap();
-        let st = state_with(&db, dev_knobs(), xyz_source(format!("http://{addr}/xml"))).await;
-        assert!(matches!(
-            get_tile(&st, "s", 0, 0, 0, None).await,
-            FetchOutcome::Unavailable
-        ));
-        assert!(st.cache.get(TileKey::new("s", 0, 0, 0)).unwrap().is_none());
+        let st = state_with(
+            &db,
+            dev_knobs(),
+            xyz_source(format!("http://{addr}/img/{{z}}/{{x}}/{{y}}")),
+        )
+        .await;
+        let now = now_secs();
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>"#;
+        st.cache
+            .put(
+                TileKey::new("s", 0, 0, 0),
+                &CachedTile {
+                    content_type: "image/svg+xml".into(),
+                    strong_etag: strong_etag(svg),
+                    upstream_validator: None,
+                    status: 200,
+                    fetched_at: now,
+                    last_access: now,
+                    bytes: svg.len() as i64,
+                    blob: Some(Bytes::copy_from_slice(svg)),
+                },
+                false,
+                now,
+            )
+            .unwrap();
+
+        let FetchOutcome::Hit(response) = get_tile(&st, "s", 0, 0, 0, None).await else {
+            panic!("the safe upstream replacement should be served");
+        };
+        assert_eq!(response.content_type, "image/png");
+        assert_eq!(response.body, Bytes::from_static(&[1, 2, 3, 4]));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            st.cache
+                .get(TileKey::new("s", 0, 0, 0))
+                .unwrap()
+                .unwrap()
+                .content_type,
+            "image/png"
+        );
     }
 
     #[tokio::test]
@@ -964,7 +1161,7 @@ mod tests {
         )
         .await;
         match outcome {
-            Ok(FetchOutcome::NotModified { etag }) => {
+            Ok(FetchOutcome::NotModified { etag, .. }) => {
                 assert_eq!(
                     etag, "e",
                     "the matching etag answers 304 with the stale etag"

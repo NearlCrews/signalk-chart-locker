@@ -7,8 +7,7 @@
  */
 
 import type * as React from 'react'
-import LabeledField from './LabeledField.js'
-import { S } from '../styles.js'
+import { LabeledField, TextInput, type FieldErrorLive } from 'signalk-nearlcrews-ui'
 
 interface Props {
   /** Stable id linking the visible label to the input. */
@@ -25,6 +24,10 @@ interface Props {
   placeholder?: string
   /** Disable the input. */
   disabled?: boolean
+  /** Validation message associated with the input. */
+  error?: React.ReactNode
+  /** How changes to the validation message are announced. */
+  errorLive?: FieldErrorLive
 }
 
 /** A label + wide text input + hint row. */
@@ -35,21 +38,25 @@ export default function TextField ({
   value,
   onChange,
   placeholder,
-  disabled
+  disabled,
+  error,
+  errorLive
 }: Props): React.ReactElement {
   return (
-    <LabeledField id={id} label={label} hint={hint}>
-      {(controlProps) => (
-        <input
-          {...controlProps}
-          type='text'
-          style={S.inputWide}
-          placeholder={placeholder}
-          disabled={disabled}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-        />
-      )}
+    <LabeledField
+      label={label}
+      description={hint}
+      error={error}
+      errorLive={errorLive}
+      layout='inline'
+    >
+      <TextInput
+        id={id}
+        placeholder={placeholder}
+        disabled={disabled}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
     </LabeledField>
   )
 }

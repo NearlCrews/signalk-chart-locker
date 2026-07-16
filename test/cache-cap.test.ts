@@ -13,11 +13,15 @@ test('floorToStep rounds down to the nearest multiple of the step', () => {
   assert.equal(floorToStep(35, 5), 35)
   assert.equal(floorToStep(5, 5), 5)
   assert.equal(floorToStep(4, 5), 0)
+  assert.equal(floorToStep(-1, 5), 0)
+  assert.equal(floorToStep(-5.5, 5), 0)
 })
 
 test('floorToStep guards non-finite input and a non-positive step', () => {
   assert.equal(floorToStep(Number.NaN, 5), 0)
   assert.equal(floorToStep(100, 0), 0)
+  assert.equal(floorToStep(100, Number.NaN), 0)
+  assert.equal(floorToStep(100, Number.POSITIVE_INFINITY), 0)
 })
 
 test('snapToStep rounds to the nearest multiple of the step', () => {
@@ -26,6 +30,8 @@ test('snapToStep rounds to the nearest multiple of the step', () => {
   assert.equal(snapToStep(12, 5), 10)
   assert.equal(snapToStep(13, 5), 15)
   assert.equal(snapToStep(Number.NaN, 5), 0)
+  assert.equal(snapToStep(100, Number.NaN), 0)
+  assert.equal(snapToStep(100, Number.POSITIVE_INFINITY), 0)
 })
 
 test('deriveDefaultCapGiB takes 80 percent of free space, floored to the step', () => {

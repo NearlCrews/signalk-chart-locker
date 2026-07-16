@@ -75,6 +75,15 @@ export class ChartRegistry {
     this.#records.set(record.identifier, record)
   }
 
+  /** Publish one complete discovery snapshot without exposing a partially updated scan. */
+  replace (records: Iterable<ChartRecord>, errors: Iterable<readonly [string, string]>, at = Date.now()): void {
+    this.#records.clear()
+    for (const record of records) this.#records.set(record.identifier, record)
+    this.#errors.clear()
+    for (const [fileName, error] of errors) this.#errors.set(fileName, error)
+    this.#lastScanAt = at
+  }
+
   delete (id: string): void {
     this.#records.delete(id)
   }
@@ -150,12 +159,17 @@ export interface ChartRouteApp {
 }
 
 // Register the v2 provider and the v1 routes once per app, so an enable, disable, then re-enable
-// cycle does not throw a duplicate-provider error. The methods close over the live registry.
-const registeredApps = new WeakSet<object>()
+// cycle does not throw a duplicate-provider error. A mutable holder lets a recreated plugin factory
+// rebind the permanent provider and routes to its new live registry.
+const registeredApps = new WeakMap<object, { registry: ChartRegistry }>()
 
 export function registerChartProvider (app: ChartRouteApp, registry: ChartRegistry): void {
-  if (registeredApps.has(app)) return
-  registeredApps.add(app)
+  const existing = registeredApps.get(app)
+  if (existing !== undefined) {
+    existing.registry = registry
+    return
+  }
+  const holder = { registry }
 
   app.registerResourceProvider({
     type: 'charts',
@@ -163,26 +177,29 @@ export function registerChartProvider (app: ChartRouteApp, registry: ChartRegist
       listResources: () => {
         // No server-side filtering; the local registry always returns all charts
         const out: Record<string, ChartResource> = {}
-        for (const resource of registry.list()) out[resource.identifier] = resource
+        for (const resource of holder.registry.list()) out[resource.identifier] = resource
         return Promise.resolve(out)
       },
       getResource: (id: string) => {
-        const resource = registry.get(id)
+        const resource = holder.registry.get(id)
         return resource ? Promise.resolve(resource) : Promise.reject(new Error(`Chart not found: ${id}`))
       },
       setResource: (_id: string, _value: unknown) => Promise.reject(new Error(`Not implemented: cannot set ${_id}`)),
       deleteResource: (_id: string) => Promise.reject(new Error(`Not implemented: cannot delete ${_id}`))
     }
   })
+  // Publish the holder only after the server accepts the provider. A thrown registration remains
+  // retryable instead of poisoning this app in the deduplication map.
+  registeredApps.set(app, holder)
 
   app.get(`${V1_CHARTS}/:identifier`, (req, res) => {
-    const resource = registry.get(req.params.identifier)
+    const resource = holder.registry.get(req.params.identifier)
     if (resource) res.json(resource)
     else res.status(404).send('Not found')
   })
   app.get(V1_CHARTS, (_req, res) => {
     const out: Record<string, ChartResource> = {}
-    for (const resource of registry.list()) out[resource.identifier] = resource
+    for (const resource of holder.registry.list()) out[resource.identifier] = resource
     res.json(out)
   })
 }

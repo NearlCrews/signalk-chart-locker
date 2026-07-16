@@ -1,5 +1,5 @@
 /**
- * Shared fetch scaffolding for the panel's polling and one-shot hooks. It owns the per-mount abort
+ * Shared fetch scaffolding for every panel HTTP hook. It owns the per-mount abort
  * controller (fired on unmount) and mints a fresh timeout signal per call, so a slow request cannot
  * hang past the panel's timeout and an outstanding request does not run against an unmounted component.
  * The returned object is stable across renders, so callers can safely reference it from an effect.

@@ -32,9 +32,13 @@ export function insideBox (pos: Position, bbox: LngLatBbox | null): boolean {
   return longitudeInside && pos.latitude >= bbox[1] && pos.latitude <= bbox[3]
 }
 
-/** Whether the position is inside any of the saved regions. An empty list is never inside. */
+/**
+ * Whether the position is inside coverage that should suppress an automatic warm. Ready regions have
+ * complete coverage, and downloading regions already have an active job. Capped, error, and
+ * needs-redownload regions may be incomplete, so position warming remains available inside them.
+ */
 export function insideAnyRegion (pos: Position, regions: SavedRegion[]): boolean {
-  return regions.some((r) => insideBox(pos, r.bbox))
+  return regions.some((region) => (region.status === 'ready' || region.status === 'downloading') && insideBox(pos, region.bbox))
 }
 
 const EARTH_RADIUS_M = 6_371_000

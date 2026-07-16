@@ -4,6 +4,17 @@
 
 use serde::Deserialize;
 
+const MAX_TITLE_BYTES: usize = 256;
+const MAX_ATTRIBUTION_BYTES: usize = 16 * 1024;
+const MAX_URL_BYTES: usize = 4 * 1024;
+const MAX_COVERAGE_BOXES: usize = 64;
+const MAX_WMS_LAYER_BYTES: usize = 1024;
+const MAX_WMS_STYLE_BYTES: usize = 1024;
+const MAX_WMS_VERSION_BYTES: usize = 32;
+const MAX_WMS_FORMAT_BYTES: usize = 128;
+const MAX_ALLOWED_HOSTS: usize = 32;
+const MAX_HOST_BYTES: usize = 253;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartSource {
@@ -52,7 +63,8 @@ impl ChartSource {
     /// malformed direct config push cannot install unsafe or nonsensical source definitions.
     pub fn is_valid(&self, allow_http: bool) -> bool {
         if !valid_source_id(&self.id)
-            || self.title.trim().is_empty()
+            || !valid_bounded_text(&self.title, MAX_TITLE_BYTES, false)
+            || !valid_bounded_text(&self.attribution, MAX_ATTRIBUTION_BYTES, true)
             || !matches!(self.tile_size, 256 | 512)
             || self.minzoom > self.maxzoom
             || self.maxzoom > 24
@@ -61,7 +73,9 @@ impl ChartSource {
                 .is_some_and(|zoom| zoom < self.minzoom || zoom > self.maxzoom)
             || self.bounds.is_some_and(|bbox| !valid_source_bbox(bbox))
             || self.coverage.as_ref().is_some_and(|coverage| {
-                coverage.is_empty() || coverage.iter().any(|bbox| !valid_source_bbox(*bbox))
+                coverage.is_empty()
+                    || coverage.len() > MAX_COVERAGE_BOXES
+                    || coverage.iter().any(|bbox| !valid_source_bbox(*bbox))
             })
         {
             return false;
@@ -76,14 +90,16 @@ impl ChartSource {
             UpstreamTemplate::Wms {
                 base,
                 layers,
+                styles,
                 version,
                 format,
                 ..
             } => {
                 valid_upstream_url(base, allow_http).is_some()
-                    && !layers.is_empty()
-                    && !version.is_empty()
-                    && !format.is_empty()
+                    && valid_bounded_text(layers, MAX_WMS_LAYER_BYTES, false)
+                    && valid_bounded_text(styles, MAX_WMS_STYLE_BYTES, true)
+                    && valid_bounded_text(version, MAX_WMS_VERSION_BYTES, false)
+                    && valid_bounded_text(format, MAX_WMS_FORMAT_BYTES, false)
             }
             UpstreamTemplate::Arcgis { base } => valid_upstream_url(base, allow_http).is_some(),
             UpstreamTemplate::Style {
@@ -97,6 +113,7 @@ impl ChartSource {
                     return false;
                 };
                 !allowed_hosts.is_empty()
+                    && allowed_hosts.len() <= MAX_ALLOWED_HOSTS
                     && allowed_hosts.iter().all(|host| valid_host(host))
                     && allowed_hosts
                         .iter()
@@ -123,6 +140,14 @@ fn valid_source_id(value: &str) -> bool {
 }
 
 fn valid_upstream_url(value: &str, allow_http: bool) -> Option<reqwest::Url> {
+    if value.is_empty()
+        || value.len() > MAX_URL_BYTES
+        || value
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        return None;
+    }
     reqwest::Url::parse(value).ok().filter(|url| {
         (url.scheme() == "https" || (allow_http && url.scheme() == "http"))
             && url.host().is_some()
@@ -133,8 +158,19 @@ fn valid_upstream_url(value: &str, allow_http: bool) -> Option<reqwest::Url> {
 
 fn valid_host(value: &str) -> bool {
     !value.is_empty()
-        && !value.chars().any(char::is_whitespace)
+        && value.len() <= MAX_HOST_BYTES
+        && !value
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control())
         && !value.contains(['/', '@', '?', '#'])
+}
+
+fn valid_bounded_text(value: &str, max_bytes: usize, allow_empty: bool) -> bool {
+    value.len() <= max_bytes
+        && (allow_empty || !value.trim().is_empty())
+        && !value
+            .chars()
+            .any(|ch| ch.is_control() && !matches!(ch, '\t' | '\n' | '\r'))
 }
 
 fn valid_source_bbox([west, south, east, north]: [f64; 4]) -> bool {
@@ -151,6 +187,14 @@ fn valid_source_bbox([west, south, east, north]: [f64; 4]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn xyz_source() -> ChartSource {
+        serde_json::from_str(
+            r#"{"id":"s","title":"S","tileSize":256,"minzoom":0,"maxzoom":18,"attribution":"",
+                "upstream":{"mode":"xyz","urlTemplate":"https://h/{z}/{x}/{y}.png"}}"#,
+        )
+        .unwrap()
+    }
 
     #[test]
     fn deserializes_the_camelcase_package_json() {
@@ -220,6 +264,73 @@ mod tests {
         )
         .unwrap();
         assert!(!style.is_valid(false));
+    }
+
+    #[test]
+    fn source_validation_bounds_catalog_strings_and_collections() {
+        let mut source = xyz_source();
+        source.title = "t".repeat(MAX_TITLE_BYTES + 1);
+        assert!(!source.is_valid(false));
+
+        let mut source = xyz_source();
+        source.attribution = "a".repeat(3_000);
+        assert!(
+            source.is_valid(false),
+            "the shared Seascape attribution is roughly 3 KiB"
+        );
+        source.attribution = "a".repeat(MAX_ATTRIBUTION_BYTES + 1);
+        assert!(!source.is_valid(false));
+
+        let mut source = xyz_source();
+        source.coverage = Some(vec![[-1.0, -1.0, 1.0, 1.0]; MAX_COVERAGE_BOXES + 1]);
+        assert!(!source.is_valid(false));
+
+        let mut source = xyz_source();
+        let UpstreamTemplate::Xyz { url_template } = &mut source.upstream else {
+            unreachable!()
+        };
+        *url_template = format!("https://h/{}/{{z}}/{{x}}/{{y}}", "u".repeat(MAX_URL_BYTES));
+        assert!(!source.is_valid(false));
+
+        let wms_json = r#"{"id":"w","title":"W","tileSize":256,"minzoom":0,"maxzoom":18,"attribution":"",
+            "upstream":{"mode":"wms","base":"https://h/wms","layers":"layer","styles":"","version":"1.3.0","format":"image/png","transparent":true}}"#;
+        for field in ["layers", "styles", "version", "format"] {
+            let mut source: ChartSource = serde_json::from_str(wms_json).unwrap();
+            let UpstreamTemplate::Wms {
+                layers,
+                styles,
+                version,
+                format,
+                ..
+            } = &mut source.upstream
+            else {
+                unreachable!()
+            };
+            match field {
+                "layers" => *layers = "x".repeat(MAX_WMS_LAYER_BYTES + 1),
+                "styles" => *styles = "x".repeat(MAX_WMS_STYLE_BYTES + 1),
+                "version" => *version = "x".repeat(MAX_WMS_VERSION_BYTES + 1),
+                "format" => *format = "x".repeat(MAX_WMS_FORMAT_BYTES + 1),
+                _ => unreachable!(),
+            }
+            assert!(!source.is_valid(false), "oversize WMS {field}");
+        }
+
+        let style_json = r#"{"id":"style","title":"S","tileSize":512,"minzoom":0,"maxzoom":18,"attribution":"",
+            "upstream":{"mode":"style","styleUrl":"https://tiles.example.test/style.json","allowedHosts":["tiles.example.test"]}}"#;
+        let mut source: ChartSource = serde_json::from_str(style_json).unwrap();
+        let UpstreamTemplate::Style { allowed_hosts, .. } = &mut source.upstream else {
+            unreachable!()
+        };
+        *allowed_hosts = vec!["tiles.example.test".into(); MAX_ALLOWED_HOSTS + 1];
+        assert!(!source.is_valid(false));
+
+        let mut source: ChartSource = serde_json::from_str(style_json).unwrap();
+        let UpstreamTemplate::Style { allowed_hosts, .. } = &mut source.upstream else {
+            unreachable!()
+        };
+        allowed_hosts[0] = "h".repeat(MAX_HOST_BYTES + 1);
+        assert!(!source.is_valid(false));
     }
 
     #[test]

@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.panel.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "types": ["node", "react", "react-dom", "@playwright/test"]
+  },
+  "include": [
+    "fixtures/browser/**/*.ts",
+    "fixtures/browser/**/*.tsx",
+    "tests/browser/**/*.ts",
+    "playwright.config.ts"
+  ]
+}

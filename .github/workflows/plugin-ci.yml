@@ -5,9 +5,9 @@ name: SignalK Plugin CI
 # a workflow run referencing SignalK/signalk-server/.github/workflows/plugin-ci.yml
 # exists on the published version's commit; without one it applies a scoring
 # penalty. The tag trigger guarantees a run exists on the exact commit each
-# release is published from. The reusable workflow runs npm ci, the build, the
-# tests, and npm pack across its supported platform and Node.js matrix.
-# This covers only the npm plugin; the Rust container has its own job in ci.yml.
+# release is published from. The reusable workflow runs npm ci, the build, the tests, and npm pack
+# across its supported platform and Node.js matrix. Its reviewed upstream revision is pinned here and
+# advanced through the dependency-update procedure. The Rust container has its own job in ci.yml.
 
 on:
   push:
@@ -22,6 +22,6 @@ permissions:
 
 jobs:
   plugin-ci:
-    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@master
+    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@fc9394a1d80577b118857e9ef6761651bf0d9082 # master 2026-07-16
     with:
       build-command: npm run build

@@ -61,16 +61,16 @@ When using this plugin:
 
 This project uses:
 
-- `npm audit --omit=dev` for vulnerability scanning of the published Node runtime dependencies
+- `npm audit` for vulnerability scanning of the published runtime and the panel build toolchain
 - RustSec advisories through `cargo-audit` for the Rust tilecache container
 - Automated dependency updates via Dependabot for security patches
 
 Run a security audit:
 
 ```bash
-npm audit --omit=dev
+npm audit
 cd container
-cargo install cargo-audit --locked
+cargo install cargo-audit --version 0.22.2 --locked
 cargo audit --file Cargo.lock
 ```
 
@@ -83,16 +83,21 @@ sprite configured for the boat. These requests carry only tile coordinates and
 standard HTTP cache headers; the plugin sends no personal data, no credentials,
 and no account login of any kind.
 
-Saved-region naming uses a guarded `/api/geocode` proxy to the OpenStreetMap
-Nominatim service. That request carries only the region's bounding coordinates.
+Saved-region naming can use a guarded `/api/geocode` proxy to the OpenStreetMap Nominatim service.
+When enabled, that request carries only the region box center rounded to five decimal places. The
+Advanced geocoding control disables the route and provider egress for operators who do not want that
+coordinate disclosed. The service enforces one application-wide request per second and caches up to
+256 successful lookups in memory for 24 hours.
 
-The container is tokenless and Signal K agnostic: only the in-process plugin
-talks to it. Local `.pmtiles` chart files are served by the Node plugin
-itself, never mounted into or served by the egress container, so the Signal K
-configuration tree (including `security.json`) is never exposed to the
-internet-facing container. The runtime image carries no GDAL, GEOS, PROJ, or
-SpatiaLite: the tilecache binary links only against libc, libm, libgcc, and the
-loader.
+The container is Signal K agnostic, and only the in-process plugin is intended to talk to it. At
+startup, the plugin creates a private, persistent 32-byte control token and passes it to the
+container. Container endpoints that change configuration, delete cached data, start a warm, or
+cancel a warm require that token in the `x-tilecache-token` header. The token file is mode 0600 and
+is never exposed through the plugin HTTP API or logs. Local `.pmtiles` chart files are served by the
+Node plugin itself, never mounted into or served by the egress container, so the Signal K
+configuration tree, including `security.json`, is never exposed to the internet-egress container.
+The runtime image carries no GDAL, GEOS, PROJ, or SpatiaLite: the tilecache binary links only against
+libc, libm, libgcc, and the loader.
 
 The source allowlist and cache budgets are pushed by the plugin after startup. Until that push
 completes, the panel and plugin status report the container as unconfigured. Container health is

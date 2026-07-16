@@ -4,46 +4,142 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   tilecache:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: 1.95.0
           components: rustfmt, clippy
       - name: rustfmt
         run: cargo fmt --check
         working-directory: container
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
         working-directory: container
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace --all-features
         working-directory: container
       - name: cargo audit
         run: |
-          cargo install cargo-audit --locked
+          cargo install cargo-audit --version 0.22.2 --locked
           cargo audit --file Cargo.lock
         working-directory: container
       - name: cargo build
-        run: cargo build --release --bin tilecache
+        run: cargo build --locked --release --bin tilecache --all-features
         working-directory: container
+      - name: Exercise the Node and Rust control contract
+        run: TILECACHE_BIN="$PWD/target/release/tilecache" npm --prefix .. run test:node-rust-contract
+        working-directory: container
+      - name: Verify Rust third-party notices
+        run: npm run licenses:rust:check
 
   plugin:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       matrix:
         node: [22, 24]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
+          cache: npm
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
       - run: npm run build
-      - run: npm audit --omit=dev
+      - run: npm audit
       - run: npm run check:package
+
+  panel-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx --no-install playwright install --with-deps chromium firefox webkit
+      - run: npm run test:browser:cross
+
+  signalk-admin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - signalk_server: '2.24.0'
+            signalk_container: '1.20.0'
+          - signalk_server: 'latest'
+            signalk_container: 'latest'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run pack:release
+      - run: npm run verify:release-tarball
+      - name: Install in Signal K ${{ matrix.signalk_server }} with signalk-container ${{ matrix.signalk_container }}
+        env:
+          SIGNALK_CONTAINER_VERSION: ${{ matrix.signalk_container }}
+          SIGNALK_SERVER_VERSION: ${{ matrix.signalk_server }}
+        run: |
+          mkdir -p /tmp/sk-test
+          cd /tmp/sk-test
+          npm init --yes
+          npm install "signalk-server@${SIGNALK_SERVER_VERSION}" "signalk-container@${SIGNALK_CONTAINER_VERSION}"
+          npm install "$GITHUB_WORKSPACE"/package/*.tgz --ignore-scripts
+          # npm may hoist the Admin package even though signalk-server serves it from its
+          # dependency-local path. Link the same installed package back to that expected location.
+          node "$GITHUB_WORKSPACE/scripts/link-signalk-admin.mjs" /tmp/sk-test
+          mkdir -p plugin-config-data
+          echo '{"enabled":true,"configuration":{}}' > plugin-config-data/signalk-chart-locker.json
+      - name: Execute the Admin host and mount the production panel
+        env:
+          PORT: 3000
+          SIGNALK_BROWSER_CHANNEL: chrome
+          SIGNALK_URL: http://127.0.0.1:3000
+          SIGNALK_NODE_CONFIG_DIR: /tmp/sk-test
+        run: |
+          set -euo pipefail
+          cd /tmp/sk-test
+          npx --no-install signalk-server > /tmp/signalk.log 2>&1 &
+          server_pid=$!
+          trap 'kill $server_pid 2>/dev/null || true' EXIT
+          ready=false
+          for attempt in $(seq 1 45); do
+            if curl --fail --silent http://127.0.0.1:3000/signalk/v1/api/ > /dev/null; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != true ]; then
+            cat /tmp/signalk.log
+            exit 1
+          fi
+          cd "$GITHUB_WORKSPACE"
+          if ! npm run test:integration; then
+            cat /tmp/signalk.log
+            exit 1
+          fi

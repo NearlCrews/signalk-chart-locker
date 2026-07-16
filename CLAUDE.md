@@ -16,9 +16,10 @@ Chart Locker ships one npm package and one coordinated container image:
 - Container lifecycle is delegated to `signalk-container`. Do not add direct Podman or Docker process
   management to the plugin.
 
-The container is tokenless and Signal K agnostic. Only the plugin communicates with it through the
-private address returned by `resolveContainerAddress`. Do not publish the container port or mount the
-Signal K configuration tree into the container.
+The container is Signal K agnostic. Only the plugin communicates with it through the private address
+returned by `resolveContainerAddress`, and every mutating control request carries the plugin's private,
+persistent control token. Do not publish the container port, expose the token, or mount the Signal K
+configuration tree into the container.
 
 Local PMTiles files stay in the Node process. The plugin validates and registers them, rechecks path
 containment when serving, and supports strong ETags and HTTP byte ranges. The egress container handles
@@ -50,7 +51,8 @@ native libraries.
 
 - `src/charts/`: PMTiles discovery, metadata, registry, serving support, and overrides
 - `src/http/`: public proxy routes and admin-gated management routes
-- `src/panel/`: federated React configuration panel, shared primitives, hooks, styles, and themes
+- `src/panel/`: federated React configuration panel, domain components and hooks, and local table
+  styles; shared primitives and themes come from `signalk-nearlcrews-ui`
 - `src/plugin/`: Signal K lifecycle and container-manager integration
 - `src/runtime/`: persistent state, cache client, position warming, and runtime helpers
 - `container/tilecache/`: SQLite cache, upstream fetcher, styles, warm jobs, health, and HTTP routes
@@ -67,18 +69,20 @@ Run the Node and panel gates from the repository root:
 npm run typecheck
 npm run lint
 npm test
+npm run test:browser:cross
 npm run build
 npm run check:package
-npm audit --omit=dev
+npm run licenses:rust:check
+npm audit
 ```
 
 Run the Rust gates from `container/`:
 
 ```bash
-cargo fmt -- --check
-cargo test --workspace --all-features
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo build --release --bin tilecache
+cargo fmt --check
+cargo test --locked --workspace --all-features
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo build --locked --release --bin tilecache --all-features
 cargo audit --file Cargo.lock
 ```
 

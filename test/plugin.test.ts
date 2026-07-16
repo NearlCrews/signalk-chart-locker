@@ -46,6 +46,42 @@ test('start rejects malformed configuration that bypasses the panel validation',
   assert.ok(app.errors.some((message) => message.includes('cacheCapGiB')))
 })
 
+test('start rejects oversized and control-bearing filesystem paths before manager access', async () => {
+  const cases: Array<{ config: unknown, field: string }> = [
+    { config: { charts: { path: 'charts/\u0000bad' } }, field: 'charts.path' },
+    { config: { charts: { path: 'charts/\u0085bad' } }, field: 'charts.path' },
+    { config: { advanced: { cacheVolumeSource: '/media/\u2028bad' } }, field: 'cacheVolumeSource' },
+    { config: { advanced: { cacheVolumeSource: '/media/\u2029bad' } }, field: 'cacheVolumeSource' },
+    { config: { charts: { path: 'x'.repeat(4097) } }, field: 'charts.path' },
+    { config: { advanced: { cacheVolumeSource: `/${'x'.repeat(4096)}` } }, field: 'cacheVolumeSource' }
+  ]
+
+  for (const { config, field } of cases) {
+    const record = managerRecord()
+    setContainerManager(fakeManager({ record }))
+    const app = fakeApp()
+    const plugin = createPlugin(app as never)
+    await plugin.start(config as never, () => {})
+    assert.ok(app.errors.some((message) => message.includes(field)), field)
+    assert.deepEqual(record.ensured, [], field)
+    await plugin.stop()
+  }
+})
+
+test('start preserves a legitimate absolute external-drive path', async () => {
+  const record = managerRecord()
+  setContainerManager(fakeManager({ record, address: null }))
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  await plugin.start({ advanced: { cacheVolumeSource: ' /media/Chart Locker SSD ' } }, () => {})
+  assert.deepEqual(app.errors, [])
+  assert.deepEqual(record.ensured[0]?.config.volumes?.['/signalk-data/chart-locker-tilecache'], {
+    source: '/media/Chart Locker SSD',
+    ifMissing: 'skip'
+  })
+  await plugin.stop()
+})
+
 test('start migrates legacy cache limits accepted before 0.4.3', async () => {
   for (const [storedCap, storedBudget, expectedCap] of [[2, 9, 4], [100, 50, 32]]) {
     const record = managerRecord()
@@ -139,12 +175,64 @@ test('the registration currentTag reflects a trimmed configured image tag', asyn
   await plugin.stop()
 })
 
+test('start migrates a skipped-release schema default to the current container image', async () => {
+  const updates = updatesRecord()
+  const record = managerRecord()
+  setContainerManager(fakeManager({ updates, record, address: null }))
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  await plugin.start({ advanced: { imageTag: ' v0.1.0 ' } }, () => {})
+  assert.equal(record.ensured[0]?.config.tag, DEFAULT_TILECACHE_TAG)
+  assert.equal(updates.registered[0]?.currentTag(), DEFAULT_TILECACHE_TAG)
+  await plugin.stop()
+})
+
 test('start completes against an older manager with no update service', async () => {
   setContainerManager(fakeManager())
   const app = fakeApp()
   const plugin = createPlugin(app as never)
   await assert.doesNotReject(async () => { await plugin.start({}, () => {}) })
   await plugin.stop()
+})
+
+test('stop cancels startup when the container manager never becomes ready', async () => {
+  const manager = fakeManager()
+  manager.whenReady = async () => await new Promise<void>(() => {})
+  setContainerManager(manager)
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  const starting = plugin.start({}, () => {})
+  await new Promise((resolve) => setImmediate(resolve))
+  const stopping = plugin.stop()
+  await Promise.all([starting, stopping])
+  assert.equal(app.errors.some((message) => message.includes('startup timeout')), false)
+})
+
+test('stop aborts an in-flight startup container fetch instead of waiting for its timeout', async (t) => {
+  setContainerManager(fakeManager({ address: '127.0.0.1:8080' }))
+  const app = fakeApp()
+  let started: (() => void) | undefined
+  const healthStarted = new Promise<void>((resolve) => { started = resolve })
+  let aborted = false
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input)
+    if (!url.endsWith('/health')) throw new Error(`unexpected fetch ${url}`)
+    started?.()
+    return await new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        aborted = true
+        reject(new DOMException('Aborted', 'AbortError'))
+      }, { once: true })
+    })
+  })
+  const plugin = createPlugin(app as never)
+  const starting = plugin.start({}, () => {})
+  await healthStarted
+  const beganStopping = Date.now()
+  const stopping = plugin.stop()
+  await Promise.all([starting, stopping])
+  assert.equal(aborted, true)
+  assert.ok(Date.now() - beganStopping < 1000)
 })
 
 test('a throwing update-service register does not break start', async () => {
@@ -158,7 +246,7 @@ test('a throwing update-service register does not break start', async () => {
   await assert.doesNotReject(async () => { await plugin.start({}, () => {}) })
   assert.deepEqual(updates.registered, [])
   assert.deepEqual(updates.checked, [])
-  assert.ok(app.status.some(s => s.startsWith('Tilecache at')), 'doStart must reach its final tilecache status')
+  assert.ok(app.status.some(s => s.startsWith('Tilecache container unavailable')), 'doStart must reach its final tilecache status')
   await plugin.stop()
 })
 
@@ -192,7 +280,7 @@ test('stop without a prior start does not unregister', async () => {
 })
 
 test('startup marks a saved region for re-download when its cache pins disappeared', async (t) => {
-  setContainerManager(fakeManager())
+  setContainerManager(fakeManager({ address: '127.0.0.1:8080' }))
   const app = fakeApp()
   const { addRegion, loadRegionsStore } = await import('../src/runtime/regions-store.js')
   addRegion(app.getDataDirPath(), {
@@ -219,5 +307,250 @@ test('startup marks a saved region for re-download when its cache pins disappear
   const region = loadRegionsStore(app.getDataDirPath()).regions[0]!
   assert.equal(region.status, 'needs-redownload')
   assert.equal(region.bytes, 0)
+  await plugin.stop()
+})
+
+test('startup refreshes durable terminal region bytes from authoritative cache totals', async (t) => {
+  setContainerManager(fakeManager({ address: '127.0.0.1:8080' }))
+  const app = fakeApp()
+  const { addRegion, loadRegionsStore } = await import('../src/runtime/regions-store.js')
+  addRegion(app.getDataDirPath(), {
+    id: 'region-authoritative',
+    name: 'Offline area',
+    bbox: [-1, -1, 1, 1],
+    sourceIds: ['source'],
+    minzoom: 1,
+    maxzoom: 2,
+    createdAt: 1,
+    lastDownloadedAt: 2,
+    bytes: 100,
+    status: 'ready'
+  })
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+    const url = String(input)
+    if (url.endsWith('/health')) return Response.json({ status: 'ok' })
+    if (url.endsWith('/config')) return new Response(null, { status: 204 })
+    if (url.endsWith('/cache/regions')) return Response.json({ regions: { 'region-authoritative': 55 } })
+    throw new Error(`unexpected fetch ${url}`)
+  })
+  const plugin = createPlugin(app as never)
+  await plugin.start({}, () => {})
+  try {
+    const region = loadRegionsStore(app.getDataDirPath()).regions[0]!
+    assert.equal(region.status, 'ready')
+    assert.equal(region.bytes, 55)
+  } finally {
+    await plugin.stop()
+  }
+})
+
+test('startup re-probes health after a successful configuration push', async (t) => {
+  setContainerManager(fakeManager({ address: '127.0.0.1:8080' }))
+  const app = fakeApp()
+  let healthCalls = 0
+  let configToken: string | null = null
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input)
+    if (url.endsWith('/health')) {
+      healthCalls++
+      return healthCalls === 1
+        ? new Response('{}', { status: 503 })
+        : Response.json({ status: 'ok' })
+    }
+    if (url.endsWith('/config')) {
+      configToken = (init?.headers as Record<string, string>)['x-tilecache-token'] ?? null
+      return new Response(null, { status: 204 })
+    }
+    if (url.endsWith('/cache/regions')) return Response.json({ regions: {} })
+    throw new Error(`unexpected fetch ${url}`)
+  })
+  const plugin = createPlugin(app as never)
+  await plugin.start({}, () => {})
+  try {
+    assert.equal(healthCalls, 2)
+    assert.ok(configToken)
+    assert.ok(app.status.some((status) => status.includes('; ready.')))
+  } finally {
+    await plugin.stop()
+  }
+})
+
+test('schema includes the reverse-geocoding egress control enabled by default', () => {
+  const plugin = createPlugin(fakeApp() as never)
+  const schema = typeof plugin.schema === 'function' ? plugin.schema() : plugin.schema
+  const advanced = (schema as { properties: { advanced: { properties: Record<string, { default?: unknown }> } } }).properties.advanced.properties
+  assert.equal(advanced.geocodingEnabled?.default, true)
+})
+
+test('schema leaves imageTag blank so the runtime fallback advances with the plugin version', async () => {
+  const record = managerRecord()
+  setContainerManager(fakeManager({ record, address: null }))
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  const schema = typeof plugin.schema === 'function' ? plugin.schema() : plugin.schema
+  const advanced = (schema as { properties: { advanced: { properties: Record<string, { default?: unknown }> } } }).properties.advanced.properties
+  assert.equal(advanced.imageTag?.default, '')
+  await plugin.start({ advanced: { imageTag: '' } }, () => {})
+  assert.equal(record.ensured[0]?.config.tag, DEFAULT_TILECACHE_TAG)
+  await plugin.stop()
+})
+
+test('repeated start cleans up the previous position subscription before replacing it', async () => {
+  setContainerManager(fakeManager({ address: null }))
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  await plugin.start({}, () => {})
+  assert.equal(app.positionUnsubCalls, 0)
+  await plugin.start({}, () => {})
+  assert.equal(app.positionUnsubCalls, 1)
+  await plugin.stop()
+  assert.equal(app.positionUnsubCalls, 2)
+})
+
+test('route reconciliation starts whether router registration happens before or after plugin start', async () => {
+  for (const registerFirst of [true, false]) {
+    const app = fakeApp()
+    let starts = 0
+    let stops = 0
+    const plugin = createPlugin(app as never, {
+      registerRegionsRoutes: (() => ({
+        start () { starts++ },
+        async stop () { stops++ }
+      })) as never
+    })
+    const router = { get () {}, post () {}, delete () {} } as never
+    if (registerFirst) plugin.registerWithRouter?.(router)
+    await plugin.start({}, () => {})
+    if (!registerFirst) plugin.registerWithRouter?.(router)
+    assert.equal(starts, 1)
+    await plugin.stop()
+    assert.equal(stops, 1)
+  }
+})
+
+test('admin recovery routes retain the container address when configuration fails while public tiles stay unavailable', async (t) => {
+  setContainerManager(fakeManager({ address: '127.0.0.1:8080' }))
+  const app = fakeApp()
+  let adminAddress: (() => string | null) | undefined
+  let readinessHandler: ((req: unknown, res: { status: (code: number) => unknown, setHeader: (name: string, value: string) => void, end: () => void }) => void) | undefined
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+    const url = String(input)
+    if (url.endsWith('/health')) return Response.json({ status: 'ok' })
+    if (url.endsWith('/config')) return Response.json({ error: 'pinned bytes exceed cap' }, { status: 400 })
+    if (url.endsWith('/cache/regions')) return Response.json({ regions: {} })
+    throw new Error(`unexpected fetch ${url}`)
+  })
+  const plugin = createPlugin(app as never, {
+    registerRegionsRoutes: ((_router: unknown, _app: unknown, getAddress: () => string | null) => {
+      adminAddress = getAddress
+      return { start () {}, async stop () {} }
+    }) as never
+  })
+  plugin.registerWithRouter?.({
+    get (path: string, handler: typeof readinessHandler) {
+      if (path === '/tiles/ready') readinessHandler = handler
+    },
+    post () {},
+    delete () {}
+  } as never)
+  await plugin.start({}, () => {})
+  try {
+    assert.equal(adminAddress?.(), '127.0.0.1:8080')
+    let status = 0
+    readinessHandler?.({ url: '/tiles/ready', headers: {}, on () {} }, {
+      status (code) { status = code; return this },
+      setHeader () {},
+      end () {}
+    })
+    assert.equal(status, 503)
+  } finally {
+    await plugin.stop()
+  }
+})
+
+test('teardown remains best effort when discovery and region cleanup reject', async () => {
+  const app = fakeApp()
+  let discoveryStops = 0
+  let regionStops = 0
+  const plugin = createPlugin(app as never, {
+    startDiscovery: (async () => ({
+      async rescan () {},
+      async stop () { discoveryStops++; throw new Error('discovery stop failed') }
+    })) as never,
+    registerRegionsRoutes: (() => ({
+      start () {},
+      async stop () { regionStops++; throw new Error('regions stop failed') }
+    })) as never
+  })
+  plugin.registerWithRouter?.({ get () {}, post () {}, delete () {} } as never)
+  await plugin.start({}, () => {})
+  await assert.doesNotReject(async () => { await plugin.stop() })
+  assert.equal(discoveryStops, 1)
+  assert.equal(regionStops, 1)
+})
+
+test('a never-settling container launch is bounded and a later completion is stopped', async () => {
+  const record = managerRecord()
+  const manager = fakeManager({ record, address: null })
+  let completeLaunch!: () => void
+  manager.ensureRunning = (name, config) => {
+    record.ensured.push({ name, config })
+    return new Promise<void>((resolve) => { completeLaunch = resolve })
+  }
+  setContainerManager(manager)
+  const app = fakeApp()
+  const plugin = createPlugin(app as never, { managerOperationTimeoutMs: 10 })
+
+  await plugin.start({}, () => {})
+  assert.equal(record.stopped.length, 0)
+  completeLaunch()
+  const deadline = Date.now() + 1000
+  while (record.stopped.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.deepEqual(record.stopped, [TILECACHE_CONTAINER_NAME])
+  await plugin.stop()
+})
+
+test('address resolution and teardown manager calls are independently bounded', async () => {
+  {
+    const record = managerRecord()
+    const manager = fakeManager({ record })
+    manager.resolveContainerAddress = async () => await new Promise<string | null>(() => {})
+    setContainerManager(manager)
+    const plugin = createPlugin(fakeApp() as never, { managerOperationTimeoutMs: 10 })
+    await plugin.start({}, () => {})
+    await plugin.stop()
+    assert.deepEqual(record.stopped, [TILECACHE_CONTAINER_NAME])
+  }
+
+  {
+    const record = managerRecord()
+    const manager = fakeManager({ record, address: null })
+    manager.stop = async (name) => {
+      record.stopped.push(name)
+      await new Promise<void>(() => {})
+    }
+    setContainerManager(manager)
+    const plugin = createPlugin(fakeApp() as never, { managerOperationTimeoutMs: 10 })
+    await plugin.start({}, () => {})
+    const started = Date.now()
+    await plugin.stop()
+    assert.ok(Date.now() - started < 1000)
+    assert.deepEqual(record.stopped, [TILECACHE_CONTAINER_NAME])
+  }
+})
+
+test('a pending late cleanup suppresses a newer launch of the fixed container name', async () => {
+  const record = managerRecord()
+  const manager = fakeManager({ record, address: null })
+  manager.ensureRunning = (name, config) => {
+    record.ensured.push({ name, config })
+    return new Promise<void>(() => {})
+  }
+  setContainerManager(manager)
+  const app = fakeApp()
+  const plugin = createPlugin(app as never, { managerOperationTimeoutMs: 10 })
+  await plugin.start({}, () => {})
+  await plugin.start({}, () => {})
+  assert.equal(record.ensured.length, 1)
   await plugin.stop()
 })

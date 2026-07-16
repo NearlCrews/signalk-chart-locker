@@ -9,6 +9,8 @@ import { fakeApp, makeRegionsRouter, fakeRegionsRes } from './helpers.js'
 
 /** The Recorder fake carries the slice registerRegionsRoutes reads (securityStrategy, getDataDirPath). */
 const app = (): ServerAPI => fakeApp() as unknown as ServerAPI
+const WARM_BOOT_ID = '0123456789abcdef0123456789abcdef'
+const warmJobId = (counter: number): string => `warm-${WARM_BOOT_ID}-${counter}`
 
 test('registerRegionsRoutes mounts all region routes', () => {
   const { router, routes } = makeRegionsRouter()
@@ -47,6 +49,9 @@ test('POST /api/regions rejects invalid sources, zooms, coordinates, and names b
     { ...valid, bbox: [-10, 50, 181, 60] },
     { ...valid, bbox: [10, 50, 10, 60] },
     { ...valid, bbox: [180, 50, -180, 60] },
+    { ...valid, name: 'bad\nname' },
+    { ...valid, name: 'bad\u0085name' },
+    { ...valid, name: 'bad\u2028name' },
     { ...valid, name: 'x'.repeat(121) }
   ]) {
     const { responded, res } = fakeRegionsRes()
@@ -63,7 +68,7 @@ test('POST /api/regions accepts an antimeridian-crossing bbox', async () => {
     }
     if (url.endsWith('/warm')) {
       warmBody = JSON.parse(init?.body ?? '{}')
-      return new Response(JSON.stringify({ jobId: 'warm-1' }), { status: 200 })
+      return Response.json({ jobId: warmJobId(1) })
     }
     throw new Error(`unexpected url: ${url}`)
   }
@@ -76,6 +81,7 @@ test('POST /api/regions accepts an antimeridian-crossing bbox', async () => {
   await route.handler({ params: {}, body: { bbox, sourceIds: ['seamark'], minzoom: 1, maxzoom: 2, name: 'Date line' } }, res)
   assert.equal(responded[0]?.status, 200)
   assert.deepEqual((warmBody as { bbox: number[] }).bbox, bbox)
+  assert.equal((responded[0]?.body as { region: { cachedBytes: number } }).region.cachedBytes, 0)
 })
 
 test('POST /api/regions returns 502 for malformed container statistics', async () => {
@@ -95,6 +101,24 @@ test('POST /api/regions returns 502 for malformed container statistics', async (
   assert.deepEqual(responded[0]?.body, { error: 'tilecache returned malformed statistics' })
 })
 
+test('POST /api/regions returns 502 for oversized container statistics', async () => {
+  const fetchImpl = async () => new Response('{}', {
+    status: 200,
+    headers: { 'content-length': String(5 * 1024 * 1024) }
+  })
+  const { router, routes } = makeRegionsRouter()
+  const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  const route = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
+  const { responded, res } = fakeRegionsRes()
+  await route.handler({
+    params: {},
+    body: { bbox: [-1, -1, 1, 1], sourceIds: ['seamark'], minzoom: 1, maxzoom: 2, name: 'Area' }
+  }, res)
+  assert.equal(responded[0]?.status, 502)
+  assert.deepEqual(responded[0]?.body, { error: 'tilecache returned malformed statistics' })
+})
+
 test('POST /api/regions returns 503 when the container address is unavailable', async () => {
   const { router, routes } = makeRegionsRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
@@ -103,6 +127,46 @@ test('POST /api/regions returns 503 when the container address is unavailable', 
   const { responded, res } = fakeRegionsRes()
   await route.handler({ params: {}, body: { bbox: [-10.0, 50.0, 10.0, 60.0], sourceIds: ['depth-gebco'], minzoom: 6, maxzoom: 12, name: 'Test' } }, res)
   assert.equal(responded[0]?.status, 503, 'missing container address must yield 503')
+})
+
+test('an invalid container job id is not retained or used in a status URL', async () => {
+  const calls: string[] = []
+  const fetchImpl = async (url: string): Promise<Response> => {
+    calls.push(url)
+    if (url.includes('/cache/stats')) return Response.json({ regionsFreeBytes: 1_000_000, perSourceAvgBytes: { seamark: 1 } })
+    if (url.endsWith('/warm')) return Response.json({ jobId: `bad\n${'x'.repeat(80)}` })
+    if (url.includes('/warm/region/')) return new Response(null, { status: 404 })
+    throw new Error(`unexpected url: ${url}`)
+  }
+  const { router, routes } = makeRegionsRouter()
+  const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  const create = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
+  const { responded: created, res: createRes } = fakeRegionsRes()
+  await create.handler({ params: {}, body: { bbox: [-1, -1, 1, 1], sourceIds: ['seamark'], minzoom: 1, maxzoom: 2, name: 'Area' } }, createRes)
+  assert.equal(created[0]?.status, 202)
+  const createdRegion = (created[0]?.body as { region: { id: string, cachedBytes: number } }).region
+  assert.equal(createdRegion.cachedBytes, 0)
+  const id = createdRegion.id
+  const status = routes.find(r => r.method === 'GET' && r.path.endsWith('/status'))!
+  await status.handler({ params: { id }, body: null }, fakeRegionsRes().res)
+  assert.equal(calls.some((url) => url.includes('bad')), false)
+  assert.equal(calls.some((url) => url.includes('/warm/region/')), true)
+})
+
+test('the status route rejects an unknown durable region before container lookup', async () => {
+  let fetches = 0
+  const { router, routes } = makeRegionsRouter()
+  const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
+    dataDir,
+    fetchImpl: async () => { fetches++; throw new Error('must not fetch') }
+  })
+  const status = routes.find(r => r.method === 'GET' && r.path.endsWith('/status'))!
+  const { responded, res } = fakeRegionsRes()
+  await status.handler({ params: { id: 'missing' }, body: null }, res)
+  assert.equal(responded[0]?.status, 404)
+  assert.equal(fetches, 0)
 })
 
 test('GET /api/regions returns the persisted regions list', async () => {
@@ -210,7 +274,7 @@ test('a terminal job snapshot reconciles the region status away from downloading
     if (/\/warm\/[^/]+$/.test(url)) {
       return new Response(JSON.stringify({ total: 1, done: 1, skipped: 0, bytes: 100, errors: 0, state: 'done' }), { status: 200 })
     }
-    if (url.endsWith('/warm')) return new Response(JSON.stringify({ jobId: 'warm-1' }), { status: 200 })
+    if (url.endsWith('/warm')) return Response.json({ jobId: warmJobId(1) })
     if (url.includes('/cache/region/')) return new Response(JSON.stringify({ bytes: 100 }), { status: 200 })
     throw new Error(`unexpected url: ${url}`)
   }
@@ -238,8 +302,8 @@ test('a done snapshot with tile errors never marks a region ready', async () => 
   const stats = { regionsFreeBytes: 2_000_000_000, perSourceAvgBytes: { seamark: 1 } }
   const fetchImpl = async (url: string) => {
     if (url.includes('/cache/stats')) return new Response(JSON.stringify(stats), { status: 200 })
-    if (url.endsWith('/warm')) return new Response(JSON.stringify({ jobId: 'warm-errors' }), { status: 200 })
-    if (/\/warm\/[^/]+$/.test(url)) return new Response(JSON.stringify({ total: 2, done: 1, skipped: 0, bytes: 100, errors: 1, state: 'done' }), { status: 200 })
+    if (url.endsWith('/warm')) return Response.json({ jobId: warmJobId(2) })
+    if (/\/warm\/[^/]+$/.test(url)) return new Response(JSON.stringify({ total: 2, done: 1, skipped: 1, bytes: 100, errors: 1, state: 'done' }), { status: 200 })
     if (url.includes('/cache/region/')) return new Response(JSON.stringify({ bytes: 100 }), { status: 200 })
     if (url.includes('/cache/regions')) return new Response(JSON.stringify({ regions: {} }), { status: 200 })
     throw new Error(`unexpected url: ${url}`)
@@ -260,7 +324,7 @@ test('a done snapshot with tile errors never marks a region ready', async () => 
 test('the status route rejects a malformed successful container snapshot', async () => {
   const fetchImpl = async (url: string) => {
     if (url.includes('/cache/stats')) return new Response(JSON.stringify({ regionsFreeBytes: 2_000_000_000, perSourceAvgBytes: { seamark: 1 } }), { status: 200 })
-    if (url.endsWith('/warm')) return new Response(JSON.stringify({ jobId: 'warm-malformed' }), { status: 200 })
+    if (url.endsWith('/warm')) return Response.json({ jobId: warmJobId(3) })
     if (/\/warm\/[^/]+$/.test(url)) return new Response(JSON.stringify({ state: 'done', errors: 'one' }), { status: 200 })
     throw new Error(`unexpected url: ${url}`)
   }
@@ -277,11 +341,11 @@ test('the status route rejects a malformed successful container snapshot', async
   assert.equal(responded[0]?.status, 502)
 })
 
-test('the status route rejects an incomplete done snapshot', async () => {
+test('the status route rejects an incomplete done snapshot even when it reports errors', async () => {
   const fetchImpl = async (url: string) => {
     if (url.includes('/cache/stats')) return new Response(JSON.stringify({ regionsFreeBytes: 1_000_000, perSourceAvgBytes: { seamark: 1 } }), { status: 200 })
-    if (url.endsWith('/warm')) return new Response(JSON.stringify({ jobId: 'warm-incomplete' }), { status: 200 })
-    if (/\/warm\/[^/]+$/.test(url)) return new Response(JSON.stringify({ total: 2, done: 1, skipped: 0, bytes: 100, errors: 0, state: 'done' }), { status: 200 })
+    if (url.endsWith('/warm')) return Response.json({ jobId: warmJobId(4) })
+    if (/\/warm\/[^/]+$/.test(url)) return new Response(JSON.stringify({ total: 2, done: 1, skipped: 0, bytes: 100, errors: 1, state: 'done' }), { status: 200 })
     throw new Error(`unexpected ${url}`)
   }
   const { router, routes } = makeRegionsRouter()
@@ -306,7 +370,7 @@ test('a rejected re-download relays the status and leaves the region state uncha
     if (url.endsWith('/warm')) {
       warmStarts++
       return warmStarts === 1
-        ? new Response(JSON.stringify({ jobId: 'warm-1' }), { status: 200 })
+        ? Response.json({ jobId: warmJobId(1) })
         : new Response(JSON.stringify({ error: 'too many jobs' }), { status: 429 })
     }
     if (url.includes('/cache/regions')) return new Response(JSON.stringify({ regions: {} }), { status: 200 })
@@ -346,7 +410,7 @@ test('saving position-warm settings preserves saved regions', async () => {
         perSourceAvgBytes: { 'depth-gebco': 1 }
       }), { status: 200 })
     }
-    if (url.endsWith('/warm')) return new Response(JSON.stringify({ jobId: 'warm-1' }), { status: 200 })
+    if (url.endsWith('/warm')) return Response.json({ jobId: warmJobId(1) })
     if (url.includes('/cache/region/')) return new Response(JSON.stringify({ bytes: 0 }), { status: 200 })
     throw new Error(`unexpected url: ${url}`)
   }
@@ -384,7 +448,9 @@ test('saving position-warm settings preserves saved regions', async () => {
 })
 
 test('DELETE /api/regions/:id removes the region after the container delete succeeds', async () => {
-  const fetchImpl = async (url: string, init?: { method?: string }) => {
+  const controlHeaders: Array<Record<string, string> | undefined> = []
+  const fetchImpl = async (url: string, init?: { method?: string; headers?: Record<string, string> }) => {
+    if (init?.method === 'DELETE' || (url.endsWith('/warm') && init?.method === 'POST')) controlHeaders.push(init.headers)
     if (init?.method === 'DELETE') return new Response(null, { status: 204 })
     if (url.includes('/cache/stats')) {
       return new Response(JSON.stringify({
@@ -398,13 +464,13 @@ test('DELETE /api/regions/:id removes the region after the container delete succ
         perSourceAvgBytes: { 'depth-gebco': 1 }
       }), { status: 200 })
     }
-    if (url.endsWith('/warm')) return new Response(JSON.stringify({ jobId: 'warm-1' }), { status: 200 })
+    if (url.endsWith('/warm')) return Response.json({ jobId: warmJobId(1) })
     if (url.includes('/cache/region/')) return new Response(JSON.stringify({ bytes: 0 }), { status: 200 })
     throw new Error(`unexpected url: ${url}`)
   }
   const { router, routes } = makeRegionsRouter()
   const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
-  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl, getControlToken: () => 'control-secret' })
   const post = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
   const { responded: created, res: postRes } = fakeRegionsRes()
   await post.handler({ params: {}, body: { bbox: [-10.0, 50.0, 10.0, 60.0], sourceIds: ['depth-gebco'], minzoom: 6, maxzoom: 12, name: 'Bay' } }, postRes)
@@ -414,6 +480,8 @@ test('DELETE /api/regions/:id removes the region after the container delete succ
   const { responded: deleted, res: delRes } = fakeRegionsRes()
   await del.handler({ params: { id: regionId }, body: null }, delRes)
   assert.equal(deleted[0]?.status, 204, 'a successful container delete returns 204')
+  assert.equal(controlHeaders.length, 2)
+  assert.ok(controlHeaders.every((headers) => headers?.['x-tilecache-token'] === 'control-secret'))
 
   const list = routes.find(r => r.method === 'GET' && r.path === '/api/regions')!
   const { responded: listed, res: listRes } = fakeRegionsRes()
@@ -438,7 +506,7 @@ test('DELETE /api/regions/:id returns 503 and keeps the region when the containe
         perSourceAvgBytes: { 'depth-gebco': 1 }
       }), { status: 200 })
     }
-    if (url.endsWith('/warm')) return new Response(JSON.stringify({ jobId: 'warm-1' }), { status: 200 })
+    if (url.endsWith('/warm')) return Response.json({ jobId: warmJobId(1) })
     if (url.includes('/cache/region/')) return new Response(JSON.stringify({ bytes: 0 }), { status: 200 })
     throw new Error(`unexpected url: ${url}`)
   }

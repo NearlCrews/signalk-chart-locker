@@ -20,8 +20,14 @@
 - [ ] `npm run lint` passes
 - [ ] `npm run build` passes
 - [ ] `npm run check:package` passes
-- [ ] `npm audit --omit=dev` passes when dependencies or release files change
-- [ ] For container changes: `cargo test --workspace --all-features`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo build --release --bin tilecache`, and `cargo audit --file Cargo.lock` pass
+- [ ] `npm run test:browser:cross` passes for panel changes
+- [ ] `npm audit` passes when dependencies or release files change
+- [ ] For container changes: `cargo test --locked --workspace --all-features`,
+  `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
+  `cargo build --locked --release --bin tilecache --all-features`,
+  `cargo audit --file Cargo.lock`,
+  `TILECACHE_BIN="$PWD/container/target/release/tilecache" npm run test:node-rust-contract`, and
+  `npm run licenses:rust:check` pass
 - [ ] Panel changes were checked in a real browser in light, dark, and night-red themes
 - [ ] Maintained documentation and App Store screenshots were updated when applicable
 

@@ -131,10 +131,18 @@ test('POST with a non-object body returns 400', () => {
   assert.equal(res.statusCode, 400)
 })
 
-test('POST rejects empty, oversized, and non-positive overrides', () => {
+test('POST rejects empty, oversized, controlled, and non-positive overrides', () => {
   const ctx = collect()
   ctx.registry.set(record())
-  for (const body of [{}, { name: '' }, { description: 'x'.repeat(1001) }, { scale: 0 }]) {
+  for (const body of [
+    {},
+    { name: '' },
+    { name: 'bad\nname' },
+    { description: 'bad\u0085description' },
+    { description: 'bad\u2028description' },
+    { description: 'x'.repeat(1001) },
+    { scale: 0 }
+  ]) {
     const res = new FakeRes()
     ctx.post['/api/charts/:id/override']({ params: { id: 'sf-pmtiles' }, body }, res)
     assert.equal(res.statusCode, 400)

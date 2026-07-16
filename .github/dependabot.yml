@@ -17,10 +17,6 @@ updates:
         update-types:
           - minor
           - patch
-    ignore:
-      - dependency-name: "*"
-        update-types:
-          - version-update:semver-major
     labels:
       - dependencies
       - npm
@@ -38,13 +34,19 @@ updates:
         update-types:
           - minor
           - patch
-    ignore:
-      - dependency-name: "*"
-        update-types:
-          - version-update:semver-major
     labels:
       - dependencies
       - cargo
+
+  - package-ecosystem: docker
+    directory: /container/tilecache
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - container
 
   - package-ecosystem: github-actions
     directory: /
@@ -56,6 +58,9 @@ updates:
       actions:
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
     labels:
       - dependencies
       - github-actions

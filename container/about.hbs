@@ -1,0 +1,16 @@
+# Rust Third-Party Licenses
+
+This report is generated from `container/Cargo.lock` by cargo-about 0.9.1. Do not edit it manually.
+
+{{#each licenses}}
+{{#if first_of_kind}}
+## {{{name}}}
+{{/if}}
+
+**Used by:**
+{{#each used_by}}
+- `{{crate.name}}` {{crate.version}}
+{{/each}}
+
+        {{{text}}}
+{{/each}}

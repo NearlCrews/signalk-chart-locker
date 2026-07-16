@@ -1,0 +1,31 @@
+name: Container staging cleanup
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: chart-locker-container-staging-cleanup
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Remove old orphaned build-tag versions
+        env:
+          CONTAINER_PACKAGE_NAME: signalk-chart-locker-tilecache
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP_NEWEST_STAGING_VERSIONS: 3
+          MINIMUM_AGE_DAYS: 14
+        run: node scripts/cleanup-container-versions.mjs

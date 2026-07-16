@@ -105,6 +105,38 @@ test('registerChartProvider registers the provider only once per app', () => {
   assert.equal(count, 1)
 })
 
+test('a failed provider registration remains retryable', () => {
+  const registry = new ChartRegistry()
+  let attempts = 0
+  const app = {
+    get () {},
+    registerResourceProvider () {
+      attempts++
+      if (attempts === 1) throw new Error('temporary registration failure')
+    }
+  }
+  assert.throws(() => { registerChartProvider(app as never, registry) }, /temporary registration/)
+  assert.doesNotThrow(() => { registerChartProvider(app as never, registry) })
+  assert.equal(attempts, 2)
+})
+
+test('a repeated registration rebinds permanent provider methods to the new registry', async () => {
+  let provider: ResourceProvider | undefined
+  const app = {
+    get () {},
+    registerResourceProvider (value: ResourceProvider) { provider = value }
+  }
+  const first = new ChartRegistry()
+  first.set(record('first.pmtiles'))
+  registerChartProvider(app as never, first)
+  assert.deepEqual(Object.keys(await provider!.methods.listResources({})), ['first-pmtiles'])
+
+  const second = new ChartRegistry()
+  second.set(record('second.pmtiles'))
+  registerChartProvider(app as never, second)
+  assert.deepEqual(Object.keys(await provider!.methods.listResources({})), ['second-pmtiles'])
+})
+
 class FakeRes {
   body: unknown
   statusCode = 200

@@ -5,9 +5,9 @@ import {
   probeTilecacheHealth,
   TILECACHE_INTERNAL_PORT,
   DEFAULT_TILECACHE_IMAGE,
-  DEFAULT_CACHE_CAP_GIB
+  DEFAULT_CACHE_CAP_GIB,
+  DEFAULT_TILECACHE_TAG
 } from '../src/runtime/tilecache-container.js'
-import type { FetchResponse } from '../src/shared/types.js'
 
 test('buildTilecacheConfig exposes the port, the healthcheck, the data mount, and the cache env', () => {
   const c = buildTilecacheConfig()
@@ -15,9 +15,17 @@ test('buildTilecacheConfig exposes the port, the healthcheck, the data mount, an
   assert.deepEqual(c.signalkAccessiblePorts, [TILECACHE_INTERNAL_PORT])
   assert.deepEqual(c.healthcheck?.test, ['CMD', '/tilecache', 'healthcheck'])
   assert.equal(c.signalkDataMount, '/signalk-data')
+  assert.deepEqual(c.user, { inImageUid: 65532, inImageGid: 65532 })
   assert.equal(c.env?.TILECACHE_DB, '/signalk-data/chart-locker-tilecache/cache.sqlite')
   assert.equal(c.env?.TILECACHE_CAP_BYTES, String(DEFAULT_CACHE_CAP_GIB * 1024 ** 3))
+  assert.equal(c.env?.TILECACHE_GEOCODING_ENABLED, '1')
   assert.equal(c.volumes, undefined) // no external volume by default
+})
+
+test('buildTilecacheConfig carries the stable control token and geocoding policy', () => {
+  const c = buildTilecacheConfig({ controlToken: 'private-token', geocodingEnabled: false })
+  assert.equal(c.env?.TILECACHE_CONTROL_TOKEN, 'private-token')
+  assert.equal(c.env?.TILECACHE_GEOCODING_ENABLED, '0')
 })
 
 test('buildTilecacheConfig honors a custom cap and image tag', () => {
@@ -32,6 +40,11 @@ test('buildTilecacheConfig defaults the image tag to the plugin version, not lat
   assert.match(buildTilecacheConfig().tag ?? '', /^v\d+\.\d+\.\d+/)
   // An explicit override still wins, so a developer can point at latest or a hand-built tag.
   assert.equal(buildTilecacheConfig({ tag: 'latest' }).tag, 'latest')
+  // Earlier schemas persisted their release tag as the default. Treat every published predecessor
+  // as inherited so a skipped-version upgrade cannot pin an incompatible older container protocol.
+  for (const tag of ['v0.1.0', 'v0.1.1', 'v0.2.0', 'v0.3.0', 'v0.3.1', 'v0.4.0', 'v0.4.1', 'v0.4.2', 'v0.4.3', 'v0.4.4', 'v0.5.0']) {
+    assert.equal(buildTilecacheConfig({ tag }).tag, DEFAULT_TILECACHE_TAG, tag)
+  }
 })
 
 test('buildTilecacheConfig sets the scroll TTL env in seconds', () => {
@@ -52,9 +65,12 @@ test('an external cache volume source mounts at the cache dir with a skip-if-mis
 })
 
 test('probeTilecacheHealth is true only on a 200 with status ok', async () => {
-  const ok: FetchResponse = { ok: true, json: async () => ({ status: 'ok' }) } as unknown as FetchResponse
-  assert.equal(await probeTilecacheHealth('addr:8080', async () => ok), true)
-  const notOk: FetchResponse = { ok: false, json: async () => ({}) } as unknown as FetchResponse
-  assert.equal(await probeTilecacheHealth('addr:8080', async () => notOk), false)
+  assert.equal(await probeTilecacheHealth('addr:8080', async () => Response.json({ status: 'ok' })), true)
+  assert.equal(await probeTilecacheHealth('addr:8080', async () => Response.json({}, { status: 503 })), false)
   assert.equal(await probeTilecacheHealth('addr:8080', async () => { throw new Error('down') }), false)
+})
+
+test('probeTilecacheHealth rejects an oversized JSON response', async () => {
+  const oversized = new Response('{"status":"ok"}', { headers: { 'content-length': String(5 * 1024 * 1024) } })
+  assert.equal(await probeTilecacheHealth('addr:8080', async () => oversized), false)
 })

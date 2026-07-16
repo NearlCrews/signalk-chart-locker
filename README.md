@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/signalk-chart-locker.svg)](https://www.npmjs.com/package/signalk-chart-locker)
 [![npm downloads](https://img.shields.io/npm/dm/signalk-chart-locker.svg)](https://www.npmjs.com/package/signalk-chart-locker)
 [![CI](https://github.com/NearlCrews/signalk-chart-locker/actions/workflows/ci.yml/badge.svg)](https://github.com/NearlCrews/signalk-chart-locker/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/NearlCrews/signalk-chart-locker/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue.svg)](#license)
 [![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://www.buymeacoffee.com/nearlcrews)
 
@@ -14,19 +14,19 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.5.0
+## What's coming in 0.6.0
 
-Version 0.5.0 adopts `signalk-chart-sources` 0.3.1, including disjoint source coverage and
-source-specific download estimates. Saved regions and PMTiles charts now work across the
-antimeridian, region replacements are staged and promoted atomically, and overlapping source
-coverage is deduplicated before download.
+The unreleased 0.6.0 line moves the configuration panel to the accessible, theme-aware
+`signalk-nearlcrews-ui` design system, adds browser and live Signal K integration coverage, and
+raises the minimum Signal K server version to 2.24.0 for its React 19.2 Admin host.
 
-PMTiles discovery and serving now remain available without the container runtime, directory watches
-recover from failures, and chart responses are protected against path swaps. Runtime validation,
-retry behavior, cache database recovery, and warm-job status reporting are also stricter. This
-release requires Node.js 22 or newer.
+Container control, cache management, PMTiles delivery, saved-region reconciliation, filesystem
+boundaries, release provenance, and shutdown behavior are hardened throughout. Existing 0.5.0 cache
+rows and pinned region coverage survive the one-time SQLite auto-vacuum conversion, and a stored
+default image tag from any prior Chart Locker release advances to the matching 0.6.0 container
+instead of retaining an incompatible protocol pair during a direct or skipped-version upgrade.
 
-See the [0.5.0 changelog](CHANGELOG.md#v050) for the full list.
+See the [Unreleased changelog](CHANGELOG.md#unreleased) for the full list.
 
 ## What it does
 
@@ -59,39 +59,47 @@ tiles. A standalone install of Binnacle is unaffected.
   at sea.
 - **Saved regions.** Draw a box in the Binnacle chartplotter and download the raster overlays
   covering it into the shared cache before leaving internet coverage. Each region is named
-  automatically by a reverse geocode, saved durably, and can be re-downloaded or deleted. A live
-  byte estimate is re-validated on the server against the saved-regions budget before the download
-  starts, so an over-budget region is refused. The region tiles are pinned and never evicted, and a
-  region never stays stuck downloading.
+  automatically by an optional reverse geocode, saved durably, and can be re-downloaded or deleted.
+  A live byte estimate is re-validated on the server against the saved-regions budget before the
+  download starts, so an over-budget region is refused. The region tiles are pinned and never
+  evicted, and a region never stays stuck downloading.
 - **Auto-cache around the boat.** An optional throttled fill keeps a small tile radius warm around
   the vessel as it travels outside the saved regions, always LRU-bounded so it never displaces
   the pinned coverage. A radius that crosses the antimeridian is split into two bounded boxes and
   completed as one warm job.
 - **Local PMTiles chart provider.** Drop `.pmtiles` archives in the charts folder and the
-  companion discovers, validates, and registers them without a plugin restart. Each archive is
+  plugin discovers, validates, and registers them without a plugin restart. Each archive is
   served with a strong ETag and HTTP Range support so the browser cache works. A chart-management
   panel in the Binnacle chartplotter lists the detected archives. Defers gracefully to
   `signalk-pmtiles-plugin` when that plugin is enabled.
 - **Operational configuration panel.** Inspect cache usage, filesystem headroom, source health,
   diagnostics, and chart discovery without leaving the Signal K admin UI. Change scroll retention,
   clear only unpinned scroll tiles, refresh live state, and request a chart rescan from the same panel.
+  The panel uses the accessible, theme-aware
+  [`signalk-nearlcrews-ui`](https://github.com/NearlCrews/signalk-nearlcrews-ui) primitives and shares
+  its Auto, Light, Dark, and Night preference with other NearlCrews plugin panels.
 
 ## Requirements
 
-- Signal K server 2.x.
+- Signal K server >= 2.24.0, which provides the React 19.2 Admin host required by the configuration
+  panel.
 - Node.js >= 22.
-- [signalk-container](https://www.npmjs.com/package/signalk-container) >= 1.20.2 and a container
+- A Signal K Admin browser or embedded WebView with native CSS `@scope`: Chromium or Edge 118,
+  Firefox 146, or Safari 17.4 and newer.
+- [signalk-container](https://www.npmjs.com/package/signalk-container) >= 1.20.0 and a container
   runtime (Podman or Docker) accessible to Signal K are required for tile caching, saved-region
   downloads, position warming, and reverse geocoding. Local PMTiles discovery and serving continue
-  without them. Versions of `signalk-container` before 1.20.2 still run the tile cache, just without
-  the Container Manager update badge.
-- The [Binnacle Chartplotter](https://www.npmjs.com/package/signalk-binnacle) for the regions
-  and chart-management panels.
+  without them. Version 1.20.2 or newer is recommended for the Container Manager update badge.
+- A [Binnacle Chartplotter](https://www.npmjs.com/package/signalk-binnacle) release newer than 0.15.3
+  for reliable saved-region create and re-download recovery, plus the regions and chart-management
+  panels. Published Binnacle 0.15.3 and older do not accept Chart Locker's recovery-pending response.
 
-On secured Signal K servers, chart tiles, styles, readiness checks, and PMTiles files are available
-to authenticated `readonly`, `readwrite`, and administrator users. Saving regions, changing cache
-settings, reverse geocoding, and editing chart metadata require an administrator session. Signal K
-servers with security disabled continue to expose the read routes without a login.
+On secured Signal K servers that expose scoped plugin routers, chart tiles, styles, readiness checks,
+and PMTiles files are available to authenticated `readonly`, `readwrite`, and administrator users.
+Released servers without that router API keep all plugin routes behind their administrator-only
+mount. Saving regions, changing cache settings, reverse geocoding, and editing chart metadata always
+require an administrator session. Signal K servers with security disabled expose the read routes
+without a login.
 
 ## Installation
 
@@ -122,6 +130,13 @@ cap. It must not exceed the cache cap. This budget does not remove space from th
 a region is saved. A region download pins its tiles and evicts only unpinned scroll tiles to make
 room. Pinned tiles are never evicted by scroll-cache pressure.
 
+Cache-cap reductions are applied transactionally. If the requested cap is below the bytes that
+saved coverage currently pins, the tile cache rejects the reduction without publishing partial
+settings. The previous container configuration remains active when one exists; a fresh container
+whose retained database already exceeds its first requested cap remains unconfigured. Increase the
+cap, or delete saved coverage and redownload only the regions that fit, before retrying the lower
+value.
+
 The settings panel also provides live cache operations: total, pinned, and scroll usage; remaining
 saved-region headroom; actual filesystem free space; per-source usage and upstream health; scroll
 retention; and a safe clear action that preserves saved-region tiles. The cache keeps 256 MiB of
@@ -138,9 +153,16 @@ drive, or other cache filesystem. A relative path is rejected. If the path is mi
 `signalk-container` applies its configured fallback behavior and the panel reports the measurement
 fallback rather than presenting the data filesystem as the external drive.
 
+**Reverse geocoding.** Region auto-naming is enabled by default and can be disabled in Advanced.
+When enabled, starting a region download may send the box-center latitude and longitude, rounded to
+five decimal places, to OpenStreetMap Nominatim. The container applies one application-wide request
+per second, keeps up to 256 successful lookups in memory for 24 hours, and never sends a request while
+the control is disabled. The cache is cleared when the container restarts. A disabled or unavailable
+geocoder does not block a region download; the chartplotter uses an editable coordinate-derived name.
+
 **PMTiles charts.** Place `.pmtiles` files in the server's charts folder (the same folder
-`signalk-pmtiles-plugin` uses). The companion detects and registers them automatically. If
-`signalk-pmtiles-plugin` is already enabled and serving that folder, the companion surfaces a
+`signalk-pmtiles-plugin` uses). Chart Locker detects and registers them automatically. If
+`signalk-pmtiles-plugin` is already enabled and serving that folder, Chart Locker surfaces a
 clear status and defers to it.
 
 The panel reports valid and invalid archives, their latest scan time, and each validation error. Use
@@ -161,7 +183,8 @@ recreate the tile-cache container. The panel summarizes that restart impact befo
   separately reports whether the source and budget configuration push has completed.
 - If the disposable cache database is recreated, saved regions whose pinned bytes disappeared are
   marked `needs-redownload` instead of remaining falsely ready.
-- A failed region re-download keeps the prior region state. A missing warm job is reconciled to an
+- A rejected or failed region replacement keeps the prior usable pins. Accepted warm starts whose
+  response is lost are recovered by region ID, while a confirmed missing job is reconciled to an
   error instead of leaving the region stuck downloading.
 - Position-warm, saved-region, chart override, and direct plugin configuration inputs are validated
   at their server boundaries.
@@ -183,24 +206,29 @@ This project targets Node.js 22 or newer. The Rust container is a Cargo workspac
 ```bash
 git clone https://github.com/NearlCrews/signalk-chart-locker.git
 cd signalk-chart-locker
-npm install
+npm ci
+npx --no-install playwright install --with-deps chromium firefox webkit # one-time browser install
 npm run typecheck   # TypeScript type-check
 npm run lint        # ESLint
 npm test            # node --test unit tests
+npm run test:browser:cross # production panel remote in Chromium, Firefox, WebKit, and mobile Chromium
 npm run build       # clean and compile dist/, then build the panel remote
 npm run check:package
-npm audit --omit=dev
+npm run licenses:rust:check # verify locked Rust runtime attribution
+npm audit           # runtime and build-time dependencies
 ```
 
 Rust (Cargo workspace):
 
 ```bash
 cd container
-cargo test --workspace
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo build --release --bin tilecache
-cargo install cargo-audit --locked
+cargo test --locked --workspace --all-features
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo build --locked --release --bin tilecache --all-features
+cargo install cargo-audit --version 0.22.2 --locked
 cargo audit --file Cargo.lock
+cd ..
+TILECACHE_BIN="$PWD/container/target/release/tilecache" npm run test:node-rust-contract
 ```
 
 Before a release, also verify the panel in a real browser and follow the
@@ -209,8 +237,11 @@ creating the version tag requires explicit owner approval.
 
 ## License
 
-MIT. See [LICENSE](LICENSE) for the full text. The software is provided "AS IS", without warranty
-of any kind.
+The Node.js plugin is MIT licensed. The Rust tile-cache workspace is Apache-2.0 licensed. See
+[LICENSE](LICENSE), [LICENSE-APACHE](LICENSE-APACHE), and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Locked Rust runtime dependency licenses are
+recorded in [RUST_THIRD_PARTY_LICENSES.md](RUST_THIRD_PARTY_LICENSES.md). The software is provided
+"AS IS", without warranty of any kind.
 
 ## Acknowledgments
 
@@ -220,6 +251,8 @@ relies on:
 - [Signal K Project](https://signalk.org/) for the open marine data standard.
 - [signalk-container](https://github.com/dirkwa/signalk-container) for container lifecycle
   management.
+- [signalk-nearlcrews-ui](https://github.com/NearlCrews/signalk-nearlcrews-ui) for the shared
+  configuration-panel design system.
 
 Chart Locker pairs with the
 [Binnacle Chartplotter](https://www.npmjs.com/package/signalk-binnacle).
