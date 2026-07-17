@@ -66,6 +66,7 @@ pub fn expand_upstream(source: &ChartSource, z: u32, x: u32, y: u32) -> Result<S
         }
         UpstreamTemplate::Arcgis { base } => {
             in_range(source, z, x, y)?;
+            let base = base.trim_end_matches('/');
             Ok(format!(
                 "{base}/export?bbox={}&bboxSR=3857&imageSR=3857&size={ts},{ts}&dpi=96&format=png32&transparent=true&f=image",
                 bbox_str(z, x, y),
@@ -128,5 +129,16 @@ mod tests {
     fn out_of_range_is_rejected() {
         assert!(expand_upstream(&xyz(), 1, 2, 0).is_err()); // x 2 >= 2^1
         assert!(expand_upstream(&wms(), 30, 0, 0).is_err()); // z above maxzoom
+    }
+
+    #[test]
+    fn arcgis_normalizes_a_trailing_slash() {
+        let source: ChartSource = serde_json::from_str(
+            r#"{"id":"a","title":"A","tileSize":256,"minzoom":0,"maxzoom":18,"attribution":"",
+                "upstream":{"mode":"arcgis","base":"https://h/MapServer/"}}"#,
+        )
+        .unwrap();
+        let url = expand_upstream(&source, 0, 0, 0).unwrap();
+        assert!(url.starts_with("https://h/MapServer/export?"));
     }
 }

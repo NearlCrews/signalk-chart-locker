@@ -44,7 +44,11 @@ fn intersect(left: [f64; 4], right: [f64; 4]) -> Option<[f64; 4]> {
 // Split antimeridian-crossing request and source boxes, intersect them with the source's disjoint
 // coverage (or its display bounds), and clamp latitude to Web Mercator.
 fn clips(source: &ChartSource, bbox: [f64; 4]) -> Vec<[f64; 4]> {
-    if !bbox.iter().all(|v| v.is_finite()) || bbox[0] == bbox[2] || bbox[1] >= bbox[3] {
+    if !bbox.iter().all(|v| v.is_finite())
+        || bbox[0] == bbox[2]
+        || (bbox[0] > bbox[2] && (bbox[0] - bbox[2]).abs() == 360.0)
+        || bbox[1] >= bbox[3]
+    {
         return Vec::new();
     }
     let requested = split_bbox(bbox);
@@ -338,6 +342,18 @@ mod tests {
             tile_count_in_bbox(&unbounded, [f64::NAN, 0.0, 1.0, 1.0], 2, 2),
             0
         ); // non-finite
+        assert_eq!(
+            tile_count_in_bbox(&unbounded, [180.0, -1.0, -180.0, 1.0], 2, 2),
+            0
+        ); // zero longitude span
+    }
+
+    #[test]
+    fn bbox_edges_are_inclusive_at_exact_tile_boundaries() {
+        let source = src(0, 18, None);
+        let tiles: Vec<_> =
+            tiles_iter(&source, [-180.0, 0.0, 0.0, MAX_MERCATOR_LAT], 1, 1).collect();
+        assert_eq!(tiles, vec![(1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1)]);
     }
 
     #[test]
