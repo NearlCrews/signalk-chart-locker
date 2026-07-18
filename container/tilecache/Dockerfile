@@ -4,7 +4,7 @@
 # the routing engine. Build from the repository root with
 # `podman build --format docker --file container/tilecache/Dockerfile .` or the HEALTHCHECK is dropped.
 
-FROM rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 AS builder
+FROM rust:1.97.0-bookworm@sha256:8fa55b2f3ddf97471ab6a767bfa3f37e6bad0986ba823e75fea57e2a2a5c3073 AS builder
 WORKDIR /build
 # cmake is needed by the aws-lc-rs crypto backend that rustls pulls in; rust:1-bookworm ships cc but
 # not cmake. It is a build-only dependency: the runtime image gets only the compiled binary.
