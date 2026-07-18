@@ -10,6 +10,8 @@ All notable changes to this project are documented here. The format follows
 
 - Align local, CI, release, and container builds on Rust 1.97.0, and smoke-test the complete
   tile-cache image for pull requests that change its build inputs.
+- Refresh locked `bytes`, `http-body`, `http-body-util`, and `tokio` dependencies, and
+  regenerate the corresponding Rust license inventory.
 
 <a id="v060"></a>
 
