@@ -6,12 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+<a id="v061"></a>
+
+## [0.6.1] - 2026-07-18
+
 ### Changed
 
 - Align local, CI, release, and container builds on Rust 1.97.0, and smoke-test the complete
   tile-cache image for pull requests that change its build inputs.
 - Refresh locked `bytes`, `http-body`, `http-body-util`, and `tokio` dependencies, and
   regenerate the corresponding Rust license inventory.
+- Upgrade `signalk-chart-sources` to 0.4.0 and align the Rust tile-cache boundary with its stricter
+  source structure, URL, template, host, WMS, ArcGIS, and zero-longitude-span validation.
 
 <a id="v060"></a>
 
