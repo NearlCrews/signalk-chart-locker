@@ -411,3 +411,19 @@ test('container smoke tests use distinct platform manifest digests', () => {
   assert.match(smokeBlock, /"\$\{IMAGE\}@\$\{platform_digest\}"/)
   assert.doesNotMatch(smokeBlock, /"\$\{IMAGE\}@\$\{IMAGE_DIGEST\}"/)
 })
+
+test('container pull requests build and smoke-test the complete image', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/container-pr.yml', import.meta.url), 'utf8')
+  assert.match(workflow, /pull_request:/)
+  assert.match(workflow, /- 'container\/\*\*'/)
+  assert.match(workflow, /docker build --file container\/tilecache\/Dockerfile/)
+  assert.match(workflow, /docker run --detach/)
+  assert.match(workflow, /\.State\.Health/)
+  for (const licenseFile of [
+    'LICENSE-APACHE',
+    'THIRD_PARTY_NOTICES.md',
+    'RUST_THIRD_PARTY_LICENSES.md'
+  ]) {
+    assert.match(workflow, new RegExp(licenseFile.replace('.', '\\.')))
+  }
+})

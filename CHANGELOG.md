@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Align local, CI, release, and container builds on Rust 1.97.0, and smoke-test the complete
+  tile-cache image for pull requests that change its build inputs.
+
 <a id="v060"></a>
 
 ## [0.6.0] - 2026-07-16

@@ -1,0 +1,65 @@
+name: Container pull request
+
+on:
+  pull_request:
+    paths:
+      - '.dockerignore'
+      - 'container/**'
+      - 'LICENSE-APACHE'
+      - 'RUST_THIRD_PARTY_LICENSES.md'
+      - 'THIRD_PARTY_NOTICES.md'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  image-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Build the complete tile-cache image
+        run: docker build --file container/tilecache/Dockerfile --tag "chart-locker-tilecache-pr:${GITHUB_SHA}" .
+      - name: Verify runtime health and license inventory
+        env:
+          IMAGE: chart-locker-tilecache-pr:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          name="chart-locker-tilecache-pr-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          license_dir="${RUNNER_TEMP}/chart-locker-pr-licenses"
+          cleanup() {
+            docker rm --force "$name" >/dev/null 2>&1 || true
+            rm -rf "$license_dir"
+          }
+          trap cleanup EXIT
+
+          docker run --detach --name "$name" "$IMAGE"
+          healthy=false
+          for attempt in $(seq 1 45); do
+            state="$(docker inspect --format '{{.State.Status}}' "$name")"
+            health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$name")"
+            if [ "$health" = healthy ]; then
+              healthy=true
+              break
+            fi
+            if [ "$state" = exited ] || [ "$health" = unhealthy ] || [ "$health" = missing ]; then
+              break
+            fi
+            sleep 2
+          done
+          if [ "$healthy" != true ]; then
+            docker logs "$name" || true
+            docker inspect "$name"
+            echo "The pull-request image did not become healthy." >&2
+            exit 1
+          fi
+
+          mkdir -p "$license_dir"
+          docker cp "$name:/usr/share/licenses/chart-locker/." "$license_dir"
+          for license_file in LICENSE-APACHE THIRD_PARTY_NOTICES.md RUST_THIRD_PARTY_LICENSES.md; do
+            test -s "$license_dir/$license_file"
+          done
