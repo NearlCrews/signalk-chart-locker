@@ -14,6 +14,20 @@ async function configDir (contents?: string): Promise<string> {
   return dir
 }
 
+async function settleWithin<T> (promise: Promise<T>, timeoutMs = 2000): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('promise did not settle before the deadline')), timeoutMs)
+      })
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 test('reports true when the third-party plugin config is present and enabled', async () => {
   const dir = await configDir(JSON.stringify({ enabled: true, configuration: {} }))
   try {
@@ -119,7 +133,9 @@ test('stop drains the active transition and prevents a queued state from applyin
   }, { intervalMs: 10 })
   try {
     await writeFile(file, JSON.stringify({ enabled: true }))
-    await transitionStarted
+    // The production apply timer is intentionally unref'ed. Keep this test process alive while it
+    // waits for that timer so Node 22 does not cancel the pending test when no other handles remain.
+    await settleWithin(transitionStarted)
     await writeFile(file, JSON.stringify({ enabled: false }))
     const stopped = watcher.stop()
     release?.()

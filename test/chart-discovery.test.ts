@@ -22,7 +22,8 @@ test('default chart names replace filename control characters', () => {
 
 test('rescanCharts rejects controlled filenames before decode and sanitizes diagnostics', async () => {
   const dir = await chartsDir()
-  const fileName = 'hostile\u2028name\nchart.pmtiles'
+  // U+2028 is a prohibited display control while remaining a valid filename on Windows.
+  const fileName = 'hostile\u2028name.pmtiles'
   await writeFile(join(dir, fileName), buildPmtilesFixture())
   const registry = new ChartRegistry()
   const messages: string[] = []

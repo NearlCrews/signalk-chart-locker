@@ -49,6 +49,7 @@ interface AccessAwarePluginRouter {
 interface PluginDeps {
   startDiscovery?: typeof startDiscovery
   registerRegionsRoutes?: typeof registerRegionsRoutes
+  mutualExclusionPollIntervalMs?: number
   /** Test seam and defensive upper bound for container-manager calls that have no signal parameter. */
   managerOperationTimeoutMs?: number
 }
@@ -306,7 +307,10 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
         app.setPluginError(`PMTiles provider update failed: ${error instanceof Error ? error.message : String(error)}`)
         throw error
       }
-    }, { onError: (error) => app.debug('PMTiles mutual-exclusion watch failed:', error) })
+    }, {
+      intervalMs: deps.mutualExclusionPollIntervalMs,
+      onError: (error) => app.debug('PMTiles mutual-exclusion watch failed:', error)
+    })
   }
 
   function updatePluginStatus (): void {

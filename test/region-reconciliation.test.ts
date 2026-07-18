@@ -1,10 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, mkdtemp, rm, stat } from 'node:fs/promises'
+import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registerRegionsRoutes } from '../src/http/regions-routes.js'
-import { loadRegionsStore, saveRegionsStore, DEFAULT_REGIONS_STORE, type SavedRegion } from '../src/runtime/regions-store.js'
+import { loadRegionsStore, saveRegionsStore, updateRegion, DEFAULT_REGIONS_STORE, type SavedRegion } from '../src/runtime/regions-store.js'
 import { fakeApp, fakeRegionsRes, makeRegionsRouter } from './helpers.js'
 
 const requestBody = {
@@ -21,6 +21,20 @@ async function waitFor (predicate: () => boolean, timeoutMs = 2000): Promise<voi
   const deadline = Date.now() + timeoutMs
   while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5))
   assert.equal(predicate(), true, 'condition did not become true before the deadline')
+}
+
+async function settleWithin<T> (promise: Promise<T>, timeoutMs = 2000): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('promise did not settle before the deadline')), timeoutMs)
+      })
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
 }
 
 test('a saved region reaches durable terminal state without any client status poll', async () => {
@@ -120,7 +134,9 @@ test('stopping the route handle aborts and drains an in-flight reconciliation fe
   try {
     const create = routes.find(({ method, path }) => method === 'POST' && path === '/api/regions')!
     await create.handler({ params: {}, body: requestBody }, fakeRegionsRes().res)
-    await statusStarted
+    // Reconciliation sleeps on an unref'ed production timer. Retain one test-owned timer until the
+    // status request starts so Node 22 does not cancel this test with a pending promise.
+    await settleWithin(statusStarted)
     if (handle !== false) await handle.stop()
     assert.equal(aborted, true)
   } finally {
@@ -129,9 +145,12 @@ test('stopping the route handle aborts and drains an in-flight reconciliation fe
   }
 })
 
-test('reconciliation retries a terminal snapshot after a transient persistence failure', { skip: process.platform === 'win32' }, async () => {
+test('reconciliation retries a terminal snapshot after a transient persistence failure', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'region-persist-retry-'))
   const { routes, router } = makeRegionsRouter()
+  let reportFirstFailure: (() => void) | undefined
+  const firstFailure = new Promise<void>((resolve) => { reportFirstFailure = resolve })
+  let updateAttempts = 0
   const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
     if (url.endsWith('/cache/stats')) return Response.json({ regionsFreeBytes: 1_000_000_000, perSourceAvgBytes: {} })
     if (url.endsWith('/warm') && init?.method === 'POST') return Response.json({ jobId: warmJobId(4) })
@@ -142,21 +161,27 @@ test('reconciliation retries a terminal snapshot after a transient persistence f
   const handle = registerRegionsRoutes(router, fakeApp() as never, () => 'cache:8080', {
     dataDir,
     fetchImpl,
-    pollIntervalMs: 10,
-    reconciliationRequestSpacingMs: 0
+    pollIntervalMs: 100,
+    reconciliationRequestSpacingMs: 0,
+    updateRegion: (...args) => {
+      updateAttempts++
+      if (updateAttempts === 1) {
+        reportFirstFailure?.()
+        throw new Error('injected transient persistence failure')
+      }
+      updateRegion(...args)
+    }
   })
   assert.notEqual(handle, false)
   if (handle !== false) handle.start()
   try {
     const create = routes.find(({ method, path }) => method === 'POST' && path === '/api/regions')!
     await create.handler({ params: {}, body: requestBody }, fakeRegionsRes().res)
-    await chmod(dataDir, 0o500)
-    await new Promise((resolve) => setTimeout(resolve, 30))
+    await settleWithin(firstFailure)
     assert.equal(loadRegionsStore(dataDir).regions[0]?.status, 'downloading')
-    await chmod(dataDir, 0o700)
     await waitFor(() => loadRegionsStore(dataDir).regions[0]?.status === 'ready')
+    assert.ok(updateAttempts >= 2)
   } finally {
-    await chmod(dataDir, 0o700)
     if (handle !== false) await handle.stop()
     await rm(dataDir, { recursive: true, force: true })
   }

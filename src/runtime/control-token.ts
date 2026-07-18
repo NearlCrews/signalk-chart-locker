@@ -258,6 +258,8 @@ function recoverAbandonedLock (lockPath: string, recoveryPath: string): void {
 interface ControlTokenDeps {
   /** Test seam for forcing a recovery owner into the check-to-open window. */
   afterCanonicalLockPublished?: (paths: { lockPath: string, recoveryPath: string }) => void
+  /** Test seam for deterministically failing token publication. */
+  createToken?: (path: string) => string
 }
 
 /** Load or atomically create the stable 32-byte control token. The token is never included in errors. */
@@ -331,7 +333,7 @@ export function getOrCreateControlToken (dataDir: string, deps: ControlTokenDeps
       if (!(typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT')) throw error
     }
 
-    return createToken(path)
+    return (deps.createToken ?? createToken)(path)
   } catch (error) {
     throw new Error(`cannot create tilecache control token at ${path}`, { cause: error })
   } finally {
