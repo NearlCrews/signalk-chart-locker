@@ -87,7 +87,11 @@ export function watchThirdPartyPmtilesEnabled (
   }
 
   const installWatcher = (): void => {
-    if (stopped || watcher !== undefined) return
+    // libuv's Windows fs-event watcher can abort the process when a watched temporary directory is
+    // removed during shutdown. Discovery and region state already use polling off Linux for the
+    // same portability reason. Keep native events on the deployment platform and use the existing
+    // self-heal poll everywhere else.
+    if (process.platform !== 'linux' || stopped || watcher !== undefined) return
     try {
       watcher = watch(directory, (_event, changed) => {
         if (changed === null || changed.toString() === fileName) check()

@@ -10,7 +10,6 @@ const MAX_URL_BYTES: usize = 4 * 1024;
 const MAX_COVERAGE_BOXES: usize = 64;
 const MAX_WMS_LAYER_BYTES: usize = 1024;
 const MAX_WMS_STYLE_BYTES: usize = 1024;
-const MAX_WMS_VERSION_BYTES: usize = 32;
 const MAX_WMS_FORMAT_BYTES: usize = 128;
 const MAX_ALLOWED_HOSTS: usize = 32;
 const MAX_HOST_BYTES: usize = 253;
@@ -82,10 +81,7 @@ impl ChartSource {
         }
         match &self.upstream {
             UpstreamTemplate::Xyz { url_template } | UpstreamTemplate::Wmts { url_template } => {
-                valid_upstream_url(url_template, allow_http).is_some()
-                    && ["{z}", "{x}", "{y}"]
-                        .iter()
-                        .all(|token| url_template.contains(token))
+                valid_template(url_template, allow_http)
             }
             UpstreamTemplate::Wms {
                 base,
@@ -95,13 +91,13 @@ impl ChartSource {
                 format,
                 ..
             } => {
-                valid_upstream_url(base, allow_http).is_some()
-                    && valid_bounded_text(layers, MAX_WMS_LAYER_BYTES, false)
-                    && valid_bounded_text(styles, MAX_WMS_STYLE_BYTES, true)
-                    && valid_bounded_text(version, MAX_WMS_VERSION_BYTES, false)
-                    && valid_bounded_text(format, MAX_WMS_FORMAT_BYTES, false)
+                clean_base_url(base, allow_http)
+                    && valid_query_value(layers, MAX_WMS_LAYER_BYTES, false)
+                    && valid_query_value(styles, MAX_WMS_STYLE_BYTES, true)
+                    && version == "1.3.0"
+                    && valid_query_value(format, MAX_WMS_FORMAT_BYTES, false)
             }
-            UpstreamTemplate::Arcgis { base } => valid_upstream_url(base, allow_http).is_some(),
+            UpstreamTemplate::Arcgis { base } => clean_base_url(base, allow_http),
             UpstreamTemplate::Style {
                 style_url,
                 allowed_hosts,
@@ -115,6 +111,11 @@ impl ChartSource {
                 !allowed_hosts.is_empty()
                     && allowed_hosts.len() <= MAX_ALLOWED_HOSTS
                     && allowed_hosts.iter().all(|host| valid_host(host))
+                    && allowed_hosts.iter().enumerate().all(|(index, host)| {
+                        allowed_hosts[..index]
+                            .iter()
+                            .all(|other| !host.eq_ignore_ascii_case(other))
+                    })
                     && allowed_hosts
                         .iter()
                         .any(|host| host.eq_ignore_ascii_case(style_host))
@@ -153,7 +154,34 @@ fn valid_upstream_url(value: &str, allow_http: bool) -> Option<reqwest::Url> {
             && url.host().is_some()
             && url.username().is_empty()
             && url.password().is_none()
+            && url.fragment().is_none()
     })
+}
+
+fn clean_base_url(value: &str, allow_http: bool) -> bool {
+    valid_upstream_url(value, allow_http).is_some_and(|url| url.query().is_none())
+}
+
+fn valid_template(value: &str, allow_http: bool) -> bool {
+    if !["{z}", "{x}", "{y}"]
+        .iter()
+        .all(|token| value.contains(token))
+    {
+        return false;
+    }
+    let expanded = value
+        .replace("{z}", "0")
+        .replace("{x}", "0")
+        .replace("{y}", "0");
+    !expanded.contains(['{', '}']) && valid_upstream_url(&expanded, allow_http).is_some()
+}
+
+fn valid_query_value(value: &str, max_bytes: usize, allow_empty: bool) -> bool {
+    valid_bounded_text(value, max_bytes, allow_empty)
+        && !value
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+        && !value.contains(['&', '?', '#'])
 }
 
 fn valid_host(value: &str) -> bool {
@@ -162,7 +190,7 @@ fn valid_host(value: &str) -> bool {
         && !value
             .chars()
             .any(|ch| ch.is_whitespace() || ch.is_control())
-        && !value.contains(['/', '@', '?', '#'])
+        && !value.contains(['/', '@', '?', '#', ':'])
 }
 
 fn valid_bounded_text(value: &str, max_bytes: usize, allow_empty: bool) -> bool {
@@ -255,6 +283,14 @@ mod tests {
         .unwrap();
         assert!(!source.is_valid(false), "production requires HTTPS");
         assert!(source.is_valid(true), "development permits HTTP stubs");
+        let UpstreamTemplate::Xyz { url_template } = &mut source.upstream else {
+            unreachable!()
+        };
+        *url_template = "http://example.test/{z}/{x}/{y}/{date}".into();
+        assert!(
+            !source.is_valid(true),
+            "unknown template tokens are rejected"
+        );
         source.id = "../escape".into();
         assert!(!source.is_valid(true));
 
@@ -264,6 +300,42 @@ mod tests {
         )
         .unwrap();
         assert!(!style.is_valid(false));
+
+        let duplicate_style: ChartSource = serde_json::from_str(
+            r#"{"id":"style","title":"S","tileSize":512,"minzoom":0,"maxzoom":18,"attribution":"",
+                "upstream":{"mode":"style","styleUrl":"https://tiles.example.test/style.json","allowedHosts":["tiles.example.test","TILES.EXAMPLE.TEST"]}}"#,
+        )
+        .unwrap();
+        assert!(!duplicate_style.is_valid(false));
+    }
+
+    #[test]
+    fn source_validation_rejects_query_injection_and_zero_span_boxes() {
+        let source = |upstream: &str| -> ChartSource {
+            serde_json::from_str(&format!(
+                r#"{{"id":"s","title":"S","tileSize":256,"minzoom":0,"maxzoom":18,"attribution":"","upstream":{upstream}}}"#
+            ))
+            .unwrap()
+        };
+        assert!(!source(
+            r#"{"mode":"wms","base":"https://h/wms?token=x","layers":"layer","styles":"","version":"1.3.0","format":"image/png","transparent":true}"#
+        ).is_valid(false));
+        assert!(!source(
+            r#"{"mode":"wms","base":"https://h/wms","layers":"layer&STYLES=evil","styles":"","version":"1.3.0","format":"image/png","transparent":true}"#
+        ).is_valid(false));
+        assert!(!source(
+            r#"{"mode":"wms","base":"https://h/wms","layers":"layer","styles":"","version":"1.3.0","format":"image/png\nX-Evil: yes","transparent":true}"#
+        ).is_valid(false));
+        assert!(!source(
+            r#"{"mode":"wms","base":"https://h/wms","layers":"layer","styles":"","version":"1.1.1","format":"image/png","transparent":true}"#
+        ).is_valid(false));
+        assert!(
+            !source(r#"{"mode":"arcgis","base":"https://h/MapServer?token=x"}"#).is_valid(false)
+        );
+
+        let mut zero_span = xyz_source();
+        zero_span.bounds = Some([180.0, -1.0, -180.0, 1.0]);
+        assert!(!zero_span.is_valid(false));
     }
 
     #[test]
@@ -309,7 +381,7 @@ mod tests {
             match field {
                 "layers" => *layers = "x".repeat(MAX_WMS_LAYER_BYTES + 1),
                 "styles" => *styles = "x".repeat(MAX_WMS_STYLE_BYTES + 1),
-                "version" => *version = "x".repeat(MAX_WMS_VERSION_BYTES + 1),
+                "version" => *version = "1.3.0-extra".into(),
                 "format" => *format = "x".repeat(MAX_WMS_FORMAT_BYTES + 1),
                 _ => unreachable!(),
             }

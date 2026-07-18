@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Align local, CI, release, and container builds on Rust 1.97.0, and smoke-test the complete
+  tile-cache image for pull requests that change its build inputs.
+
 <a id="v060"></a>
 
 ## [0.6.0] - 2026-07-16
@@ -67,6 +72,8 @@ All notable changes to this project are documented here. The format follows
   shutdown, closes descriptors on stream failures and disconnects, and reports rescan errors instead
   of publishing stale chart metadata. Range and HEAD responses use identity-checked descriptors,
   strong ETags, bounded metadata, and `X-Content-Type-Options: nosniff`.
+- Poll third-party PMTiles enablement on macOS and Windows instead of using native filesystem events,
+  avoiding libuv watcher aborts while preserving live provider transitions.
 - Make plugin lifecycle, mutual-exclusion transitions, persistent-state updates, container-manager
   calls, and every buffered container control response bounded and restart-safe. Startup and teardown
   are abortable, failed durable writes leave live state unchanged, corrupt state files are preserved
