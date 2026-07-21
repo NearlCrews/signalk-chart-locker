@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   buildTilecacheConfig,
   probeTilecacheHealth,
+  probeTilecacheHealthStatus,
   TILECACHE_INTERNAL_PORT,
   DEFAULT_TILECACHE_IMAGE,
   DEFAULT_CACHE_CAP_GIB,
@@ -57,10 +58,10 @@ test('buildTilecacheConfig defaults the scroll TTL env to 0 when unset', () => {
   assert.equal(c.env?.TILECACHE_SCROLL_TTL_SECS, '0')
 })
 
-test('an external cache volume source mounts at the cache dir with a skip-if-missing policy', () => {
+test('an external cache volume source mounts at the cache dir and aborts when the path is absent', () => {
   const c = buildTilecacheConfig({ externalCacheVolumeSource: '/media/ssd/binnacle' })
   assert.deepEqual(c.volumes, {
-    '/signalk-data/chart-locker-tilecache': { source: '/media/ssd/binnacle', ifMissing: 'skip' }
+    '/signalk-data/chart-locker-tilecache': { source: '/media/ssd/binnacle', ifMissing: 'abort' }
   })
 })
 
@@ -68,6 +69,13 @@ test('probeTilecacheHealth is true only on a 200 with status ok', async () => {
   assert.equal(await probeTilecacheHealth('addr:8080', async () => Response.json({ status: 'ok' })), true)
   assert.equal(await probeTilecacheHealth('addr:8080', async () => Response.json({}, { status: 503 })), false)
   assert.equal(await probeTilecacheHealth('addr:8080', async () => { throw new Error('down') }), false)
+})
+
+test('probeTilecacheHealthStatus preserves the configured readiness flag', async () => {
+  assert.deepEqual(
+    await probeTilecacheHealthStatus('addr:8080', async () => Response.json({ status: 'ok', configured: false })),
+    { healthy: true, configured: false }
+  )
 })
 
 test('probeTilecacheHealth rejects an oversized JSON response', async () => {

@@ -146,9 +146,14 @@ pinned tiles. Retention changes are persisted even when the container is tempora
 are pushed again on the next start.
 
 **External cache drive.** The Advanced section accepts an absolute host path for a USB SSD, NVMe
-drive, or other cache filesystem. A relative path is rejected. If the path is missing at startup,
-`signalk-container` applies its configured fallback behavior and the panel reports the measurement
-fallback rather than presenting the data filesystem as the external drive.
+drive, or other cache filesystem. A relative path is rejected. Create the directory first, and make
+sure a removable drive is mounted before Signal K starts. With the default rootless Podman mapping,
+grant the Signal K host user read and write access. With Docker or rootful Podman configurations that
+retain container IDs, grant UID and GID 65532 access. If `disableUserNamespaceRemap` is enabled,
+verify the effective host ownership used by the runtime and grant that identity access. Chart Locker
+treats the path as required and refuses to start the tilecache instead of silently filling the Signal
+K data filesystem when the path is absent. The PMTiles provider remains available, and the plugin
+error identifies the missing path.
 
 **Reverse geocoding.** Region auto-naming is enabled by default and can be disabled in Advanced.
 When enabled, starting a region download may send the box-center latitude and longitude, rounded to
@@ -173,6 +178,15 @@ Saving cache limits, chart discovery settings, or container settings can reapply
 recreate the tile-cache container. The panel summarizes that restart impact before saving.
 
 ## Reliability and recovery
+
+Chart Locker probes the tilecache through the host-side address that Signal K uses. After three
+consecutive failures, it runs the healthcheck inside the container. If the container is healthy but
+the published port is unreachable, Chart Locker restarts the container, resolves the port again, and
+restores its source and budget configuration before reporting recovery. Failed recovery attempts are
+rate-limited for five minutes and remain visible in the plugin status.
+The health payload also carries configuration readiness, so an automatic Docker or Podman restart
+that leaves the process healthy but clears its in-memory sources triggers the same configuration
+restore without another container restart.
 
 - State files are written through a flushed temporary file and atomically renamed, preventing a
   partial JSON document after power loss.

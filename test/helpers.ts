@@ -56,14 +56,16 @@ export function fakeApp (): Recorder {
   return app
 }
 
-/** Records the names and configs passed to ensureRunning and the names passed to stop. */
+/** Records container ensure, recreate, stop, and exec calls made through the fake manager. */
 export interface ManagerRecord {
   ensured: Array<{ name: string; config: ContainerConfig }>
+  recreated: Array<{ name: string; config: ContainerConfig }>
   stopped: string[]
+  executed: Array<{ name: string, command: string[] }>
 }
 
 export function managerRecord (): ManagerRecord {
-  return { ensured: [], stopped: [] }
+  return { ensured: [], recreated: [], stopped: [], executed: [] }
 }
 
 /** Records the calls made through the fake manager's optional update-service surface. */
@@ -101,12 +103,17 @@ export function fakeManager (opts: FakeManagerOptions = {}): ContainerManager {
   const manager: ContainerManager = {
     async whenReady () {},
     getRuntime () { return runtime },
-    async ensureRunning (name, config) {
+    async ensureRunning (name, config, _options) {
       if (opts.throwsOn?.includes('ensureRunning')) throw new Error('ensureRunning failed')
       record?.ensured.push({ name, config })
     },
+    async recreate (name, config, _options) { record?.recreated.push({ name, config }) },
     async resolveContainerAddress () { return address },
-    async stop (name) { record?.stopped.push(name) }
+    async stop (name) { record?.stopped.push(name) },
+    async execInContainer (name, command) {
+      record?.executed.push({ name, command })
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
   }
   if (updates) {
     manager.updates = {

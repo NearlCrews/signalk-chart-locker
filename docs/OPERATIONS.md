@@ -31,6 +31,7 @@ The plugin panel and status line distinguish these conditions:
 | ----- | ------- | --------------- |
 | Container unavailable | No internal address was resolved | Check `signalk-container` and the Podman or Docker runtime |
 | Startup health pending | The address exists, but the startup probe did not pass yet | Wait briefly, then inspect the container health and logs |
+| Host-side recovery pending | The resolved address failed one or more probes; recovery begins after three consecutive failures | Wait for automatic recovery, then inspect `signalk-container` if the status persists |
 | Unconfigured | The service is running, but the source and budget push failed | Restart after the container is healthy and inspect `tilecache_config_push_failed` |
 | Ready | SQLite is queryable and the configuration push succeeded | No action required |
 | Disk pressure | The filesystem is below its protected headroom | Free disk space or reduce the cache cap |
@@ -168,11 +169,32 @@ Relevant structured container events include:
 Plugin configuration-push events are `event=tilecache_config_push_succeeded` and
 `event=tilecache_config_push_failed`.
 
+Host-side port recovery events are `event=tilecache_host_recovery_started` and
+`event=tilecache_host_recovery_succeeded`. Chart Locker probes the same resolved address used by its
+tile proxy every 30 seconds. Three consecutive host-side failures trigger an in-container
+healthcheck. A healthy container with an unreachable published port is restarted and its address is
+resolved again. The plugin restores the source allowlist, cache cap, saved-region budget, position
+warm budget, and scroll retention before reporting recovery. Recovery failures remain in plugin
+status, and another restart is not attempted for five minutes.
+Each health response also reports configuration readiness. If Docker or Podman restarts the process
+outside the plugin lifecycle, Chart Locker detects the healthy but unconfigured service and restores
+the same settings without recreating it again.
+
 ## External cache storage
 
 The external cache setting must be an absolute host path. The panel measures free space on that path
 when it is available. If it cannot be measured, the response identifies the Signal K data filesystem
 as the measurement fallback and shows a warning.
+
+Create the target cache directory before Chart Locker starts. With the default rootless Podman
+mapping, grant the Signal K host user read and write access. With Docker or rootful Podman
+configurations that retain container IDs, grant UID and GID 65532 access. If
+`disableUserNamespaceRemap` is enabled, verify the effective host ownership used by the runtime and
+grant that identity access. A configured external path is required. If it is absent, including when a
+removable drive is not mounted, Chart Locker refuses to start the tilecache instead of silently using
+the boot filesystem. The PMTiles provider remains available, and the plugin error identifies the
+unavailable path. For removable storage, make the operating system mount the drive before Signal K
+starts.
 
 Before moving an existing cache, stop Signal K, copy the cache directory while preserving ownership,
 configure the new absolute path, and start Signal K. The cache database is disposable, so starting

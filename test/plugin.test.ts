@@ -5,6 +5,15 @@ import { PLUGIN_ID, PLUGIN_NAME } from '../src/shared/plugin-id.js'
 import { TILECACHE_CONTAINER_NAME, DEFAULT_TILECACHE_IMAGE, DEFAULT_TILECACHE_TAG } from '../src/runtime/tilecache-container.js'
 import { fakeApp, fakeManager, managerRecord, updatesRecord, setContainerManager, clearGlobals } from './helpers.js'
 
+async function waitUntil (predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (predicate()) return
+    if (Date.now() >= deadline) throw new Error(`condition was not met within ${timeoutMs} ms`)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+}
+
 test.afterEach(() => {
   clearGlobals()
 })
@@ -77,8 +86,32 @@ test('start preserves a legitimate absolute external-drive path', async () => {
   assert.deepEqual(app.errors, [])
   assert.deepEqual(record.ensured[0]?.config.volumes?.['/signalk-data/chart-locker-tilecache'], {
     source: '/media/Chart Locker SSD',
-    ifMissing: 'skip'
+    ifMissing: 'abort'
   })
+  await plugin.stop()
+})
+
+test('start reports an unavailable configured external cache path without silently falling back', async () => {
+  const record = managerRecord()
+  const manager = fakeManager({ record })
+  manager.ensureRunning = async (_name, _config, options) => {
+    await options?.onVolumeIssue?.({
+      containerPath: '/signalk-data/chart-locker-tilecache',
+      source: '/media/offline-drive/cache',
+      action: 'aborted',
+      reason: 'required host path is missing'
+    })
+    throw new Error('required host path is missing')
+  }
+  setContainerManager(manager)
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+
+  await plugin.start({ advanced: { cacheVolumeSource: '/media/offline-drive/cache' } }, () => {})
+
+  assert.ok(app.errors.some((message) => message.includes('/media/offline-drive/cache')))
+  assert.ok(app.status.some((message) => message.includes('Tilecache container unavailable')))
+  assert.deepEqual(record.stopped, [TILECACHE_CONTAINER_NAME])
   await plugin.stop()
 })
 
@@ -370,6 +403,210 @@ test('startup re-probes health after a successful configuration push', async (t)
     assert.equal(healthCalls, 2)
     assert.ok(configToken)
     assert.ok(app.status.some((status) => status.includes('; ready.')))
+  } finally {
+    await plugin.stop()
+  }
+})
+
+test('a configuration rejection takes priority over an earlier failed startup health probe', async (t) => {
+  setContainerManager(fakeManager({ address: '127.0.0.1:31001' }))
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+    const url = String(input)
+    if (url.endsWith('/health')) return Response.json({}, { status: 503 })
+    if (url.endsWith('/config')) return Response.json({ error: 'source configuration rejected' }, { status: 400 })
+    if (url.endsWith('/cache/regions')) return Response.json({ regions: {} })
+    throw new Error(`unexpected fetch ${url}`)
+  })
+  const app = fakeApp()
+  const plugin = createPlugin(app as never, { hostHealthMonitorIntervalMs: 60_000 })
+
+  await plugin.start({}, () => {})
+  try {
+    assert.ok(app.status.some((status) => status.includes('configuration push failed')))
+  } finally {
+    await plugin.stop()
+  }
+})
+
+test('host-side recovery recreates the container, re-resolves its port, and restores configuration', async (t) => {
+  const record = managerRecord()
+  const manager = fakeManager({ record })
+  let address: string | null = '127.0.0.1:31001'
+  let firstAddressHealthCalls = 0
+  let configPushes = 0
+  manager.resolveContainerAddress = async () => address
+  manager.recreate = async (name, config) => {
+    record.recreated.push({ name, config })
+    address = '127.0.0.1:31002'
+  }
+  manager.stop = async (name) => { record.stopped.push(name); address = null }
+  setContainerManager(manager)
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+    const url = String(input)
+    if (url.endsWith('/health')) {
+      if (url.includes('31002')) return Response.json({ status: 'ok' })
+      firstAddressHealthCalls++
+      return firstAddressHealthCalls <= 2
+        ? Response.json({ status: 'ok' })
+        : Response.json({}, { status: 503 })
+    }
+    if (url.endsWith('/config')) {
+      configPushes++
+      return new Response(null, { status: 204 })
+    }
+    if (url.endsWith('/cache/regions')) return Response.json({ regions: {} })
+    throw new Error(`unexpected fetch ${url}`)
+  })
+  const app = fakeApp()
+  const plugin = createPlugin(app as never, {
+    hostHealthMonitorIntervalMs: 5,
+    hostHealthFailureThreshold: 1,
+    hostHealthRecoveryCooldownMs: 0
+  })
+
+  await plugin.start({}, () => {})
+  try {
+    await waitUntil(() => record.recreated.length >= 1 && configPushes >= 2)
+
+    assert.equal(record.recreated.length, 1)
+    assert.equal(record.recreated[0]?.name, TILECACHE_CONTAINER_NAME)
+    assert.equal(configPushes, 2)
+    assert.ok(app.status.some((status) => status.includes('; ready.')))
+  } finally {
+    await plugin.stop()
+  }
+  assert.deepEqual(record.stopped, [TILECACHE_CONTAINER_NAME])
+})
+
+test('an initially unconfigured but reachable container is restored by host monitoring', async (t) => {
+  const record = managerRecord()
+  const manager = fakeManager({ record, address: '127.0.0.1:31001' })
+  setContainerManager(manager)
+  let healthCalls = 0
+  let configPushes = 0
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+    const url = String(input)
+    if (url.endsWith('/health')) {
+      healthCalls++
+      return healthCalls === 1
+        ? Response.json({}, { status: 503 })
+        : Response.json({ status: 'ok' })
+    }
+    if (url.endsWith('/config')) {
+      configPushes++
+      return configPushes === 1
+        ? Response.json({ error: 'port forward unavailable' }, { status: 400 })
+        : new Response(null, { status: 204 })
+    }
+    if (url.endsWith('/cache/regions')) return Response.json({ regions: {} })
+    throw new Error(`unexpected fetch ${url}`)
+  })
+  const app = fakeApp()
+  const plugin = createPlugin(app as never, {
+    hostHealthMonitorIntervalMs: 5,
+    hostHealthFailureThreshold: 1,
+    hostHealthRecoveryCooldownMs: 0
+  })
+
+  await plugin.start({}, () => {})
+  try {
+    await waitUntil(() => configPushes >= 2)
+
+    assert.equal(configPushes, 2)
+    assert.equal(record.recreated.length, 0)
+    assert.ok(app.status.some((status) => status.includes('; ready.')))
+  } finally {
+    await plugin.stop()
+  }
+})
+
+test('an out-of-band configuration loss keeps public tile routes unavailable when restore fails', async (t) => {
+  setContainerManager(fakeManager({ address: '127.0.0.1:31001' }))
+  let healthCalls = 0
+  let configPushes = 0
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+    const url = String(input)
+    if (url.endsWith('/health')) {
+      healthCalls++
+      return Response.json({ status: 'ok', configured: healthCalls <= 2 })
+    }
+    if (url.endsWith('/config')) {
+      configPushes++
+      return configPushes === 1
+        ? new Response(null, { status: 204 })
+        : Response.json({ error: 'source restore rejected' }, { status: 400 })
+    }
+    if (url.endsWith('/cache/regions')) return Response.json({ regions: {} })
+    throw new Error(`unexpected fetch ${url}`)
+  })
+  const app = fakeApp()
+  let readinessHandler: ((req: unknown, res: { status: (code: number) => unknown, setHeader: (name: string, value: string) => void, end: () => void }) => void) | undefined
+  const plugin = createPlugin(app as never, {
+    hostHealthMonitorIntervalMs: 5,
+    hostHealthFailureThreshold: 1,
+    hostHealthRecoveryCooldownMs: 60_000
+  })
+  plugin.registerWithRouter?.({
+    get (path: string, handler: typeof readinessHandler) {
+      if (path === '/tiles/ready') readinessHandler = handler
+    },
+    post () {},
+    delete () {}
+  } as never)
+
+  await plugin.start({}, () => {})
+  try {
+    await waitUntil(() => configPushes >= 2)
+    await waitUntil(() => app.status.some((message) => message.includes('automatic host-side recovery failed')))
+    let status = 0
+    readinessHandler?.({ url: '/tiles/ready', headers: {}, on () {} }, {
+      status (code) { status = code; return this },
+      setHeader () {},
+      end () {}
+    })
+
+    assert.equal(configPushes, 2)
+    assert.equal(status, 503)
+    assert.ok(app.status.some((message) => message.includes('automatic host-side recovery failed')))
+  } finally {
+    await plugin.stop()
+  }
+})
+
+test('a pending timed-out recovery recreation suppresses duplicate recreations', async (t) => {
+  const record = managerRecord()
+  const manager = fakeManager({ record, address: '127.0.0.1:31001' })
+  manager.recreate = async (name, config) => {
+    record.recreated.push({ name, config })
+    await new Promise<void>(() => {})
+  }
+  setContainerManager(manager)
+  let healthCalls = 0
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+    const url = String(input)
+    if (url.endsWith('/health')) {
+      healthCalls++
+      return healthCalls <= 2
+        ? Response.json({ status: 'ok', configured: true })
+        : Response.json({}, { status: 503 })
+    }
+    if (url.endsWith('/config')) return new Response(null, { status: 204 })
+    if (url.endsWith('/cache/regions')) return Response.json({ regions: {} })
+    throw new Error(`unexpected fetch ${url}`)
+  })
+  const plugin = createPlugin(fakeApp() as never, {
+    managerOperationTimeoutMs: 10,
+    hostHealthMonitorIntervalMs: 5,
+    hostHealthFailureThreshold: 1,
+    hostHealthRecoveryCooldownMs: 0
+  })
+
+  await plugin.start({}, () => {})
+  try {
+    await waitUntil(() => record.recreated.length > 0)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    assert.equal(record.recreated.length, 1)
   } finally {
     await plugin.stop()
   }

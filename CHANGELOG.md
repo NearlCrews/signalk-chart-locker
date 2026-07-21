@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Require a configured external cache path and report a clear plugin error when it is unavailable
+  instead of silently dropping the mount and falling back to the Signal K data directory.
+- Detect a wedged host-side tilecache port, confirm that the service remains healthy inside the
+  container, restart it with bounded and rate-limited recovery, re-resolve the published port, and
+  restore the source and budget configuration before reporting readiness.
+
 <a id="v061"></a>
 
 ## [0.6.1] - 2026-07-18

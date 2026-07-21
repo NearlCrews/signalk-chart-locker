@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ContainerConfig, ContainerUpdateService } from '../shared/types.js'
 import { PLUGIN_ID, PLUGIN_REPO_SLUG } from '../shared/plugin-id.js'
-import { makeContainerHealthcheck, probeContainerHealth, type FetchLike } from './container-health.js'
+import { makeContainerHealthcheck, probeContainerHealth, probeContainerHealthStatus, type FetchLike } from './container-health.js'
 import { CACHE_CAP_STATIC_DEFAULT_GIB } from '../shared/cache-cap.js'
 import { migrateLegacyTilecacheTag } from '../shared/tilecache-tag.js'
 
@@ -97,16 +97,17 @@ export function buildTilecacheConfig (opts: TilecacheContainerOptions = {}): Con
     }
   }
   if (opts.externalCacheVolumeSource !== undefined) {
-    // Relocate the cache to an external SSD or NVMe; skip the mount if the drive is absent so the
-    // container still starts (falling back to the data mount on the boot card).
+    // Relocate the cache to an external SSD or NVMe. Treat the configured path as required so an
+    // absent removable drive cannot silently redirect a large cache onto the boot filesystem.
     config.volumes = {
-      [CACHE_DIR]: { source: opts.externalCacheVolumeSource, ifMissing: 'skip' }
+      [CACHE_DIR]: { source: opts.externalCacheVolumeSource, ifMissing: 'abort' }
     }
   }
   return config
 }
 
 export const probeTilecacheHealth = probeContainerHealth
+export const probeTilecacheHealthStatus = probeContainerHealthStatus
 
 /** Registers the tilecache container with the manager's update service (the Container Manager panel's "up to date" and "Check now"). Re-registering on every start is the supported pattern. */
 export function registerTilecacheUpdates (updates: ContainerUpdateService, rawTag?: string): void {

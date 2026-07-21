@@ -3,7 +3,7 @@
 import type { Plugin, ServerAPI } from '@signalk/server-api'
 import { PLUGIN_ID, PLUGIN_NAME, PLUGIN_DESCRIPTION, PLUGIN_MOUNT_PATH } from '../shared/plugin-id.js'
 import { requireContainerManager, getContainerManager, ensureRuntimeReady } from '../runtime/container-manager.js'
-import { TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT, DEFAULT_CACHE_CAP_GIB, PLUGIN_VERSION, buildTilecacheConfig, probeTilecacheHealth, registerTilecacheUpdates, unregisterTilecacheUpdates } from '../runtime/tilecache-container.js'
+import { TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT, DEFAULT_CACHE_CAP_GIB, PLUGIN_VERSION, buildTilecacheConfig, probeTilecacheHealth, probeTilecacheHealthStatus, registerTilecacheUpdates, unregisterTilecacheUpdates } from '../runtime/tilecache-container.js'
 import { buildSourcePayload, pushTilecacheConfig } from '../runtime/tilecache-config-push.js'
 import { registerTileRoutes, type TileRouter } from '../http/tile-routes.js'
 import { registerRegionsRoutes, type RegionsRouter, type RegionsRoutesHandle } from '../http/regions-routes.js'
@@ -24,6 +24,7 @@ import { isValidPosition } from '../runtime/position-warm.js'
 import { getOrCreateControlToken } from '../runtime/control-token.js'
 import { hasControlCharacter } from '../shared/text.js'
 import { migrateLegacyTilecacheTag } from '../shared/tilecache-tag.js'
+import { createHostHealthMonitor, type HostHealthMonitor, type HostHealthState } from '../runtime/host-health-monitor.js'
 
 interface ChartLockerConfig {
   // Sectioned to match how the admin form groups the fields: nested objects render as titled
@@ -52,6 +53,9 @@ interface PluginDeps {
   mutualExclusionPollIntervalMs?: number
   /** Test seam and defensive upper bound for container-manager calls that have no signal parameter. */
   managerOperationTimeoutMs?: number
+  hostHealthMonitorIntervalMs?: number
+  hostHealthFailureThreshold?: number
+  hostHealthRecoveryCooldownMs?: number
 }
 
 const MANAGER_OPERATION_TIMEOUT_MS = 30_000
@@ -118,6 +122,8 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
   let configuredCachePath: string | null = null
   let tilecacheHealthy = false
   let tilecacheConfigured = false
+  let tilecacheHealthDetail: string | null = null
+  let hostHealthMonitor: HostHealthMonitor | null = null
   let controlToken: string | null = null
   let geocodingEnabled = true
   // Position-warm lifecycle state (factory scope, like tilecacheAddress).
@@ -318,11 +324,13 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
       ? pmtilesEnabled
         ? 'Tilecache container unavailable; tile caching is disabled. PMTiles charts ready.'
         : 'Tilecache container unavailable; tile caching is disabled.'
-      : !tilecacheConfigured
-          ? `Tilecache at ${tilecacheAddress}, but its configuration push failed; cached tile requests are unavailable.`
-          : !tilecacheHealthy
-              ? `Tilecache at ${tilecacheAddress}; health is pending.`
-              : `Tilecache at ${tilecacheAddress}; ready.`
+      : tilecacheHealthDetail !== null
+        ? `Tilecache at ${tilecacheAddress}; ${tilecacheHealthDetail}`
+        : !tilecacheConfigured
+            ? `Tilecache at ${tilecacheAddress}, but its configuration push failed; cached tile requests are unavailable.`
+            : !tilecacheHealthy
+                ? `Tilecache at ${tilecacheAddress}; health is pending.`
+                : `Tilecache at ${tilecacheAddress}; ready.`
     if (!pmtilesEnabled) {
       app.setPluginStatus(`${tcStatus} PMTiles charts disabled: signalk-pmtiles-plugin is enabled, disable it to use the Chart Locker chart provider.`)
     } else {
@@ -340,6 +348,7 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
     pluginRunning = true
     tilecacheHealthy = false
     tilecacheConfigured = false
+    tilecacheHealthDetail = null
     geocodingEnabled = config.advanced?.geocodingEnabled ?? true
     configuredCachePath = readConfigPath('cacheVolumeSource', config.advanced?.cacheVolumeSource) || null
     const dataDir = app.getDataDirPath()
@@ -399,7 +408,34 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
         geocodingEnabled,
         ...(configuredCachePath === null ? {} : { externalCacheVolumeSource: configuredCachePath })
       })
-      const ensureOperation = manager.ensureRunning(TILECACHE_CONTAINER_NAME, tilecacheConfig, { pluginId: PLUGIN_ID, pluginVersion: PLUGIN_VERSION })
+      let requiredVolumeUnavailable = false
+      const stopForUnavailableVolume = async (): Promise<void> => {
+        tilecacheAddress = null
+        tilecacheHealthy = false
+        tilecacheConfigured = false
+        try {
+          const stopOperation = manager.stop(TILECACHE_CONTAINER_NAME)
+          const stopOutcome = await waitForManagerOperation(stopOperation, managerOperationTimeoutMs)
+          if (stopOutcome.status === 'timeout') {
+            trackManagerTransition(stopOperation, 'Timed-out unavailable-volume container stop failed:')
+          } else if (stopOutcome.status === 'rejected') {
+            app.debug('Cannot stop the tilecache after its required volume became unavailable:', stopOutcome.error)
+          }
+        } catch (error) {
+          app.debug('Cannot stop the tilecache after its required volume became unavailable:', error)
+        }
+      }
+      const tilecacheEnsureOptions: NonNullable<Parameters<typeof manager.ensureRunning>[2]> = {
+        pluginId: PLUGIN_ID,
+        pluginVersion: PLUGIN_VERSION,
+        onVolumeIssue: (event) => {
+          if (event.action === 'aborted' && configuredCachePath !== null && event.source === configuredCachePath) {
+            requiredVolumeUnavailable = true
+            app.setPluginError(`External tile cache path is unavailable: ${event.source}. Create or mount it on the host, grant the effective container-mapped tilecache user read and write access, and restart Chart Locker.`)
+          }
+        }
+      }
+      const ensureOperation = manager.ensureRunning(TILECACHE_CONTAINER_NAME, tilecacheConfig, tilecacheEnsureOptions)
       const ensureOutcome = await waitForManagerOperation(ensureOperation, managerOperationTimeoutMs, startupController.signal)
       if (ensureOutcome.status === 'aborted' || ensureOutcome.status === 'timeout') {
         scheduleLateEnsureCleanup(ensureOperation, manager)
@@ -409,7 +445,10 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
         }
         throw new Error('tilecache container launch exceeded the manager operation timeout')
       }
-      if (ensureOutcome.status === 'rejected') throw ensureOutcome.error
+      if (ensureOutcome.status === 'rejected') {
+        if (requiredVolumeUnavailable) await stopForUnavailableVolume()
+        throw ensureOutcome.error
+      }
       tilecacheLaunched = true
       tilecacheManager = manager
       // Show update state for this container in the Container Manager panel. Re-registering on
@@ -443,6 +482,7 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
           return
         }
         if (!tilecacheHealthy) {
+          tilecacheHealthDetail = 'startup health probe failed; host-side monitoring is active.'
           app.debug('Tilecache container did not pass its health probe at startup; tiles will work once it is ready.')
         }
         // R, the saved-regions reserve: the configured value (converted from GiB), or half the cap
@@ -467,6 +507,7 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
         }
         tilecacheConfigured = pushed.ok
         if (!pushed.ok) {
+          tilecacheHealthDetail = null
           app.debug(`event=tilecache_config_push_failed state=unconfigured status=${String(pushed.status ?? 'network')} error=${pushed.error ?? 'unknown'}`)
         } else {
           app.debug('event=tilecache_config_push_succeeded state=configured')
@@ -477,6 +518,109 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
             await chartsReady
             return
           }
+          tilecacheHealthDetail = tilecacheHealthy
+            ? null
+            : 'startup health probe failed; host-side monitoring is active.'
+        }
+
+        if (tilecacheAddress !== null) {
+          const handleHealthState = (state: HostHealthState): void => {
+            switch (state.status) {
+              case 'healthy':
+                tilecacheHealthy = true
+                tilecacheHealthDetail = null
+                break
+              case 'host-unreachable':
+                tilecacheHealthy = false
+                tilecacheHealthDetail = `host-side health probe failed (${state.failureCount}/${state.failureThreshold}); automatic recovery is pending.`
+                break
+              case 'restarting':
+                tilecacheHealthy = false
+                tilecacheConfigured = false
+                tilecacheHealthDetail = 'host-side access failed while the container remained healthy; restarting the container.'
+                app.debug('event=tilecache_host_recovery_started reason=published_port_unreachable')
+                break
+              case 'restoring':
+                tilecacheHealthy = true
+                tilecacheConfigured = false
+                tilecacheHealthDetail = 'container configuration is being restored.'
+                break
+              case 'container-unhealthy':
+                tilecacheHealthy = false
+                tilecacheHealthDetail = 'host-side and in-container healthchecks failed; inspect the container logs.'
+                break
+              case 'recovered':
+                tilecacheHealthy = true
+                tilecacheConfigured = true
+                tilecacheHealthDetail = null
+                app.debug('event=tilecache_host_recovery_succeeded')
+                break
+              case 'recovery-failed':
+                tilecacheHealthy = false
+                tilecacheConfigured = false
+                tilecacheHealthDetail = `automatic host-side recovery failed: ${state.error}`
+                break
+            }
+            updatePluginStatus()
+          }
+
+          hostHealthMonitor = createHostHealthMonitor({
+            getAddress: () => tilecacheAddress,
+            probeHost: async (address, signal) => await probeTilecacheHealthStatus(address, undefined, signal),
+            probeContainer: async () => {
+              const operation = manager.execInContainer(TILECACHE_CONTAINER_NAME, ['/tilecache', 'healthcheck'])
+              const outcome = await waitForManagerOperation(operation, managerOperationTimeoutMs)
+              return outcome.status === 'completed' && outcome.value.exitCode === 0
+            },
+            restart: async () => {
+              const priorTransition = pendingManagerTransition
+              if (priorTransition !== null) {
+                await waitForManagerOperation(priorTransition, managerOperationTimeoutMs)
+                if (pendingManagerTransition !== null) {
+                  throw new Error('a previous tilecache manager operation is still pending; skipping recovery recreation')
+                }
+              }
+              // recreate is one manager-owned transition that replaces the wedged port forward and
+              // re-registers Signal K accessible-port bookkeeping. A separate stop/start sequence
+              // can strand the service when either half completes after its caller times out.
+              const recreateOperation = manager.recreate(TILECACHE_CONTAINER_NAME, tilecacheConfig, tilecacheEnsureOptions)
+              const recreateOutcome = await waitForManagerOperation(recreateOperation, managerOperationTimeoutMs)
+              if (recreateOutcome.status === 'timeout') {
+                scheduleLateEnsureCleanup(recreateOperation, manager)
+                throw new Error('container recreation exceeded the manager operation timeout')
+              }
+              if (recreateOutcome.status === 'rejected') {
+                if (requiredVolumeUnavailable) await stopForUnavailableVolume()
+                throw recreateOutcome.error
+              }
+
+              const addressOperation = manager.resolveContainerAddress(TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT)
+              const addressOutcome = await waitForManagerOperation(addressOperation, managerOperationTimeoutMs)
+              if (addressOutcome.status === 'timeout') throw new Error('container address resolution exceeded the manager operation timeout')
+              if (addressOutcome.status === 'rejected') throw addressOutcome.error
+              return addressOutcome.status === 'completed' ? addressOutcome.value : null
+            },
+            restore: async (address, signal) => {
+              const restored = await pushTilecacheConfig(
+                address,
+                await buildSourcePayload(capBytes, regionsBudgetBytes, pBudget, scrollTtlSecs, geocodingEnabled),
+                { controlToken: startupControlToken, signal }
+              )
+              if (!restored.ok) {
+                app.debug(`event=tilecache_config_push_failed state=recovery status=${String(restored.status ?? 'network')} error=${restored.error ?? 'unknown'}`)
+                throw new Error(`configuration restore failed: ${restored.error ?? String(restored.status ?? 'network error')}`)
+              }
+              app.debug('event=tilecache_config_push_succeeded state=recovered')
+            },
+            restoreInitially: !tilecacheConfigured,
+            onAddress: (address) => { tilecacheAddress = address },
+            onState: handleHealthState,
+            onError: (error) => { app.debug('Tilecache host-side health monitor:', error) },
+            ...(deps.hostHealthMonitorIntervalMs === undefined ? {} : { intervalMs: deps.hostHealthMonitorIntervalMs }),
+            ...(deps.hostHealthFailureThreshold === undefined ? {} : { failureThreshold: deps.hostHealthFailureThreshold }),
+            ...(deps.hostHealthRecoveryCooldownMs === undefined ? {} : { recoveryCooldownMs: deps.hostHealthRecoveryCooldownMs })
+          })
+          hostHealthMonitor.start()
         }
       }
     } catch (err) {
@@ -533,6 +677,11 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
     pluginRunning = false
     startController?.abort()
     startController = null
+    const monitor = hostHealthMonitor
+    hostHealthMonitor = null
+    if (monitor !== null) {
+      try { await monitor.stop() } catch (error) { app.debug('Cannot stop the tilecache host-side health monitor:', error) }
+    }
     if (positionUnsub) {
       try { positionUnsub() } catch (error) { app.debug('Cannot stop the position subscription:', error) }
       positionUnsub = null
@@ -561,6 +710,7 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
     tilecacheAddress = null
     tilecacheHealthy = false
     tilecacheConfigured = false
+    tilecacheHealthDetail = null
     if (tilecacheLaunched) {
       let manager = tilecacheManager
       if (manager === null) {

@@ -52,6 +52,12 @@ export interface ContainerConfig {
 interface EnsureRunningOptions {
   pluginId?: string
   pluginVersion?: string
+  onVolumeIssue?: (event: {
+    containerPath: string
+    source: string
+    action: 'skipped' | 'aborted' | 'recovered'
+    reason: string
+  }) => void | Promise<void>
 }
 
 /** Opaque version-source handle from the manager's update-source factories; consumers never implement it. */
@@ -87,8 +93,10 @@ export interface ContainerManager {
   whenReady(): Promise<void>
   getRuntime(): ContainerRuntimeInfo | null
   ensureRunning(name: string, config: ContainerConfig, options?: EnsureRunningOptions): Promise<void>
+  recreate(name: string, config: ContainerConfig, options?: EnsureRunningOptions): Promise<void>
   resolveContainerAddress(name: string, port: number): Promise<string | null>
   stop(name: string): Promise<void>
+  execInContainer(name: string, command: string[]): Promise<{ exitCode: number, stdout: string, stderr: string }>
   /** The centralized update service; optional because older signalk-container versions predate it. */
   updates?: ContainerUpdateService
 }
