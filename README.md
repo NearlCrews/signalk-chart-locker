@@ -14,16 +14,17 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.6.1
+## What's new in 0.7.0
 
-Version 0.6.1 upgrades `signalk-chart-sources` to 0.4.0 and applies its stricter source structure,
-URL, template, host, WMS, ArcGIS, and zero-longitude-span validation at the Rust tile-cache boundary.
+Version 0.7.0 fixes the proxied basemap's shaded-relief layer: raster style sources are now
+validated and served as images, where the vector-tile validator previously rejected every
+`ne2_shaded` tile as 502 and flooded the browser console on any chart using the offline basemap.
 
-The release also aligns local, CI, release, and container builds on Rust 1.97.0, refreshes locked
-Rust networking dependencies and their license inventory, and smoke-tests the complete tile-cache
-image when pull requests change its build inputs.
+Restarting Signal K no longer interrupts tile serving: a still-running, healthy, and configured
+tilecache from the previous session is adopted the moment the plugin starts, instead of answering
+503 until the container reconcile and configuration push complete.
 
-See the [0.6.1 changelog](CHANGELOG.md#v061) for the full list.
+See the [0.7.0 changelog](CHANGELOG.md#v070) for the full list.
 
 ## What it does
 

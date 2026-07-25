@@ -4,7 +4,9 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+<a id="v070"></a>
+
+## [0.7.0] - 2026-07-25
 
 ### Added
 
@@ -23,6 +25,13 @@ All notable changes to this project are documented here. The format follows
 - Detect a wedged host-side tilecache port, confirm that the service remains healthy inside the
   container, restart it with bounded and rate-limited recovery, re-resolve the published port, and
   restore the source and budget configuration before reporting readiness.
+
+### Changed
+
+- Refresh development dependencies (`@types/node` 26, `signalk-nearlcrews-ui` 0.3.0, React 19.2.8,
+  webpack 5.109, Playwright 1.62, and the local `signalk-container` development copy at 1.23.2).
+  ESLint stays on 9.x until `eslint-plugin-react` admits ESLint 10, and TypeScript stays on 6.x
+  while the 7.0 compiler line settles.
 
 <a id="v061"></a>
 
