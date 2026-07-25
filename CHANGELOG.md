@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Tile requests over an HTTP/2 connection no longer lose part of a pan or zoom burst. Request
+  admission was sized to the HTTP/1.1 same-origin connection limit and shed the excess with 503,
+  which the chart renderer never retries, leaving permanent holes; over-burst requests now wait a
+  bounded time for a free slot instead, without growing the container's retained-body budget.
+
 <a id="v070"></a>
 
 ## [0.7.0] - 2026-07-25

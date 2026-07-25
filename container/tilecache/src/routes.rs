@@ -50,20 +50,41 @@ pub fn app(state: AppState) -> Router {
         ))
 }
 
-/// Shed excess work before a handler can enqueue a SQLite blocking task. Health uses a separate,
-/// bounded reserve so a tile storm cannot consume every probe slot. The permit spans both the handler
-/// and the response body's final frame or drop.
+/// Bound concurrent work before a handler can enqueue a SQLite blocking task. Health uses a
+/// separate, bounded reserve so a tile storm cannot consume every probe slot, and health probes
+/// never queue: they measure capacity, and a queued probe would report a saturated service as
+/// merely slow. Ordinary requests wait a bounded time for a slot instead of shedding instantly,
+/// because an HTTP/2 chart client multiplexes a whole pan or zoom burst at once and instantly
+/// shed tiles become permanent holes on the chart. Parked waiters hold no request or response
+/// bodies, so the retained-body budget is unchanged; the wait bound plus the transport's own
+/// stream limits bound the parked set. The permit spans both the handler and the response body's
+/// final frame or drop.
 async fn request_admission(
     State(state): State<AppState>,
     request: Request,
     next: Next,
 ) -> Response {
-    let semaphore = if request.uri().path() == "/health" {
+    let is_health = request.uri().path() == "/health";
+    let wait_ms = state.knobs.admission_wait_ms;
+    let semaphore = if is_health {
         state.health_request_semaphore.clone()
     } else {
         state.request_semaphore.clone()
     };
-    let Ok(permit) = semaphore.try_acquire_owned() else {
+    let permit = if is_health || wait_ms == 0 {
+        semaphore.try_acquire_owned().ok()
+    } else {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(wait_ms),
+            semaphore.acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(acquired)) => Some(acquired),
+            _ => None,
+        }
+    };
+    let Some(permit) = permit else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::RETRY_AFTER, "1")],
@@ -829,6 +850,8 @@ mod tests {
         let mut state = dev_state(&db);
         state.request_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
         state.health_request_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        // Zero wait exercises the instant-shed path this test pins.
+        state.knobs.admission_wait_ms = 0;
         let router = app(state);
 
         // Keep the first ordinary response body unread. Its admission permit must remain charged after
@@ -877,6 +900,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(recovered_health.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn request_admission_queues_a_burst_until_a_slot_frees() {
+        let db = NamedTempFile::new().unwrap();
+        let mut state = dev_state(&db);
+        state.request_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        state.knobs.admission_wait_ms = 2_000;
+        let router = app(state);
+
+        // Hold the only slot by leaving the first response body unread.
+        let holding = router
+            .clone()
+            .oneshot(Request::get("/cache/regions").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(holding.status(), StatusCode::OK);
+
+        // The regression this pins: an over-burst request parks for a slot instead of shedding
+        // with 503 and leaving a permanent hole on the chart. Freeing the held body must let the
+        // parked request complete successfully within its wait budget.
+        let queued = tokio::spawn({
+            let router = router.clone();
+            async move {
+                router
+                    .oneshot(Request::get("/cache/stats").body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        holding.into_body().collect().await.unwrap();
+        let queued = queued.await.unwrap();
+        assert_eq!(queued.status(), StatusCode::OK);
     }
 
     #[tokio::test]

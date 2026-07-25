@@ -100,6 +100,13 @@ pub struct Knobs {
     /// A compile-time default, set directly by tests: it is not exposed on POST /config and reads no env
     /// var, because the escalation is automatic and the issue asks for no user tuning surface.
     pub upstream_base_timeout_ms: u64,
+    /// How long request admission waits for a free slot before shedding with 503. The slot count was
+    /// sized to the HTTP/1.1 same-origin connection limit, but over HTTP/2 a chart client multiplexes
+    /// a whole pan or zoom burst at once, and instant shedding turned the excess into permanently
+    /// missing map tiles. Parked waiters hold no request or response bodies, so queueing does not
+    /// grow the retained-body budget; the wait plus the transport's own stream limits bound the
+    /// parked set. Zero restores instant shedding (tests exercising the shed path set it).
+    pub admission_wait_ms: u64,
 }
 
 impl Default for Knobs {
@@ -113,6 +120,7 @@ impl Default for Knobs {
             allow_private_egress: false,
             scroll_ttl_secs: 0,
             upstream_base_timeout_ms: 20_000,
+            admission_wait_ms: 10_000,
         }
     }
 }
