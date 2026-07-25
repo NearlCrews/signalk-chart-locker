@@ -14,6 +14,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- Serve raster style sources (the Liberty basemap's `ne2_shaded` shaded relief) through the style
+  tile route as images. The vector-tile validator rejected their PNG bodies, so every shaded-relief
+  tile answered 502 or 503 and was never cached, flooding the browser console on any chart that uses
+  the proxied basemap.
 - Require a configured external cache path and report a clear plugin error when it is unavailable
   instead of silently dropping the mount and falling back to the Signal K data directory.
 - Detect a wedged host-side tilecache port, confirm that the service remains healthy inside the

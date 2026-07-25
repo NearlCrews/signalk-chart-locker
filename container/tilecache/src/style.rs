@@ -41,6 +41,10 @@ pub(crate) enum StyleAssetKind {
     SpriteJson,
     SpritePng,
     VectorTile,
+    /// A tile of a style source declared `"type": "raster"` or `"raster-dem"` (the Liberty
+    /// basemap's `ne2_shaded` shaded relief). Validated as an image, not as protobuf: raster
+    /// tiles served through the vector validator were rejected as 502 on every fetch.
+    RasterTile,
 }
 
 pub(crate) fn valid_style_asset(kind: StyleAssetKind, content_type: &str, body: &[u8]) -> bool {
@@ -55,6 +59,12 @@ pub(crate) fn valid_style_asset(kind: StyleAssetKind, content_type: &str, body: 
             media_type.as_str(),
             "application/x-protobuf" | "application/vnd.mapbox-vector-tile"
         ),
+        StyleAssetKind::RasterTile => {
+            matches!(
+                media_type.as_str(),
+                "image/png" | "image/webp" | "image/jpeg"
+            )
+        }
         StyleAssetKind::SpritePng => media_type == "image/png",
         StyleAssetKind::SpriteJson => {
             media_type == "application/json"
@@ -361,6 +371,7 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
     }
 
     let mut source_tiles: HashMap<String, Vec<String>> = HashMap::new();
+    let mut raster_sources: HashSet<String> = HashSet::new();
     let mut source_maxzoom: HashMap<String, u32> = HashMap::new();
     let names: Vec<String> = source_object.keys().cloned().collect();
     for name in &names {
@@ -369,6 +380,12 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
             return None;
         }
         let src = &style["sources"][name];
+        if matches!(
+            src.get("type").and_then(Value::as_str),
+            Some("raster" | "raster-dem")
+        ) {
+            raster_sources.insert(name.clone());
+        }
         let declared_tile_source = src.get("tiles").is_some() || src.get("url").is_some();
         // maxzoom can be inline on the source, or in the source's TileJSON (fetched below).
         let inline_max = match optional_maxzoom(src.get("maxzoom")) {
@@ -465,6 +482,7 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
         Arc::new(StyleState {
             glyphs,
             source_tiles,
+            raster_sources,
             source_maxzoom,
             fontstacks,
             sprite_base,
@@ -864,7 +882,9 @@ async fn sprite_variant(state: AppState, source: String, variant: u32, suffix: &
     .await
 }
 
-/// GET /style/:source/tiles/:name/:z/:x/:y: serve a basemap vector tile, cached through the tile cache.
+/// GET /style/:source/tiles/:name/:z/:x/:y: serve a basemap style tile, cached through the tile
+/// cache. The learned source type picks the validator: raster sources serve images, everything
+/// else serves vector tiles.
 async fn vector_tile(
     State(state): State<AppState>,
     Path((source, name, z, x, y)): Path<(String, String, u32, u32, u32)>,
@@ -890,6 +910,11 @@ async fn vector_tile(
     if z > maxzoom || z > 24 || u64::from(x) >= dimension || u64::from(y) >= dimension {
         return StatusCode::BAD_REQUEST.into_response();
     }
+    let kind = if learned.raster_sources.contains(&name) {
+        StyleAssetKind::RasterTile
+    } else {
+        StyleAssetKind::VectorTile
+    };
     let cache_source = vector_cache_source_at(&source, &name, learned.generation);
     let if_none_match = headers
         .get(header::IF_NONE_MATCH)
@@ -901,7 +926,7 @@ async fn vector_tile(
     let serve_cached = |tile: &CachedTile| -> Option<Response> {
         if tile.status == 200
             && valid_style_asset(
-                StyleAssetKind::VectorTile,
+                kind,
                 &tile.content_type,
                 tile.blob.as_deref().unwrap_or_default(),
             )
@@ -934,7 +959,7 @@ async fn vector_tile(
                 z,
                 x,
                 y,
-                kind: StyleAssetKind::VectorTile,
+                kind,
             },
             &upstream,
             if_none_match.as_deref(),
@@ -1085,10 +1110,14 @@ mod tests {
                 "/style",
                 get(move || async move {
                     let body = format!(
-                        r#"{{"version":8,"glyphs":"http://{a}/fonts/{{fontstack}}/{{range}}.pbf","sprite":"http://{a}/sprites/ofm","sources":{{"openmaptiles":{{"type":"vector","url":"http://{a}/tiles.json"}}}},"layers":[{{"id":"l","type":"symbol","layout":{{"text-font":["Noto Sans Regular"]}}}}]}}"#
+                        r#"{{"version":8,"glyphs":"http://{a}/fonts/{{fontstack}}/{{range}}.pbf","sprite":"http://{a}/sprites/ofm","sources":{{"openmaptiles":{{"type":"vector","url":"http://{a}/tiles.json"}},"ne2_shaded":{{"type":"raster","maxzoom":6,"tileSize":256,"tiles":["http://{a}/ne2/{{z}}/{{x}}/{{y}}.png"]}}}},"layers":[{{"id":"l","type":"symbol","layout":{{"text-font":["Noto Sans Regular"]}}}}]}}"#
                     );
                     ([(header::CONTENT_TYPE, "application/json")], body)
                 }),
+            )
+            .route(
+                "/ne2/{z}/{x}/{y}",
+                get(|| async { ([(header::CONTENT_TYPE, "image/png")], vec![137u8, 80, 78, 71]) }),
             )
             .route(
                 "/tiles.json",
@@ -1227,6 +1256,13 @@ mod tests {
             "image/png",
             &[137, 80, 78, 71],
         ));
+        for content_type in ["image/png", "image/webp", "image/jpeg"] {
+            assert!(valid_style_asset(
+                StyleAssetKind::RasterTile,
+                content_type,
+                &[1, 2, 3],
+            ));
+        }
         assert!(valid_style_asset(
             StyleAssetKind::SpriteJson,
             "application/json; charset=utf-8",
@@ -1253,6 +1289,16 @@ mod tests {
                 StyleAssetKind::SpriteJson,
                 "text/html",
                 b"<script/>".as_slice(),
+            ),
+            (
+                StyleAssetKind::RasterTile,
+                "text/html",
+                b"<script/>".as_slice(),
+            ),
+            (
+                StyleAssetKind::RasterTile,
+                "application/x-protobuf",
+                &[1, 2, 3],
             ),
         ] {
             assert!(!valid_style_asset(kind, content_type, body));
@@ -1735,6 +1781,66 @@ mod tests {
             Arc::ptr_eq(&document, &learned_again.document),
             "the parsed style document is Arc-backed"
         );
+    }
+
+    #[tokio::test]
+    async fn raster_style_source_tiles_serve_as_images() {
+        let addr = spawn_upstream().await;
+        let db = NamedTempFile::new().unwrap();
+        let st = dev_state(&db);
+        let router = crate::routes::app(st.clone());
+        router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr, "127.0.0.1")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(crate::style::ensure_style_learned(&st, "basemap").await);
+        let learned = st.style_state.read().await.get("basemap").cloned().unwrap();
+        assert!(
+            learned.raster_sources.contains("ne2_shaded"),
+            "the raster source type is learned"
+        );
+        assert!(
+            !learned.raster_sources.contains("openmaptiles"),
+            "the vector source is not misclassified"
+        );
+        // The regression this pins: a raster style tile fetched from upstream as image/png must
+        // serve 200 through the style tile route, not be rejected by the vector validator as 502.
+        for pass in ["fetch", "cached"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::get("/style/basemap/tiles/ne2_shaded/1/0/0")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{pass}");
+            let content_type = response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            assert_eq!(content_type, "image/png", "{pass}");
+        }
+        // Beyond the raster source's declared maxzoom the request is rejected, not proxied.
+        let beyond = router
+            .clone()
+            .oneshot(
+                Request::get("/style/basemap/tiles/ne2_shaded/7/0/0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(beyond.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

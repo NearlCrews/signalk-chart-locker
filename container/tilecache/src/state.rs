@@ -148,6 +148,9 @@ impl Deref for GuardedResponse {
 pub struct StyleState {
     pub glyphs: Option<String>,
     pub source_tiles: HashMap<String, Vec<String>>,
+    /// The style sources declared `"type": "raster"` or `"raster-dem"`. Their tiles are
+    /// validated and served as images; every other tile source is validated as a vector tile.
+    pub raster_sources: HashSet<String>,
     pub source_maxzoom: HashMap<String, u32>,
     pub fontstacks: Vec<String>,
     pub sprite_base: Option<String>,
