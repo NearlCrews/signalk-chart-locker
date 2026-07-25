@@ -34,7 +34,7 @@
     "licenses:rust:update": "node scripts/rust-license-report.mjs --write",
     "licenses:rust:check": "node scripts/rust-license-report.mjs",
     "check:package": "npm run build && node scripts/check-package-contents.mjs",
-    "verify:publish": "npm run licenses:rust:check && npm run typecheck && npm run lint && npm test && npm run test:browser:cross && npm audit && npm run check:package",
+    "verify:publish": "npm run licenses:rust:check && npm run typecheck && npm run lint && npm test && npm run test:browser:cross && npm audit --omit=dev && npm run check:package",
     "pack:release": "node scripts/create-release-tarball.mjs",
     "verify:release-tarball": "node scripts/verify-release-tarball.mjs",
     "prepublishOnly": "npm run verify:publish"

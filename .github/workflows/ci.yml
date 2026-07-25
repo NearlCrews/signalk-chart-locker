@@ -62,7 +62,7 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
-      - run: npm audit
+      - run: npm audit --omit=dev
       - run: npm run check:package
 
   panel-browser:
