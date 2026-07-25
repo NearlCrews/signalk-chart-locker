@@ -41,6 +41,13 @@ The plugin panel and status line distinguish these conditions:
 when the SQLite probe fails. It intentionally remains HTTP 200 before the first configuration push so
 the container manager can declare the service started and allow the plugin to push configuration.
 
+At plugin start, a still-running container from the previous session that reports healthy and
+configured is adopted immediately, so tile routes serve while the normal container reconcile and
+configuration push proceed in the same start sequence. A healthy but unconfigured container is
+adopted for management routes only, and public tile routes stay unavailable until the push lands.
+If the reconcile then fails, the adoption is rolled back and the plugin reports the container
+unavailable, exactly as it would have without adoption.
+
 ## Cache capacity and disk safety
 
 The configured cap controls tile bytes tracked by SQLite. Saved-region tiles are pinned and exempt

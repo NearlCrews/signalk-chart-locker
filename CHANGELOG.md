@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Adopt a still-running, healthy, and configured tilecache from the previous session at plugin
+  start, so browser tile requests serve immediately after a Signal K restart instead of answering
+  503 until the container reconcile and configuration push complete.
+
 ### Fixed
 
 - Require a configured external cache path and report a clear plugin error when it is unavailable

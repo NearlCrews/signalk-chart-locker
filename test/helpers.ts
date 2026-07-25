@@ -163,6 +163,32 @@ export function makeRegionsRouter (): { routes: RecordedRoute[], router: Regions
   return { routes, router }
 }
 
+interface ReadinessRes {
+  status: (code: number) => ReadinessRes
+  setHeader: (name: string, value: string) => void
+  end: () => void
+}
+
+/** A registerWithRouter router whose ready() probes the captured /tiles/ready handler's status. */
+export function readinessRouter (): { router: RegionsRouter, ready: () => number } {
+  const { routes, router } = makeRegionsRouter()
+  return {
+    router,
+    ready: (): number => {
+      const handler = routes.find((route) => route.method === 'GET' && route.path === '/tiles/ready')
+        ?.handler as unknown as ((req: unknown, res: ReadinessRes) => void) | undefined
+      let status = 0
+      const res: ReadinessRes = {
+        status (code) { status = code; return res },
+        setHeader () {},
+        end () {}
+      }
+      handler?.({ url: '/tiles/ready', headers: {}, on () {} }, res)
+      return status
+    }
+  }
+}
+
 /** A RegionsResponse that records each status and its body, shared across the route tests. */
 export function fakeRegionsRes (): { responded: Array<{ status: number, body: unknown }>, res: RegionsResponse } {
   const responded: Array<{ status: number, body: unknown }> = []

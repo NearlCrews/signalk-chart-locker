@@ -59,6 +59,10 @@ interface PluginDeps {
 }
 
 const MANAGER_OPERATION_TIMEOUT_MS = 30_000
+/** Warm adoption is worthless when it is slow, so its address lookup gets a short bound instead of
+ * the full manager-operation timeout. A wedged manager then costs one ensureRunning timeout per
+ * start, as before the adoption fast path existed, not two. */
+const WARM_ADOPTION_TIMEOUT_MS = 5_000
 /** Bound admin-provided filesystem paths before they reach path resolution, filesystem APIs, logs,
  * or the container manager. This accommodates ordinary platform path limits without accepting an
  * effectively unbounded configuration string. */
@@ -123,6 +127,17 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
   let tilecacheHealthy = false
   let tilecacheConfigured = false
   let tilecacheHealthDetail: string | null = null
+
+  // The one reset for the tilecache serving state. Every path that stops serving (teardown, an
+  // unavailable required volume, a rolled-back warm adoption, and the doStart entry) clears the
+  // same four fields through this helper, so a new serving-state field cannot be cleared in some
+  // paths and missed in others.
+  function resetTilecacheServingState (): void {
+    tilecacheAddress = null
+    tilecacheHealthy = false
+    tilecacheConfigured = false
+    tilecacheHealthDetail = null
+  }
   let hostHealthMonitor: HostHealthMonitor | null = null
   let controlToken: string | null = null
   let geocodingEnabled = true
@@ -346,9 +361,7 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
     const startupController = new AbortController()
     startController = startupController
     pluginRunning = true
-    tilecacheHealthy = false
-    tilecacheConfigured = false
-    tilecacheHealthDetail = null
+    resetTilecacheServingState()
     geocodingEnabled = config.advanced?.geocodingEnabled ?? true
     configuredCachePath = readConfigPath('cacheVolumeSource', config.advanced?.cacheVolumeSource) || null
     const dataDir = app.getDataDirPath()
@@ -384,6 +397,17 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
 
     // The tilecache is non-fatal: a failure here disables tile caching but leaves the PMTiles chart
     // provider and the plugin serve routes fully working.
+    // True while the serving state below came from warm adoption rather than the normal launch
+    // path. Cleared the moment the launch path assigns its own address, so the rollback in the
+    // catch below can never clobber state the normal path owns.
+    let warmAdopted = false
+    const dropWarmAdoption = (): void => {
+      if (!warmAdopted) return
+      warmAdopted = false
+      resetTilecacheServingState()
+    }
+    const resolveTilecacheAddress = async (timeoutMs: number, signal?: AbortSignal): Promise<ManagerOperationOutcome<string | null>> =>
+      await waitForManagerOperation(manager.resolveContainerAddress(TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT), timeoutMs, signal)
     try {
       const priorTransition = pendingManagerTransition
       if (priorTransition !== null) {
@@ -394,6 +418,36 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
         }
         if (pendingManagerTransition !== null) {
           throw new Error('a previous tilecache manager operation is still pending; skipping this launch')
+        }
+      }
+      // A Signal K restart usually leaves the previous session's tilecache running, healthy, and
+      // already configured. Adopt it before the reconcile below, so tile serving does not wait out
+      // ensureRunning plus the configuration push (several seconds of avoidable 503s after every
+      // server restart). Lifecycle stays delegated to the manager: the address comes from
+      // resolveContainerAddress, and the only direct contact is the same health probe the host
+      // monitor uses. Adoption is best effort, so every non-healthy outcome falls through to the
+      // normal launch path unchanged, and a failed reconcile rolls the adoption back.
+      const warmOutcome = await resolveTilecacheAddress(Math.min(WARM_ADOPTION_TIMEOUT_MS, managerOperationTimeoutMs), startupController.signal)
+      if (warmOutcome.status === 'aborted') {
+        await chartsReady
+        return
+      }
+      const warmAddress = warmOutcome.status === 'completed' ? warmOutcome.value : null
+      if (warmAddress) {
+        const warmStatus = await probeTilecacheHealthStatus(warmAddress, undefined, startupController.signal)
+        if (startupController.signal.aborted) {
+          await chartsReady
+          return
+        }
+        if (warmStatus.healthy) {
+          warmAdopted = true
+          tilecacheAddress = warmAddress
+          tilecacheHealthy = true
+          // Only the container's own configured report opens the public tile routes early; an
+          // unconfigured container still waits for the push, and only gains its admin address.
+          tilecacheConfigured = warmStatus.configured === true
+          app.debug(`event=tilecache_warm_adopt configured=${String(tilecacheConfigured)}`)
+          if (tilecacheConfigured) updatePluginStatus()
         }
       }
       const capBytes = (config.tileCache?.cacheCapGiB ?? DEFAULT_CACHE_CAP_GIB) * 1024 ** 3
@@ -410,9 +464,7 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
       })
       let requiredVolumeUnavailable = false
       const stopForUnavailableVolume = async (): Promise<void> => {
-        tilecacheAddress = null
-        tilecacheHealthy = false
-        tilecacheConfigured = false
+        resetTilecacheServingState()
         try {
           const stopOperation = manager.stop(TILECACHE_CONTAINER_NAME)
           const stopOutcome = await waitForManagerOperation(stopOperation, managerOperationTimeoutMs)
@@ -465,8 +517,7 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
           app.debug('Update-service registration failed:', err)
         }
       }
-      const addressOperation = manager.resolveContainerAddress(TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT)
-      const addressOutcome = await waitForManagerOperation(addressOperation, managerOperationTimeoutMs, startupController.signal)
+      const addressOutcome = await resolveTilecacheAddress(managerOperationTimeoutMs, startupController.signal)
       if (addressOutcome.status === 'aborted') {
         await chartsReady
         return
@@ -475,6 +526,8 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
       if (addressOutcome.status === 'rejected') throw addressOutcome.error
       const tcAddress = addressOutcome.value
       if (tcAddress) {
+        // From here the normal launch path owns the serving state.
+        warmAdopted = false
         tilecacheAddress = tcAddress
         tilecacheHealthy = await probeTilecacheHealth(tcAddress, undefined, startupController.signal)
         if (startupController.signal.aborted) {
@@ -594,8 +647,7 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
                 throw recreateOutcome.error
               }
 
-              const addressOperation = manager.resolveContainerAddress(TILECACHE_CONTAINER_NAME, TILECACHE_INTERNAL_PORT)
-              const addressOutcome = await waitForManagerOperation(addressOperation, managerOperationTimeoutMs)
+              const addressOutcome = await resolveTilecacheAddress(managerOperationTimeoutMs)
               if (addressOutcome.status === 'timeout') throw new Error('container address resolution exceeded the manager operation timeout')
               if (addressOutcome.status === 'rejected') throw addressOutcome.error
               return addressOutcome.status === 'completed' ? addressOutcome.value : null
@@ -622,8 +674,15 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
           })
           hostHealthMonitor.start()
         }
+      } else {
+        // The reconcile completed but no address resolved: any warm-adopted address is stale (a
+        // recreate can drop the published port), so it must not keep serving unmonitored.
+        dropWarmAdoption()
       }
     } catch (err) {
+      // A failed reconcile ends in the same disabled state warm adoption started from: keeping an
+      // adopted address here would serve tiles with no host-side monitor watching it.
+      dropWarmAdoption()
       app.debug('Tilecache container did not start; tile caching is disabled:', err)
     }
 
@@ -707,10 +766,7 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
     }
 
     // Clear the tilecache address first so the proxy routes report unavailable, then stop its container.
-    tilecacheAddress = null
-    tilecacheHealthy = false
-    tilecacheConfigured = false
-    tilecacheHealthDetail = null
+    resetTilecacheServingState()
     if (tilecacheLaunched) {
       let manager = tilecacheManager
       if (manager === null) {

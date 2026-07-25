@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createPlugin } from '../src/plugin/plugin.js'
 import { PLUGIN_ID, PLUGIN_NAME } from '../src/shared/plugin-id.js'
 import { TILECACHE_CONTAINER_NAME, DEFAULT_TILECACHE_IMAGE, DEFAULT_TILECACHE_TAG } from '../src/runtime/tilecache-container.js'
-import { fakeApp, fakeManager, managerRecord, updatesRecord, setContainerManager, clearGlobals } from './helpers.js'
+import { fakeApp, fakeManager, managerRecord, readinessRouter, updatesRecord, setContainerManager, clearGlobals, type ManagerRecord } from './helpers.js'
 
 async function waitUntil (predicate: () => boolean, timeoutMs = 1000): Promise<void> {
   const deadline = Date.now() + timeoutMs
@@ -12,6 +12,29 @@ async function waitUntil (predicate: () => boolean, timeoutMs = 1000): Promise<v
     if (Date.now() >= deadline) throw new Error(`condition was not met within ${timeoutMs} ms`)
     await new Promise((resolve) => setTimeout(resolve, 5))
   }
+}
+
+/** The uniform three-endpoint tilecache fetch stub the warm-adoption tests share. */
+function tilecacheFetch (configured: boolean): (input: string | URL | Request) => Promise<Response> {
+  return async (input) => {
+    const url = String(input)
+    if (url.endsWith('/health')) return Response.json({ status: 'ok', configured })
+    if (url.endsWith('/config')) return new Response(null, { status: 204 })
+    if (url.endsWith('/cache/regions')) return Response.json({ regions: {} })
+    throw new Error(`unexpected fetch ${url}`)
+  }
+}
+
+/** Gates the fake manager's ensureRunning behind the returned release; 'fail' throws on release. */
+function gateEnsureRunning (manager: ReturnType<typeof fakeManager>, record: ManagerRecord, behavior: 'complete' | 'fail'): () => void {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  manager.ensureRunning = async (name, config) => {
+    await gate
+    if (behavior === 'fail') throw new Error('image pull failed')
+    record.ensured.push({ name, config })
+  }
+  return release
 }
 
 test.afterEach(() => {
@@ -400,7 +423,9 @@ test('startup re-probes health after a successful configuration push', async (t)
   const plugin = createPlugin(app as never)
   await plugin.start({}, () => {})
   try {
-    assert.equal(healthCalls, 2)
+    // Three probes: the warm-adoption probe (failing, so nothing is adopted), the startup probe,
+    // and the post-push re-probe this test exists to pin.
+    assert.equal(healthCalls, 3)
     assert.ok(configToken)
     assert.ok(app.status.some((status) => status.includes('; ready.')))
   } finally {
@@ -540,33 +565,21 @@ test('an out-of-band configuration loss keeps public tile routes unavailable whe
     throw new Error(`unexpected fetch ${url}`)
   })
   const app = fakeApp()
-  let readinessHandler: ((req: unknown, res: { status: (code: number) => unknown, setHeader: (name: string, value: string) => void, end: () => void }) => void) | undefined
   const plugin = createPlugin(app as never, {
     hostHealthMonitorIntervalMs: 5,
     hostHealthFailureThreshold: 1,
     hostHealthRecoveryCooldownMs: 60_000
   })
-  plugin.registerWithRouter?.({
-    get (path: string, handler: typeof readinessHandler) {
-      if (path === '/tiles/ready') readinessHandler = handler
-    },
-    post () {},
-    delete () {}
-  } as never)
+  const { router, ready } = readinessRouter()
+  plugin.registerWithRouter?.(router as never)
 
   await plugin.start({}, () => {})
   try {
     await waitUntil(() => configPushes >= 2)
     await waitUntil(() => app.status.some((message) => message.includes('automatic host-side recovery failed')))
-    let status = 0
-    readinessHandler?.({ url: '/tiles/ready', headers: {}, on () {} }, {
-      status (code) { status = code; return this },
-      setHeader () {},
-      end () {}
-    })
 
     assert.equal(configPushes, 2)
-    assert.equal(status, 503)
+    assert.equal(ready(), 503)
     assert.ok(app.status.some((message) => message.includes('automatic host-side recovery failed')))
   } finally {
     await plugin.stop()
@@ -669,7 +682,6 @@ test('admin recovery routes retain the container address when configuration fail
   setContainerManager(fakeManager({ address: '127.0.0.1:8080' }))
   const app = fakeApp()
   let adminAddress: (() => string | null) | undefined
-  let readinessHandler: ((req: unknown, res: { status: (code: number) => unknown, setHeader: (name: string, value: string) => void, end: () => void }) => void) | undefined
   t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
     const url = String(input)
     if (url.endsWith('/health')) return Response.json({ status: 'ok' })
@@ -683,24 +695,91 @@ test('admin recovery routes retain the container address when configuration fail
       return { start () {}, async stop () {} }
     }) as never
   })
-  plugin.registerWithRouter?.({
-    get (path: string, handler: typeof readinessHandler) {
-      if (path === '/tiles/ready') readinessHandler = handler
-    },
-    post () {},
-    delete () {}
-  } as never)
+  const { router, ready } = readinessRouter()
+  plugin.registerWithRouter?.(router as never)
   await plugin.start({}, () => {})
   try {
     assert.equal(adminAddress?.(), '127.0.0.1:8080')
-    let status = 0
-    readinessHandler?.({ url: '/tiles/ready', headers: {}, on () {} }, {
-      status (code) { status = code; return this },
-      setHeader () {},
-      end () {}
-    })
-    assert.equal(status, 503)
+    assert.equal(ready(), 503)
   } finally {
+    await plugin.stop()
+  }
+})
+
+test('a running configured tilecache serves tiles while the container reconcile is still pending', async (t) => {
+  const record = managerRecord()
+  const manager = fakeManager({ record, address: '127.0.0.1:8080' })
+  const releaseEnsure = gateEnsureRunning(manager, record, 'complete')
+  setContainerManager(manager)
+  t.mock.method(globalThis, 'fetch', tilecacheFetch(true))
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  const { router, ready } = readinessRouter()
+  plugin.registerWithRouter?.(router as never)
+  const starting = plugin.start({}, () => {})
+  try {
+    await waitUntil(() => ready() === 200)
+    // The reconcile has not completed, so tiles are being served by the adopted previous-session
+    // container, not by a fresh launch.
+    assert.equal(record.ensured.length, 0)
+  } finally {
+    releaseEnsure()
+    await starting
+    await plugin.stop()
+  }
+})
+
+test('a running but unconfigured tilecache is adopted for admin routes only, not tile serving', async (t) => {
+  const record = managerRecord()
+  const manager = fakeManager({ record, address: '127.0.0.1:8080' })
+  const releaseEnsure = gateEnsureRunning(manager, record, 'complete')
+  setContainerManager(manager)
+  t.mock.method(globalThis, 'fetch', tilecacheFetch(false))
+  const app = fakeApp()
+  let adminAddress: (() => string | null) | undefined
+  const plugin = createPlugin(app as never, {
+    registerRegionsRoutes: ((_router: unknown, _app: unknown, getAddress: () => string | null) => {
+      adminAddress = getAddress
+      return { start () {}, async stop () {} }
+    }) as never
+  })
+  const { router, ready } = readinessRouter()
+  plugin.registerWithRouter?.(router as never)
+  const starting = plugin.start({}, () => {})
+  try {
+    await waitUntil(() => adminAddress?.() === '127.0.0.1:8080')
+    // An unconfigured container must not serve public tiles until the configuration push lands.
+    assert.equal(ready(), 503)
+    assert.equal(record.ensured.length, 0)
+    releaseEnsure()
+    await starting
+    await waitUntil(() => ready() === 200)
+  } finally {
+    releaseEnsure()
+    await plugin.stop()
+  }
+})
+
+test('warm adoption is rolled back when the container reconcile fails', async (t) => {
+  const record = managerRecord()
+  const manager = fakeManager({ record, address: '127.0.0.1:8080' })
+  const failEnsure = gateEnsureRunning(manager, record, 'fail')
+  setContainerManager(manager)
+  t.mock.method(globalThis, 'fetch', tilecacheFetch(true))
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  const { router, ready } = readinessRouter()
+  plugin.registerWithRouter?.(router as never)
+  const starting = plugin.start({}, () => {})
+  try {
+    await waitUntil(() => ready() === 200)
+    failEnsure()
+    await starting
+    // A failed reconcile ends in the same disabled state as before warm adoption existed.
+    assert.equal(ready(), 503)
+    assert.ok(app.status.some((status) => status.startsWith('Tilecache container unavailable')))
+  } finally {
+    failEnsure()
     await plugin.stop()
   }
 })
