@@ -2,12 +2,12 @@
 
 The published configuration-panel bundle contains code from the following packages:
 
-- `react` 19.2.7, MIT License, Copyright (c) Meta Platforms, Inc. and affiliates. The production JSX
+- `react` 19.2.8, MIT License, Copyright (c) Meta Platforms, Inc. and affiliates. The production JSX
   runtime is bundled, while the core React singleton is provided by the Signal K Admin host.
 - `css-loader` 7.1.4, MIT License, Copyright JS Foundation and other contributors
 - `style-loader` 4.0.0, MIT License, Copyright JS Foundation and other contributors
-- `webpack` 5.108.4, MIT License, Copyright JS Foundation and other contributors
-- `signalk-nearlcrews-ui` 0.2.0, Apache License 2.0, Copyright 2026 Nearl Crews
+- `webpack` 5.109.0, MIT License, Copyright JS Foundation and other contributors
+- `signalk-nearlcrews-ui` 0.3.0, Apache License 2.0, Copyright 2026 Nearl Crews
 
 The Apache License 2.0 text applicable to `signalk-nearlcrews-ui` and the Rust tile-cache workspace is
 included in [LICENSE-APACHE](LICENSE-APACHE). The license texts and package attribution for the locked

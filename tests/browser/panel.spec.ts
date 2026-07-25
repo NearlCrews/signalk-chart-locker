@@ -1,5 +1,16 @@
 import AxeBuilder from '@axe-core/playwright'
 import { expect, test, type Locator, type Page } from '@playwright/test'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
+// The bundled UI package version, asserted against the served root so a dependency bump that does
+// not reach the bundle fails here instead of shipping a stale runtime. Read from the file because
+// the package's exports map does not expose its package.json for import.
+const snuiVersion = (
+  JSON.parse(
+    readFileSync(resolve('node_modules/signalk-nearlcrews-ui/package.json'), 'utf8')
+  ) as { version: string }
+).version
 
 async function expectVisibleFocusRing (control: Locator): Promise<void> {
   const outline = await control.evaluate((element) => {
@@ -35,8 +46,8 @@ test.beforeEach(async ({ page }) => {
 
 test('loads the production remote and completes save and discard flows', async ({ page }) => {
   const root = page.locator('[data-snui-root]')
-  await expect(root).toHaveAttribute('data-snui-version', '0.2.0')
-  await expect(page.locator('style[data-snui-styles="0.2.0"]')).toHaveCount(1)
+  await expect(root).toHaveAttribute('data-snui-version', snuiVersion)
+  await expect(page.locator(`style[data-snui-styles="${snuiVersion}"]`)).toHaveCount(1)
   await expect(page.getByRole('slider', { name: 'Cache size cap (GiB)' })).toHaveAttribute('id', 'cl-cache-cap')
   await expect(page.getByRole('spinbutton', { name: 'Cache size cap (GiB) exact value' })).toHaveAttribute('id', 'cl-cache-cap-number')
 
@@ -236,13 +247,19 @@ test('supports keyboard operation and visible focus in every explicit theme', as
   const dark = page.getByRole('radio', { name: 'Dark' })
   const night = page.getByRole('radio', { name: 'Night' })
 
+  // Since signalk-nearlcrews-ui 0.3.0, a fresh profile defaults to the explicit Light theme, and
+  // the radio group's roving tabindex follows the checked option, so Tab lands on Light.
   await page.locator('body').click({ position: { x: 1, y: 1 } })
   await page.keyboard.press('Tab')
-  await expect(auto).toBeFocused()
-  await page.keyboard.press('ArrowRight')
   await expect(light).toBeFocused()
   await expect(root).toHaveAttribute('data-snui-theme', 'light')
   await expectVisibleFocusRing(light)
+  await page.keyboard.press('ArrowLeft')
+  await expect(auto).toBeFocused()
+  await expectVisibleFocusRing(auto)
+  await page.keyboard.press('ArrowRight')
+  await expect(light).toBeFocused()
+  await expect(root).toHaveAttribute('data-snui-theme', 'light')
   await page.keyboard.press('ArrowRight')
   await expect(dark).toBeFocused()
   await expect(root).toHaveAttribute('data-snui-theme', 'dark')
