@@ -2,7 +2,7 @@
 
 import { Readable, type Writable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
-import { CONTAINER_FETCH_TIMEOUT_MS } from '../runtime/container-fetch.js'
+import { TILE_STREAM_TIMEOUT_MS } from '../runtime/container-fetch.js'
 import { PLUGIN_MOUNT_PATH } from '../shared/plugin-id.js'
 import { hasControlCharacter } from '../shared/text.js'
 import { readBoundedResponseJson } from '../runtime/bounded-response.js'
@@ -48,9 +48,12 @@ const STYLE_CACHE_HEADERS = ['cache-control', 'last-modified']
 const BODYLESS = new Set([204, 304, 416])
 const NO_SNIFF_HEADER = 'X-Content-Type-Options'
 
-/** A fetch signal that aborts on either the browser cancel (controller) or the container fetch timeout. */
+/** A fetch signal that aborts on either the browser cancel (controller) or the tile stream timeout.
+ *  Tile and style streams use the long browser-facing bound, not the fast control-plane one: a cold
+ *  viewport legitimately queues tiles behind the container's admission for longer than a control
+ *  call may ever take. */
 function proxySignal (controller: AbortController): AbortSignal {
-  return AbortSignal.any([controller.signal, AbortSignal.timeout(CONTAINER_FETCH_TIMEOUT_MS)])
+  return AbortSignal.any([controller.signal, AbortSignal.timeout(TILE_STREAM_TIMEOUT_MS)])
 }
 
 /** Relay the named upstream headers to the browser response, skipping any the upstream omitted. */

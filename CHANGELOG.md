@@ -12,6 +12,11 @@ All notable changes to this project are documented here. The format follows
   admission was sized to the HTTP/1.1 same-origin connection limit and shed the excess with 503,
   which the chart renderer never retries, leaving permanent holes; over-burst requests now wait a
   bounded time for a free slot instead, without growing the container's retained-body budget.
+- Browser-facing tile and style streams use a one minute proxy bound instead of the eight second
+  control-plane bound. A cold viewport legitimately queues dozens of tiles behind the container's
+  admission while slow WMS upstreams drain at the egress rate, and the fast bound aborted queued
+  tiles that were about to serve. Health, configuration, statistics, and warming keep the fast
+  bound, and the browser canceling a tile on pan or zoom still cancels the proxied fetch.
 
 <a id="v070"></a>
 

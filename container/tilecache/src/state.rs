@@ -105,7 +105,9 @@ pub struct Knobs {
     /// a whole pan or zoom burst at once, and instant shedding turned the excess into permanently
     /// missing map tiles. Parked waiters hold no request or response bodies, so queueing does not
     /// grow the retained-body budget; the wait plus the transport's own stream limits bound the
-    /// parked set. Zero restores instant shedding (tests exercising the shed path set it).
+    /// parked set. The wait must stay inside the plugin's browser-facing tile stream timeout so a
+    /// queued tile is served rather than aborted upstream of the queue. Zero restores instant
+    /// shedding (tests exercising the shed path set it).
     pub admission_wait_ms: u64,
 }
 
@@ -120,7 +122,7 @@ impl Default for Knobs {
             allow_private_egress: false,
             scroll_ttl_secs: 0,
             upstream_base_timeout_ms: 20_000,
-            admission_wait_ms: 10_000,
+            admission_wait_ms: 30_000,
         }
     }
 }
