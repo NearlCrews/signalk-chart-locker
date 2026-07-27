@@ -59,6 +59,9 @@ Important cache-stat fields include:
   "availableBytes": 44560285696,
   "minimumHeadroomBytes": 268435456,
   "diskPressure": false,
+  "perSourceAvgBytes": {
+    "seamark": 28412.75
+  },
   "configured": true,
   "ttlDays": 30,
   "bySource": [],
@@ -102,8 +105,10 @@ Validation rules:
   longer than 256 characters.
 - Zooms are integers from 0 through 24, and `minzoom` cannot exceed `maxzoom`.
 - The trimmed name contains 1 through 120 characters.
-- The server planning estimate must fit `regionsFreeBytes` before the region is persisted. The
-  container also enforces actual tile-count and transferred-byte limits while downloading.
+- The server planning estimate must fit `regionsFreeBytes` before the region is persisted.
+  `perSourceAvgBytes` contains measured means and may contain fractional byte values. The plugin
+  rounds each mean up before estimation so the admission check remains conservative. The container
+  also enforces actual tile-count and transferred-byte limits while downloading.
 
 A successful create response contains `{ "region": ..., "jobId": "..." }`, with
 `region.cachedBytes` initialized to `0`. Because warm starts are non-idempotent, an accepted create

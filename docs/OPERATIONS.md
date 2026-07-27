@@ -54,6 +54,11 @@ The configured cap controls tile bytes tracked by SQLite. Saved-region tiles are
 from scroll-cache eviction. The saved-regions budget limits the pinned set, while unpinned scroll
 tiles may use the remaining cache capacity.
 
+Before saving a region, the plugin estimates its size from the container's measured mean tile size
+for each source. SQLite averages may be fractional, so the plugin rounds each mean up to the next
+whole byte before comparing the estimate with `regionsFreeBytes`. This planning check remains
+conservative, and the container still enforces the actual tile-count and byte limits during warming.
+
 The cache keeps at least 256 MiB of filesystem space outside new cache writes for SQLite WAL growth
 and other host activity. When a write would consume that reserve:
 

@@ -48,8 +48,8 @@ export interface RegionsRouter {
 
 /** Stats the budget re-validation reads from the container. */
 interface ContainerStats {
-  regionsFreeBytes?: number
-  perSourceAvgBytes?: Record<string, number>
+  regionsFreeBytes: number
+  perSourceAvgBytes: Record<string, number>
 }
 
 type FetchImpl = (url: string, init?: { method?: string, headers?: Record<string, string>, body?: string, signal?: AbortSignal }) => Promise<Response>
@@ -105,14 +105,22 @@ function isNonnegativeInteger (value: unknown): value is number {
   return isNonnegativeFinite(value) && Number.isSafeInteger(value)
 }
 
+function conservativeAverage (value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > Number.MAX_SAFE_INTEGER) {
+    return undefined
+  }
+  return Math.ceil(value)
+}
+
 function readContainerStats (value: unknown): ContainerStats | undefined {
   if (!isRecord(value) || !isNonnegativeInteger(value.regionsFreeBytes)) return undefined
   const averages = Object.create(null) as Record<string, number>
   if (value.perSourceAvgBytes !== undefined) {
     if (!isRecord(value.perSourceAvgBytes)) return undefined
     for (const [source, bytes] of Object.entries(value.perSourceAvgBytes)) {
-      if (!isNonnegativeInteger(bytes) || bytes === 0) return undefined
-      averages[source] = bytes
+      const average = conservativeAverage(bytes)
+      if (average === undefined) return undefined
+      averages[source] = average
     }
   }
   return { regionsFreeBytes: value.regionsFreeBytes, perSourceAvgBytes: averages }
@@ -562,14 +570,14 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     }
     let estimate: number
     try {
-      estimate = estimateBytes(sourceIds, bbox, [minzoom, maxzoom], stats.perSourceAvgBytes ?? {})
+      estimate = estimateBytes(sourceIds, bbox, [minzoom, maxzoom], stats.perSourceAvgBytes)
     } catch (error) {
       if (error instanceof TypeError || error instanceof RangeError) {
         res.status(400).json({ error: 'invalid region estimate inputs' }); return
       }
       throw error
     }
-    if (estimate > Math.max(0, stats.regionsFreeBytes ?? 0)) {
+    if (estimate > stats.regionsFreeBytes) {
       res.status(400).json({ error: 'exceeds regions budget' }); return
     }
     try {

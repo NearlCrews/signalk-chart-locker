@@ -1742,10 +1742,17 @@ mod tests {
             1,
         )
         .unwrap();
-        c.put(TileKey::new("s", 0, 0, 1), &tile(0, 404, None), false, 2)
+        c.put(
+            TileKey::new("s", 0, 0, 1),
+            &tile(101, 200, Some(vec![0; 101])),
+            false,
+            2,
+        )
+        .unwrap();
+        c.put(TileKey::new("s", 0, 0, 2), &tile(0, 404, None), false, 3)
             .unwrap(); // negative cache, excluded
         let avg = c.per_source_avg().unwrap();
-        assert_eq!(avg, vec![("s".to_string(), 100.0)]);
+        assert_eq!(avg, vec![("s".to_string(), 100.5)]);
     }
 
     #[test]

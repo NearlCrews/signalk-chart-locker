@@ -64,7 +64,7 @@ test('POST /api/regions accepts an antimeridian-crossing bbox', async () => {
   let warmBody: unknown
   const fetchImpl = async (url: string, init?: { body?: string }) => {
     if (url.includes('/cache/stats')) {
-      return new Response(JSON.stringify({ regionsFreeBytes: 2_000_000_000, perSourceAvgBytes: { seamark: 1 } }), { status: 200 })
+      return new Response(JSON.stringify({ regionsFreeBytes: 2_000_000_000, perSourceAvgBytes: { seamark: 1.25 } }), { status: 200 })
     }
     if (url.endsWith('/warm')) {
       warmBody = JSON.parse(init?.body ?? '{}')
@@ -82,6 +82,26 @@ test('POST /api/regions accepts an antimeridian-crossing bbox', async () => {
   assert.equal(responded[0]?.status, 200)
   assert.deepEqual((warmBody as { bbox: number[] }).bbox, bbox)
   assert.equal((responded[0]?.body as { region: { cachedBytes: number } }).region.cachedBytes, 0)
+})
+
+test('POST /api/regions rounds fractional averages up before enforcing the budget', async () => {
+  const fetchImpl = async (url: string) => {
+    if (url.includes('/cache/stats')) {
+      return Response.json({ regionsFreeBytes: 1, perSourceAvgBytes: { seamark: 1.25 } })
+    }
+    throw new Error(`warm must not be called when the rounded estimate exceeds the budget: ${url}`)
+  }
+  const { router, routes } = makeRegionsRouter()
+  const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  const route = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
+  const { responded, res } = fakeRegionsRes()
+  await route.handler({
+    params: {},
+    body: { bbox: [-1, -1, 1, 1], sourceIds: ['seamark'], minzoom: 0, maxzoom: 0, name: 'Area' }
+  }, res)
+  assert.equal(responded[0]?.status, 400)
+  assert.deepEqual(responded[0]?.body, { error: 'exceeds regions budget' })
 })
 
 test('POST /api/regions returns 502 for malformed container statistics', async () => {

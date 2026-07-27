@@ -14,14 +14,13 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.7.2
+## What's new in 0.7.3
 
-Version 0.7.2 upgrades the shared chart-source catalog so NOAA ENC saved-region estimates and cache
-warming use the catalog's actual coverage regions. Areas without an ENC cell now estimate and warm
-zero tiles, repeated source identifiers no longer inflate estimates, and the container mirrors the
-shared package's stricter source validation.
+Version 0.7.3 fixes saved-region admission when the cache reports a fractional mean tile size.
+Measured averages are now rounded up before estimation, so valid cache statistics are accepted
+without understating the saved-region budget.
 
-See the [0.7.2 changelog](CHANGELOG.md#v072) for the full list.
+See the [0.7.3 changelog](CHANGELOG.md#v073) for the full list.
 
 ## What it does
 

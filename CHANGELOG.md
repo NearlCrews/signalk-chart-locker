@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<a id="v073"></a>
+
+## [0.7.3] - 2026-07-27
+
+### Fixed
+
+- Accept fractional per-source tile averages from the cache statistics endpoint and round them up
+  before saved-region budget estimation, instead of rejecting valid container statistics.
+- Override ESLint's transitive `minimatch` dependency to the patched 10.2.5 release, clearing the
+  development dependency audit without changing the published runtime dependency graph.
+
 <a id="v072"></a>
 
 ## [0.7.2] - 2026-07-27
