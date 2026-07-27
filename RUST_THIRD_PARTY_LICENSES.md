@@ -3164,13 +3164,14 @@ limitations under the License.
 - `proc-macro2` 1.0.106
 - `quote` 1.0.46
 - `ryu` 1.0.23
-- `serde` 1.0.228
-- `serde_core` 1.0.228
-- `serde_derive` 1.0.228
-- `serde_json` 1.0.150
+- `serde` 1.0.229
+- `serde_core` 1.0.229
+- `serde_derive` 1.0.229
+- `serde_json` 1.0.151
 - `serde_path_to_error` 0.1.20
 - `serde_urlencoded` 0.7.1
 - `syn` 2.0.118
+- `syn` 3.0.3
 - `sync_wrapper` 1.0.2
 - `unicode-ident` 1.0.24
 
@@ -3896,7 +3897,7 @@ SOFTWARE.
 
 **Used by:**
 - `tokio-util` 0.7.18
-- `tokio` 1.52.4
+- `tokio` 1.53.0
 
         MIT License
 
