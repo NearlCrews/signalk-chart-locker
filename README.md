@@ -14,14 +14,14 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.7.1
+## What's new in 0.7.2
 
-Version 0.7.1 stops pan and zoom bursts from leaving permanent holes on the chart. Requests beyond
-the container's admission capacity now queue for a free slot instead of failing immediately, and
-browser-facing tile and style streams get a proxy bound long enough for a cold viewport to drain
-through slow WMS upstreams, while health and control calls keep their fast bound.
+Version 0.7.2 upgrades the shared chart-source catalog so NOAA ENC saved-region estimates and cache
+warming use the catalog's actual coverage regions. Areas without an ENC cell now estimate and warm
+zero tiles, repeated source identifiers no longer inflate estimates, and the container mirrors the
+shared package's stricter source validation.
 
-See the [0.7.1 changelog](CHANGELOG.md#v071) for the full list.
+See the [0.7.2 changelog](CHANGELOG.md#v072) for the full list.
 
 ## What it does
 

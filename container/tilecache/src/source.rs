@@ -3,6 +3,7 @@
 //! container holds only this; it never reads Signal K.
 
 use serde::Deserialize;
+use std::net::IpAddr;
 
 const MAX_TITLE_BYTES: usize = 256;
 const MAX_ATTRIBUTION_BYTES: usize = 16 * 1024;
@@ -143,6 +144,7 @@ fn valid_source_id(value: &str) -> bool {
 fn valid_upstream_url(value: &str, allow_http: bool) -> Option<reqwest::Url> {
     if value.is_empty()
         || value.len() > MAX_URL_BYTES
+        || value.contains('#')
         || value
             .chars()
             .any(|ch| ch.is_control() || ch.is_whitespace())
@@ -150,7 +152,16 @@ fn valid_upstream_url(value: &str, allow_http: bool) -> Option<reqwest::Url> {
         return None;
     }
     reqwest::Url::parse(value).ok().filter(|url| {
-        (url.scheme() == "https" || (allow_http && url.scheme() == "http"))
+        let local_http = url.scheme() == "http"
+            && allow_http
+            && url.host_str().is_some_and(|host| {
+                host.eq_ignore_ascii_case("localhost")
+                    || host
+                        .trim_matches(['[', ']'])
+                        .parse::<IpAddr>()
+                        .is_ok_and(|address| address.is_loopback())
+            });
+        (url.scheme() == "https" || local_http)
             && url.host().is_some()
             && url.username().is_empty()
             && url.password().is_none()
@@ -159,13 +170,19 @@ fn valid_upstream_url(value: &str, allow_http: bool) -> Option<reqwest::Url> {
 }
 
 fn clean_base_url(value: &str, allow_http: bool) -> bool {
-    valid_upstream_url(value, allow_http).is_some_and(|url| url.query().is_none())
+    !value.contains('?')
+        && valid_upstream_url(value, allow_http).is_some_and(|url| url.query().is_none())
 }
 
 fn valid_template(value: &str, allow_http: bool) -> bool {
-    if !["{z}", "{x}", "{y}"]
-        .iter()
-        .all(|token| value.contains(token))
+    let host_has_token = value
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split(['/', '?', '#']).next())
+        .is_some_and(|host| host.contains(['{', '}']));
+    if host_has_token
+        || !["{z}", "{x}", "{y}"]
+            .iter()
+            .all(|token| value.matches(token).count() == 1)
     {
         return false;
     }
@@ -181,7 +198,7 @@ fn valid_query_value(value: &str, max_bytes: usize, allow_empty: bool) -> bool {
         && !value
             .chars()
             .any(|character| character.is_whitespace() || character.is_control())
-        && !value.contains(['&', '?', '#'])
+        && !value.contains(['&', '?', '#', '+'])
 }
 
 fn valid_host(value: &str) -> bool {
@@ -195,7 +212,7 @@ fn valid_host(value: &str) -> bool {
 
 fn valid_bounded_text(value: &str, max_bytes: usize, allow_empty: bool) -> bool {
     value.len() <= max_bytes
-        && (allow_empty || !value.trim().is_empty())
+        && ((allow_empty && value.is_empty()) || !value.trim().is_empty())
         && !value
             .chars()
             .any(|ch| ch.is_control() && !matches!(ch, '\t' | '\n' | '\r'))
@@ -278,18 +295,29 @@ mod tests {
     fn source_validation_rejects_unsafe_identity_urls_and_style_hosts() {
         let mut source: ChartSource = serde_json::from_str(
             r#"{"id":"s","title":"S","tileSize":256,"minzoom":0,"maxzoom":18,"attribution":"",
-                "upstream":{"mode":"xyz","urlTemplate":"http://example.test/{z}/{x}/{y}"}}"#,
+                "upstream":{"mode":"xyz","urlTemplate":"http://127.0.0.1/{z}/{x}/{y}"}}"#,
         )
         .unwrap();
         assert!(!source.is_valid(false), "production requires HTTPS");
-        assert!(source.is_valid(true), "development permits HTTP stubs");
-        let UpstreamTemplate::Xyz { url_template } = &mut source.upstream else {
-            unreachable!()
+        assert!(
+            source.is_valid(true),
+            "controlled tests permit local HTTP stubs"
+        );
+        let set_template = |source: &mut ChartSource, value: &str| {
+            let UpstreamTemplate::Xyz { url_template } = &mut source.upstream else {
+                unreachable!()
+            };
+            *url_template = value.into();
         };
-        *url_template = "http://example.test/{z}/{x}/{y}/{date}".into();
+        set_template(&mut source, "http://127.0.0.1/{z}/{x}/{y}/{date}");
         assert!(
             !source.is_valid(true),
             "unknown template tokens are rejected"
+        );
+        set_template(&mut source, "http://example.test/{z}/{x}/{y}");
+        assert!(
+            !source.is_valid(true),
+            "the test escape hatch permits only loopback HTTP"
         );
         source.id = "../escape".into();
         assert!(!source.is_valid(true));
@@ -336,6 +364,62 @@ mod tests {
         let mut zero_span = xyz_source();
         zero_span.bounds = Some([180.0, -1.0, -180.0, 1.0]);
         assert!(!zero_span.is_valid(false));
+    }
+
+    #[test]
+    fn source_validation_matches_chart_sources_0_5_url_and_text_rules() {
+        let source = |upstream: &str| -> ChartSource {
+            serde_json::from_str(&format!(
+                r#"{{"id":"s","title":"S","tileSize":256,"minzoom":0,"maxzoom":18,"attribution":"","upstream":{upstream}}}"#
+            ))
+            .unwrap()
+        };
+
+        for upstream in [
+            r#"{"mode":"xyz","urlTemplate":"https://h/{z}/{x}/{y}#"}"#,
+            r#"{"mode":"style","styleUrl":"https://h/style.json#","allowedHosts":["h"]}"#,
+            r#"{"mode":"wms","base":"https://h/wms?","layers":"layer","styles":"","version":"1.3.0","format":"image/png","transparent":true}"#,
+            r#"{"mode":"arcgis","base":"https://h/MapServer?"}"#,
+            r#"{"mode":"xyz","urlTemplate":"https://{x}.h/{z}/{x}/{y}.png"}"#,
+        ] {
+            assert!(!source(upstream).is_valid(false), "{upstream}");
+        }
+
+        for token in ["{z}", "{x}", "{y}"] {
+            let template = format!("https://h/{{z}}/{{x}}/{{y}}/{token}.png");
+            let upstream = serde_json::json!({ "mode": "xyz", "urlTemplate": template });
+            assert!(
+                !source(&upstream.to_string()).is_valid(false),
+                "duplicate {token}"
+            );
+        }
+
+        let wms = |field: &str, value: &str| {
+            let mut upstream = serde_json::json!({
+                "mode": "wms",
+                "base": "https://h/wms",
+                "layers": "layer",
+                "styles": "",
+                "version": "1.3.0",
+                "format": "image/png",
+                "transparent": true
+            });
+            upstream[field] = value.into();
+            source(&upstream.to_string())
+        };
+        for (field, value) in [
+            ("layers", "a+b"),
+            ("styles", "a+b"),
+            ("format", "image+png"),
+        ] {
+            assert!(!wms(field, value).is_valid(false), "WMS {field}");
+        }
+
+        let mut whitespace = xyz_source();
+        whitespace.attribution = " \t\r\n ".into();
+        assert!(!whitespace.is_valid(false));
+        whitespace.attribution.clear();
+        assert!(whitespace.is_valid(false));
     }
 
     #[test]

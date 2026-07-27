@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<a id="v072"></a>
+
+## [0.7.2] - 2026-07-27
+
+### Changed
+
+- Upgrade `signalk-chart-sources` to 0.5.0 so NOAA ENC estimates and cache warming use the
+  catalog-derived coverage regions instead of the service-wide display envelope.
+- Align container source validation with the stricter shared contract for URL markers, template
+  hosts and tokens, WMS query values, optional text, and controlled local HTTP fixtures.
+
+### Fixed
+
+- Count duplicate source identifiers once when estimating saved-region downloads.
+
 <a id="v071"></a>
 
 ## [0.7.1] - 2026-07-25
