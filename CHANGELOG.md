@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+<a id="v074"></a>
+
+## [0.7.4] - 2026-07-28
+
+### Changed
+
+- Upgrade the configuration panel to `signalk-nearlcrews-ui` 0.4.1 and refresh the compatible npm
+  toolchain, including React 19.2.8, webpack 5.109.1, and the TypeScript 7.0.2 native compiler.
+  Type-aware JavaScript tooling retains the TypeScript 6 compiler API package until its ecosystem
+  supports the native compiler API.
+- Account for the shared UI upgrade and stricter response validation in the panel size budget. The
+  production remote is 26,631 gzip bytes, and its reviewed growth gate is now 27 KiB.
+- Align local, CI, release, and container builds on Rust 1.97.1; refresh the compatible Cargo lock;
+  and update the pinned Rust builder, distroless runtime, checkout action, container registry login
+  action, and Signal K plugin workflow revisions.
+- Consolidate repeated record checks and configuration-path validation so the configuration panel
+  and plugin enforce the same limits.
+
+### Fixed
+
+- Wait for a cache statistics poll that started before a mutation, then require a fresh read so a
+  stale response cannot replace the newly saved scroll-retention or clear-cache state.
+- Reject malformed cache statistics and chart-discovery responses without crashing the
+  configuration panel.
+- Preserve a caller-provided abort signal when applying panel request timeouts.
+- Reject malformed plugin configuration roots and non-string container image tags with actionable
+  errors instead of failing during startup.
+- Limit configuration text fields to their server-side bounds and reject control characters before
+  save.
+
 <a id="v073"></a>
 
 ## [0.7.3] - 2026-07-27

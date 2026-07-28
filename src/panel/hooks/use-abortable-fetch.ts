@@ -39,6 +39,7 @@ export function useAbortableFetch (): AbortableFetch {
         // A fresh timeout per call: a single hook-lifetime timeout would abort every later poll.
         const signals = [AbortSignal.timeout(PANEL_REQUEST_TIMEOUT_MS)]
         if (unmountRef.current !== null) signals.push(unmountRef.current.signal)
+        if (init.signal !== undefined && init.signal !== null) signals.push(init.signal)
         const response = await fetch(url, { ...init, credentials: 'same-origin', signal: AbortSignal.any(signals) })
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         return response

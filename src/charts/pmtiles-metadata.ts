@@ -8,6 +8,7 @@ import { gunzipSync } from 'node:zlib'
 import { Compression, type Header, PMTiles, TileType } from 'pmtiles'
 import { PmtilesFileSource } from './pmtiles-file-source.js'
 import { hasControlCharacter } from '../shared/text.js'
+import { isRecord } from '../shared/record.js'
 
 type PmtilesFormat = 'mvt' | 'png' | 'jpg' | 'webp' | 'avif'
 
@@ -65,10 +66,6 @@ function boundsFromHeader (header: Header): LngLatBbox | undefined {
       minLat < -90 || minLat > 90 || maxLat < -90 || maxLat > 90) return undefined
   if (minLon === maxLon || minLat >= maxLat) return undefined
   return [minLon, minLat, maxLon, maxLat]
-}
-
-function isRecord (value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
 }
 
 function vectorLayerIds (metadata: unknown): string[] {

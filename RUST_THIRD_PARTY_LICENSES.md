@@ -852,11 +852,11 @@ OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 
 **Used by:**
-- `futures-channel` 0.3.32
-- `futures-core` 0.3.32
-- `futures-sink` 0.3.32
-- `futures-task` 0.3.32
-- `futures-util` 0.3.32
+- `futures-channel` 0.3.33
+- `futures-core` 0.3.33
+- `futures-sink` 0.3.33
+- `futures-task` 0.3.33
+- `futures-util` 0.3.33
 
                                       Apache License
                         Version 2.0, January 2004
@@ -1886,7 +1886,7 @@ limitations under the License.
 
 
 **Used by:**
-- `rustls-pki-types` 1.15.0
+- `rustls-pki-types` 1.15.1
 
                                       Apache License
                         Version 2.0, January 2004
@@ -2095,7 +2095,7 @@ limitations under the License.
 - `async-compression` 0.4.42
 - `atomic-waker` 1.1.2
 - `base64` 0.22.1
-- `bitflags` 2.13.0
+- `bitflags` 2.13.1
 - `cfg-if` 1.0.4
 - `compression-codecs` 0.4.38
 - `compression-core` 0.4.32
@@ -2115,10 +2115,10 @@ limitations under the License.
 - `openssl-probe` 0.2.1
 - `percent-encoding` 2.3.2
 - `rustls-native-certs` 0.8.4
-- `rustls` 0.23.41
+- `rustls` 0.23.42
 - `signal-hook-registry` 1.4.8
 - `smallvec` 1.15.2
-- `socket2` 0.6.4
+- `socket2` 0.6.5
 - `stable_deref_trait` 1.2.1
 - `url` 2.5.8
 - `uuid` 1.24.0
@@ -3156,13 +3156,13 @@ limitations under the License.
 
 
 **Used by:**
-- `aws-lc-sys` 0.42.0
+- `aws-lc-sys` 0.43.0
 - `itoa` 1.0.18
-- `libc` 0.2.186
+- `libc` 0.2.189
 - `miniz_oxide` 0.8.9
 - `pin-project-lite` 0.2.17
-- `proc-macro2` 1.0.106
-- `quote` 1.0.46
+- `proc-macro2` 1.0.107
+- `quote` 1.0.47
 - `ryu` 1.0.23
 - `serde` 1.0.229
 - `serde_core` 1.0.229
@@ -3170,7 +3170,7 @@ limitations under the License.
 - `serde_json` 1.0.151
 - `serde_path_to_error` 0.1.20
 - `serde_urlencoded` 0.7.1
-- `syn` 2.0.118
+- `syn` 2.0.119
 - `syn` 3.0.3
 - `sync_wrapper` 1.0.2
 - `unicode-ident` 1.0.24
@@ -3340,7 +3340,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 **Used by:**
 - `alloc-stdlib` 0.2.4
-- `aws-lc-sys` 0.42.0
+- `aws-lc-sys` 0.43.0
 
         Copyright (c) <year> <owner>.
 
@@ -3399,8 +3399,8 @@ third-party/chromium/LICENSE.
 
 
 **Used by:**
-- `aws-lc-rs` 1.17.1
-- `aws-lc-sys` 0.42.0
+- `aws-lc-rs` 1.17.3
+- `aws-lc-sys` 0.43.0
 
         ISC License:
 
@@ -3438,7 +3438,7 @@ THE SOFTWARE.
 
 
 **Used by:**
-- `mio` 1.2.1
+- `mio` 1.2.2
 
         Copyright (c) 2014 Carl Lerche and other MIO contributors
 
@@ -3487,7 +3487,7 @@ THE SOFTWARE.
 
 
 **Used by:**
-- `hyper` 1.10.1
+- `hyper` 1.11.0
 
         Copyright (c) 2014-2026 Sean McArthur
 
@@ -3812,7 +3812,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 
 **Used by:**
-- `tokio-macros` 2.7.0
+- `tokio-macros` 2.7.1
 
         MIT License
 
@@ -3896,8 +3896,8 @@ SOFTWARE.
 
 
 **Used by:**
-- `tokio-util` 0.7.18
-- `tokio` 1.53.0
+- `tokio-util` 0.7.19
+- `tokio` 1.53.1
 
         MIT License
 
@@ -3923,7 +3923,7 @@ SOFTWARE.
 
 
 **Used by:**
-- `simd-adler32` 0.3.9
+- `simd-adler32` 0.3.10
 
         MIT License
 
@@ -3949,7 +3949,7 @@ SOFTWARE.
 
 
 **Used by:**
-- `zmij` 1.0.21
+- `zmij` 1.0.23
 
         Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -3977,7 +3977,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 **Used by:**
-- `memchr` 2.8.2
+- `memchr` 2.8.3
 
         The MIT License (MIT)
 
@@ -4003,7 +4003,7 @@ THE SOFTWARE.
 
 
 **Used by:**
-- `aws-lc-sys` 0.42.0
+- `aws-lc-sys` 0.43.0
 
         The MIT License (MIT)
 

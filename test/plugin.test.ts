@@ -78,6 +78,19 @@ test('start rejects malformed configuration that bypasses the panel validation',
   assert.ok(app.errors.some((message) => message.includes('cacheCapGiB')))
 })
 
+test('start rejects a malformed configuration root and image tag with field-specific errors', async () => {
+  for (const { config, error } of [
+    { config: null, error: 'configuration must be an object' },
+    { config: { advanced: { imageTag: 7 } }, error: 'imageTag must be a string' }
+  ]) {
+    const app = fakeApp()
+    const plugin = createPlugin(app as never)
+    await plugin.start(config as never, () => {})
+    assert.ok(app.errors.some((message) => message.includes(error)), error)
+    await plugin.stop()
+  }
+})
+
 test('start rejects oversized and control-bearing filesystem paths before manager access', async () => {
   const cases: Array<{ config: unknown, field: string }> = [
     { config: { charts: { path: 'charts/\u0000bad' } }, field: 'charts.path' },

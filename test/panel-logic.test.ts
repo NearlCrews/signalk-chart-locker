@@ -4,6 +4,10 @@ import { configReducer } from '../src/panel/config-reducer.js'
 import { saveButtonDisabled } from '../src/panel/footer-bar-state.js'
 import { relativeTime } from '../src/panel/relative-time.js'
 import type { ChartLockerConfig } from '../src/panel/config-types.js'
+import { validatePanelConfig } from '../src/panel/validate-config.js'
+import { parseCacheStats } from '../src/panel/hooks/use-cache-operations.js'
+import { parseChartDiscovery } from '../src/panel/hooks/use-chart-discovery.js'
+import { MAX_CONFIG_PATH_LENGTH } from '../src/shared/config-path.js'
 
 function baseConfig (): ChartLockerConfig {
   return {
@@ -54,4 +58,66 @@ test('relativeTime steps up to the coarser unit at the rounding boundary', () =>
   assert.match(relativeTime(Date.now() - 3599 * 1000), /hour/)
   // A few seconds stays in seconds.
   assert.match(relativeTime(Date.now() - 5 * 1000), /second/)
+})
+
+test('panel validation matches the runtime path text bounds', () => {
+  const state = baseConfig()
+  state.charts.path = `charts/${'x'.repeat(MAX_CONFIG_PATH_LENGTH)}`
+  state.advanced.cacheVolumeSource = '/media/\u2028bad'
+  const validation = validatePanelConfig(state)
+  assert.match(validation.chartsPath ?? '', /at most 4096 characters/)
+  assert.match(validation.cacheVolumeSource ?? '', /control characters/)
+})
+
+test('parseCacheStats rejects malformed nested container data', () => {
+  const valid = {
+    rows: 1,
+    bytes: 2,
+    cap: 3,
+    pinnedBytes: 1,
+    scrollBytes: 1,
+    regionsBudgetBytes: 2,
+    regionsFreeBytes: 1,
+    positionWarmBytes: 0,
+    availableBytes: null,
+    minimumHeadroomBytes: 1,
+    diskPressure: false,
+    configured: true,
+    ttlDays: 30,
+    bySource: [{ source: 'source', bytes: 2, rows: 1 }],
+    upstream: { source: { slow: false, timeoutSecs: 15, lastTimeoutAt: 0 } },
+    diagnostics: {
+      diskPressureEvents: 0,
+      warmRejections: 0,
+      configPushes: 1,
+      cacheOperationErrors: 0
+    }
+  }
+  assert.equal(parseCacheStats(valid).bySource[0]?.source, 'source')
+  assert.equal(parseCacheStats({ ...valid, diskPressure: null }).diskPressure, null)
+  assert.throws(
+    () => parseCacheStats({ ...valid, bySource: [null] }),
+    /bySource\[0\] must be an object/
+  )
+  assert.throws(
+    () => parseCacheStats({ ...valid, upstream: { source: { slow: 'no' } } }),
+    /must be a health object/
+  )
+})
+
+test('parseChartDiscovery rejects malformed diagnostics instead of crashing the panel', () => {
+  const valid = {
+    charts: [{ id: 'one' }],
+    invalid: [{ fileName: 'bad.pmtiles', error: 'invalid header' }],
+    discovery: { lastScanAt: 1 }
+  }
+  assert.deepEqual(parseChartDiscovery(valid), {
+    valid: 1,
+    invalid: [{ fileName: 'bad.pmtiles', error: 'invalid header' }],
+    lastScanAt: 1
+  })
+  assert.throws(
+    () => parseChartDiscovery({ ...valid, invalid: [null] }),
+    /invalid\[0\] must be an object/
+  )
 })

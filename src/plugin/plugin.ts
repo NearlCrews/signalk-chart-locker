@@ -22,9 +22,10 @@ import { loadRegionsStore, mutateRegionsStore, reconcilePositionWarmSources, cre
 import { getRegionByteTotals, warmRegion } from '../runtime/tilecache-client.js'
 import { isValidPosition } from '../runtime/position-warm.js'
 import { getOrCreateControlToken } from '../runtime/control-token.js'
-import { hasControlCharacter } from '../shared/text.js'
 import { migrateLegacyTilecacheTag } from '../shared/tilecache-tag.js'
 import { createHostHealthMonitor, type HostHealthMonitor, type HostHealthState } from '../runtime/host-health-monitor.js'
+import { configPathIssue, MAX_CONFIG_PATH_LENGTH } from '../shared/config-path.js'
+import { isRecord } from '../shared/record.js'
 
 interface ChartLockerConfig {
   // Sectioned to match how the admin form groups the fields: nested objects render as titled
@@ -63,16 +64,12 @@ const MANAGER_OPERATION_TIMEOUT_MS = 30_000
  * the full manager-operation timeout. A wedged manager then costs one ensureRunning timeout per
  * start, as before the adoption fast path existed, not two. */
 const WARM_ADOPTION_TIMEOUT_MS = 5_000
-/** Bound admin-provided filesystem paths before they reach path resolution, filesystem APIs, logs,
- * or the container manager. This accommodates ordinary platform path limits without accepting an
- * effectively unbounded configuration string. */
-const MAX_CONFIG_PATH_LENGTH = 4096
-
 function readConfigPath (field: 'charts.path' | 'cacheVolumeSource', value: unknown): string {
   if (value === undefined) return ''
   if (typeof value !== 'string') throw new Error(`${field} must be a string`)
-  if (value.length > MAX_CONFIG_PATH_LENGTH) throw new Error(`${field} must be at most ${MAX_CONFIG_PATH_LENGTH} characters`)
-  if (hasControlCharacter(value)) throw new Error(`${field} must not contain control characters`)
+  const issue = configPathIssue(value)
+  if (issue === 'too-long') throw new Error(`${field} must be at most ${MAX_CONFIG_PATH_LENGTH} characters`)
+  if (issue === 'control-character') throw new Error(`${field} must not contain control characters`)
   return value.trim()
 }
 
@@ -236,7 +233,9 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
     }
     const external = readConfigPath('cacheVolumeSource', config.advanced?.cacheVolumeSource)
     if (external !== '' && !isAbsolute(external)) throw new Error('cacheVolumeSource must be an absolute host path')
-    const tag = config.advanced?.imageTag?.trim() ?? ''
+    const rawTag = config.advanced?.imageTag
+    if (rawTag !== undefined && typeof rawTag !== 'string') throw new Error('imageTag must be a string')
+    const tag = rawTag?.trim() ?? ''
     if (tag !== '' && !/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(tag)) throw new Error('imageTag is not a valid OCI tag')
     if (config.advanced?.geocodingEnabled !== undefined && typeof config.advanced.geocodingEnabled !== 'boolean') {
       throw new Error('geocodingEnabled must be a boolean')
@@ -260,7 +259,9 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
       ? effectiveCap
       : rawBudget
     const rawImageTag = raw.advanced?.imageTag
-    const imageTag = migrateLegacyTilecacheTag(rawImageTag)
+    const imageTag = typeof rawImageTag === 'string' || rawImageTag === undefined
+      ? migrateLegacyTilecacheTag(rawImageTag)
+      : rawImageTag
 
     if (cacheCapGiB === rawCap && regionsBudgetGiB === rawBudget && imageTag === rawImageTag) return raw
     app.debug(`Migrated legacy configuration to cacheCapGiB=${String(cacheCapGiB)}, regionsBudgetGiB=${String(regionsBudgetGiB)}, imageTag=${String(imageTag)}`)
@@ -355,6 +356,7 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
 
   async function doStart (rawConfig: ChartLockerConfig): Promise<void> {
     app.setPluginStatus('Starting...')
+    if (!isRecord(rawConfig)) throw new Error('configuration must be an object')
     const config = migrateLegacyConfig(rawConfig)
     validateConfig(config)
     if (pluginRunning) await doStop()

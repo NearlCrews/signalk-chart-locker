@@ -42,7 +42,7 @@ const cacheStats = {
   pinnedBytes: 300 * 1024 ** 2,
   scrollBytes: 400 * 1024 ** 2,
   regionsBudgetBytes: 4 * 1024 ** 3,
-  regionsFreeBytes: 3.7 * 1024 ** 3,
+  regionsFreeBytes: 4 * 1024 ** 3 - 300 * 1024 ** 2,
   positionWarmBytes: 0,
   availableBytes: 41.5 * 1024 ** 3,
   minimumHeadroomBytes: 256 * 1024 ** 2,
@@ -129,11 +129,14 @@ window.fetch = async (input, init): Promise<Response> => {
   }
   if (path.endsWith('/api/cache/stats')) {
     const requestCount = incrementDatasetCount('cacheStatsRequestCount')
+    // Snapshot when the request begins so a held response accurately models an in-flight read that
+    // started before a later mutation.
+    const responseStats = structuredClone(cacheStats)
     await waitForActionRelease('refresh', actionsToHold.delete('refresh'))
     if (parameters.has('fail-cache-stats') || (parameters.has('fail-cache-refresh') && requestCount > 1)) {
       return jsonResponse({ error: 'fixture failure' }, 503)
     }
-    return jsonResponse(cacheStats)
+    return jsonResponse(responseStats)
   }
   if (path.endsWith('/api/cache/config') && init?.method === 'POST') {
     incrementDatasetCount('retentionRequestCount')

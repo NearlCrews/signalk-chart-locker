@@ -1,6 +1,7 @@
 /** Shared validation for the warm-job HTTP contract returned by the managed tilecache container. */
 
 import { hasControlCharacter } from '../shared/text.js'
+import { isRecord } from '../shared/record.js'
 
 export type WarmState = 'running' | 'done' | 'cancelled' | 'capped' | 'error'
 
@@ -20,10 +21,6 @@ export interface WarmJobSnapshot extends WarmSnapshot {
 const WARM_STATES = new Set<WarmState>(['running', 'done', 'cancelled', 'capped', 'error'])
 const WARM_JOB_ID_RE = /^warm-[0-9a-f]{32}-([0-9]{1,20})$/
 const U64_MAX = 18_446_744_073_709_551_615n
-
-function isRecord (value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 function isNonnegativeInteger (value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0

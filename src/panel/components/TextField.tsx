@@ -24,6 +24,8 @@ interface Props {
   placeholder?: string
   /** Disable the input. */
   disabled?: boolean
+  /** Maximum accepted text length. */
+  maxLength?: number
   /** Validation message associated with the input. */
   error?: React.ReactNode
   /** How changes to the validation message are announced. */
@@ -39,6 +41,7 @@ export default function TextField ({
   onChange,
   placeholder,
   disabled,
+  maxLength,
   error,
   errorLive
 }: Props): React.ReactElement {
@@ -54,6 +57,7 @@ export default function TextField ({
         id={id}
         placeholder={placeholder}
         disabled={disabled}
+        maxLength={maxLength}
         value={value}
         onChange={(event) => onChange(event.target.value)}
       />

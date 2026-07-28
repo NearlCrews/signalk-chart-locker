@@ -8,6 +8,7 @@ import { nameToId } from './chart-id.js'
 import type { DecodedPmtiles } from './pmtiles-metadata.js'
 import { readJsonState, writeJsonState } from '../runtime/json-state.js'
 import { hasControlCharacter, normalizePrintableText } from '../shared/text.js'
+import { isRecord } from '../shared/record.js'
 
 export interface ChartOverride {
   name?: string
@@ -21,10 +22,6 @@ const MAX_OVERRIDE_NAME_LENGTH = 120
 const MAX_OVERRIDE_DESCRIPTION_LENGTH = 1000
 const MAX_OVERRIDE_SCALE = Number.MAX_SAFE_INTEGER
 const OVERRIDE_FIELDS = new Set(['name', 'description', 'scale'])
-
-function isRecord (value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 /** Apply the same bounded semantics to API patches and manually edited durable state. */
 export function readChartOverride (value: unknown): ChartOverride | undefined {

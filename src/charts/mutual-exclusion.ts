@@ -5,12 +5,9 @@
 import { watch, type FSWatcher } from 'node:fs'
 import { join } from 'node:path'
 import { readJsonState } from '../runtime/json-state.js'
+import { isRecord } from '../shared/record.js'
 
 const THIRD_PARTY_PLUGIN_ID = 'pmtiles-chart-provider'
-
-function isRecord (value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 export function isThirdPartyPmtilesEnabled (configPath: string): boolean {
   const file = join(configPath, 'plugin-config-data', `${THIRD_PARTY_PLUGIN_ID}.json`)

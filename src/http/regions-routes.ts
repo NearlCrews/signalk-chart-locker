@@ -24,6 +24,7 @@ import {
   type WarmSnapshot
 } from '../runtime/warm-contract.js'
 import { readBoundedResponseJson } from '../runtime/bounded-response.js'
+import { isRecord } from '../shared/record.js'
 
 // The plugin compiles to CommonJS, while chart-sources 0.3.x exposes an ESM-only runtime.
 const chartSources = import('signalk-chart-sources')
@@ -91,10 +92,6 @@ function isValidBbox (value: unknown): value is LngLatBbox {
     value[0] >= -180 && value[0] <= 180 && value[2] >= -180 && value[2] <= 180 &&
     value[1] >= -90 && value[1] <= 90 && value[3] >= -90 && value[3] <= 90 &&
     value[0] !== value[2] && !(value[0] > value[2] && Math.abs(value[0] - value[2]) === 360) && value[1] < value[3]
-}
-
-function isRecord (value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function isNonnegativeFinite (value: unknown): value is number {

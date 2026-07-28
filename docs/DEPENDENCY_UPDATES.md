@@ -8,6 +8,16 @@ Minor and patch npm, Cargo, and GitHub Actions updates are grouped by ecosystem.
 separate so their migration work and compatibility impact are visible and can be reviewed
 independently.
 
+The TypeScript 7 native compiler does not yet expose the compiler API consumed by ESLint and other
+JavaScript tools. Keep `@typescript/native` as the `tsc` provider and the `typescript` dependency
+aliased to the maintained TypeScript 6 compiler API package until those tools support the native
+API. Run every configured TypeScript project with `npm run typecheck` after changing either package.
+
+ESLint 10 requires Node.js 20.19 or newer and flat configuration, but compatibility also depends on
+the peer ranges declared by neostandard and eslint-plugin-react. Keep ESLint on the latest 9.x
+release while either peer range excludes 10.x, and re-evaluate the major upgrade when both packages
+support it.
+
 ## Automated updates
 
 For every Dependabot pull request:

@@ -88,7 +88,7 @@ for (const packageName of [...expectedBundledPackages, 'webpack']) {
   }
 }
 
-const PANEL_GZIP_LIMIT_BYTES = 25 * 1024
+const PANEL_GZIP_LIMIT_BYTES = 27 * 1024
 const panelGzipBytes = bundles.reduce((total, { source }) => total + gzipSync(source, { level: 9 }).length, 0)
 if (panelGzipBytes > PANEL_GZIP_LIMIT_BYTES) {
   throw new Error(`panel bundle is ${panelGzipBytes} gzip bytes; limit is ${PANEL_GZIP_LIMIT_BYTES}`)

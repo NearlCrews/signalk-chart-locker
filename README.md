@@ -14,13 +14,14 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.7.3
+## What's new in 0.7.4
 
-Version 0.7.3 fixes saved-region admission when the cache reports a fractional mean tile size.
-Measured averages are now rounded up before estimation, so valid cache statistics are accepted
-without understating the saved-region budget.
+Version 0.7.4 upgrades the configuration panel to `signalk-nearlcrews-ui` 0.4.1, refreshes the
+compatible npm and Rust toolchains, and hardens panel and plugin configuration handling. Cache
+mutations now wait out stale polls and require a fresh read, malformed API responses degrade safely,
+and invalid startup configuration reports actionable errors.
 
-See the [0.7.3 changelog](CHANGELOG.md#v073) for the full list.
+See the [0.7.4 changelog](CHANGELOG.md#v074) for the full list.
 
 ## What it does
 
@@ -209,7 +210,9 @@ and structured log events. See [HTTP API](docs/API.md) for the plugin routes and
 ## Development
 
 This project targets Node.js 22 or newer. The Rust container is a Cargo workspace under
-`container/`.
+`container/` and uses the pinned Rust 1.97.1 toolchain. TypeScript compilation uses the 7.0 native
+compiler, while ESLint's type-aware parser uses the TypeScript 6 compiler API compatibility package.
+ESLint remains on the latest 9.x release until neostandard and eslint-plugin-react support ESLint 10.
 
 ```bash
 git clone https://github.com/NearlCrews/signalk-chart-locker.git

@@ -41,6 +41,8 @@ import {
   REGIONS_BUDGET_DEFAULT_GIB,
   REGIONS_BUDGET_MIN_GIB
 } from './config-types.js'
+import { validatePanelConfig } from './validate-config.js'
+import { MAX_CONFIG_PATH_LENGTH } from '../shared/config-path.js'
 import styles from './PluginConfigurationPanel.module.css'
 
 /** How long, in milliseconds, the "Saved" confirmation stays visible. */
@@ -125,22 +127,7 @@ function SupportedPluginConfigurationPanel ({ configuration, save }: Props): Rea
   // Save stays enabled before the first configuration is persisted so defaults can enable the plugin.
   const unconfigured = !everSaved
 
-  const validation = useMemo(() => {
-    return {
-      regionsBudget: state.tileCache.regionsBudgetGiB > state.tileCache.cacheCapGiB
-        ? 'Saved-regions budget cannot exceed the cache cap.'
-        : null,
-      chartsPath: state.charts.path.startsWith('/') || state.charts.path.split(/[\\/]+/).includes('..')
-        ? 'The PMTiles charts directory must stay relative to the Signal K configuration directory.'
-        : null,
-      cacheVolumeSource: state.advanced.cacheVolumeSource !== '' && !state.advanced.cacheVolumeSource.startsWith('/')
-        ? 'The external cache drive must be an absolute host path.'
-        : null,
-      imageTag: state.advanced.imageTag !== '' && !/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(state.advanced.imageTag)
-        ? 'The container image tag is not a valid OCI tag.'
-        : null
-    }
-  }, [state])
+  const validation = useMemo(() => validatePanelConfig(state), [state])
   const validationErrors = Object.values(validation).filter((error): error is string => error !== null)
   const advancedInvalid = validation.imageTag !== null || validation.cacheVolumeSource !== null
   const [advancedOpen, setAdvancedOpen] = useState(advancedInvalid)
@@ -430,6 +417,7 @@ function SupportedPluginConfigurationPanel ({ configuration, save }: Props): Rea
               id='cl-charts-path'
               label='PMTiles charts directory'
               placeholder='charts/pmtiles'
+              maxLength={MAX_CONFIG_PATH_LENGTH}
               value={state.charts.path}
               onChange={(path) => dispatch({ type: 'setChartsPath', path })}
               error={validation.chartsPath}
@@ -491,6 +479,7 @@ function SupportedPluginConfigurationPanel ({ configuration, save }: Props): Rea
               id='cl-image-tag'
               label='Tile cache container image tag'
               placeholder='Pinned to the plugin version'
+              maxLength={128}
               value={state.advanced.imageTag}
               onChange={(tag) => dispatch({ type: 'setImageTag', tag })}
               error={validation.imageTag}
@@ -507,6 +496,7 @@ function SupportedPluginConfigurationPanel ({ configuration, save }: Props): Rea
               id='cl-cache-volume-source'
               label='External tile cache drive'
               placeholder='/mnt/ssd/tilecache'
+              maxLength={MAX_CONFIG_PATH_LENGTH}
               value={state.advanced.cacheVolumeSource}
               onChange={(path) => dispatch({ type: 'setCacheVolumeSource', path })}
               error={validation.cacheVolumeSource}

@@ -11,6 +11,7 @@ import type { LngLatBbox } from 'signalk-chart-sources'
 import { preserveInvalidJsonState, readJsonState, writeJsonState } from './json-state.js'
 import { nowUnixSecs } from '../shared/time.js'
 import { hasControlCharacter, normalizePrintableText } from '../shared/text.js'
+import { isRecord } from '../shared/record.js'
 
 export interface PositionWarmSettings {
   enabled: boolean
@@ -83,10 +84,6 @@ export const MAX_REGION_ID_LENGTH = 128
 export const MAX_SAVED_REGIONS = 128
 export const MAX_REGION_TOTAL_ENTRIES = MAX_SAVED_REGIONS + 8
 const REGION_STATUSES = new Set<RegionStatus>(['downloading', 'ready', 'capped', 'error', 'needs-redownload'])
-
-function isRecord (value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 function validBbox (value: unknown): value is LngLatBbox {
   return Array.isArray(value) && value.length === 4 &&

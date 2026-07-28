@@ -48,6 +48,9 @@ serves, and any implementation ideas you have.
 - The Node plugin is TypeScript under `src/`, compiled to `dist/` by `tsc`.
   The tile-cache service is a Rust Cargo workspace under `container/` with one
   member, `tilecache`, built into a container image.
+- Use the TypeScript 7 native compiler for builds and the aliased TypeScript 6 compiler API package
+  for JavaScript tooling. Keep both dependencies aligned with
+  [`docs/DEPENDENCY_UPDATES.md`](../docs/DEPENDENCY_UPDATES.md).
 - Keep modules focused and small. Hoist shared logic into one place (a shared
   module, helper, or crate) rather than duplicating it.
 - Lint the TypeScript with ESLint 9 and [neostandard](https://github.com/neostandard/neostandard)

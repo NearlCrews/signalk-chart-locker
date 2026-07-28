@@ -209,6 +209,27 @@ test('runs cache and chart actions with stable focus, loading state, and repeat 
   await page.getByRole('button', { name: 'Cancel' }).click()
 })
 
+test('waits out an older cache poll and refreshes again after a mutation', async ({ page }) => {
+  const body = page.locator('body')
+  const requestsBefore = Number(await body.getAttribute('data-cache-stats-request-count'))
+  await holdNextFixtureAction(page, 'refresh')
+  await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+  await expect(body).toHaveAttribute('data-fixture-pending-action', 'refresh')
+
+  const retention = page.getByRole('spinbutton', { name: 'Scroll cache retention (days)' })
+  const apply = page.getByRole('button', { name: /Apply retention/ })
+  await retention.fill('31')
+  await apply.click()
+  await expect(body).toHaveAttribute('data-retention-request-count', '1')
+  await expect(apply).toHaveAttribute('aria-busy', 'true')
+
+  await releaseFixtureAction(page, 'refresh')
+  await expect(body).toHaveAttribute('data-cache-stats-request-count', String(requestsBefore + 2))
+  await expect(apply).not.toHaveAttribute('aria-busy')
+  await expect(retention).toHaveValue('31')
+  await expect(apply).toHaveAttribute('aria-disabled', 'true')
+})
+
 test('reports action failures and keeps the last successful live data visible', async ({ page }) => {
   await page.goto('/?fail-retention')
   await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
