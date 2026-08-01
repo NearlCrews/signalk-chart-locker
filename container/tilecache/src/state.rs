@@ -472,6 +472,19 @@ impl AppState {
             .map_err(|_| rusqlite::Error::InvalidQuery)?
     }
 
+    /// The freshness window for one source's tiles. A time-dynamic source declares its own TTL in
+    /// the shared catalog, which shortens the deployment-wide default so a cached radar frame stops
+    /// being served long before an ordinary chart tile would. An unknown id falls back to the
+    /// default; the caller has already rejected it as not allowlisted.
+    pub async fn fresh_secs_for(&self, source_id: &str) -> i64 {
+        let default_secs = self.knobs.fresh_secs;
+        self.sources
+            .read()
+            .await
+            .get(source_id)
+            .map_or(default_secs, |source| source.fresh_secs(default_secs))
+    }
+
     pub fn control_authorized(&self, supplied: Option<&str>) -> bool {
         let Some(expected) = self.control_token.as_deref() else {
             return false;

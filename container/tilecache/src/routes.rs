@@ -599,12 +599,32 @@ async fn tile(
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
+    // A time-dynamic source declares how long one of its tiles stays usable, and the browser is a
+    // cache as much as the container is, so the same window is what it gets told.
+    let max_age = st
+        .sources
+        .read()
+        .await
+        .get(&source)
+        .and_then(|s| s.max_age_seconds);
     match get_tile(&st, &source, z, x, y, if_none_match).await {
-        FetchOutcome::Hit(t) => {
-            crate::response::tile_http_response(&t.content_type, &t.etag, t.stale, t.body, None)
-        }
+        FetchOutcome::Hit(t) => crate::response::tile_http_response_with_max_age(
+            &t.content_type,
+            &t.etag,
+            t.stale,
+            t.body,
+            None,
+            max_age,
+        ),
         FetchOutcome::NotModified { etag, stale } => {
-            crate::response::tile_http_response("", &etag, stale, bytes::Bytes::new(), Some(&etag))
+            crate::response::tile_http_response_with_max_age(
+                "",
+                &etag,
+                stale,
+                bytes::Bytes::new(),
+                Some(&etag),
+                max_age,
+            )
         }
         FetchOutcome::Empty { status } => StatusCode::from_u16(status)
             .unwrap_or(StatusCode::NOT_FOUND)
@@ -657,6 +677,9 @@ async fn warm_start(
             vector_maxzoom: None,
             bounds: None,
             coverage: None,
+            // A placeholder carries the id only; start_warm resolves the real definition, and its
+            // TTL, from the allowlist before counting or warming anything.
+            max_age_seconds: None,
             attribution: String::new(),
         })
         .collect();

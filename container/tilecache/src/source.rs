@@ -30,6 +30,13 @@ pub struct ChartSource {
     pub bounds: Option<[f64; 4]>,
     #[serde(default)]
     pub coverage: Option<Vec<[f64; 4]>>,
+    /// How long a fetched tile of this source stays usable, in seconds. Absent means the source is
+    /// static and a stored tile keeps until the ordinary freshness window expires. Present means the
+    /// source is time-dynamic (weather radar, hazard overlays) and the cache must both shorten its
+    /// freshness window to this and refuse to warm it: a persistent cache handing back a storm
+    /// image from three days ago is worse than handing back nothing.
+    #[serde(default)]
+    pub max_age_seconds: Option<u64>,
     pub attribution: String,
 }
 
@@ -59,6 +66,21 @@ pub enum UpstreamTemplate {
 }
 
 impl ChartSource {
+    /// True when the source is time-dynamic, so its tiles must not be pre-warmed into the cache.
+    pub fn is_volatile(&self) -> bool {
+        self.max_age_seconds.is_some()
+    }
+
+    /// The freshness window to apply to this source's cached tiles, in seconds. A declared TTL is a
+    /// ceiling on the deployment-wide default rather than a replacement for it: an operator who
+    /// shortened the default wants more revalidation, not less.
+    pub fn fresh_secs(&self, default_secs: i64) -> i64 {
+        match self.max_age_seconds {
+            Some(ttl) => default_secs.min(i64::try_from(ttl).unwrap_or(i64::MAX)),
+            None => default_secs,
+        }
+    }
+
     /// Validate the trusted-catalog payload again at the container boundary so version skew or a
     /// malformed direct config push cannot install unsafe or nonsensical source definitions.
     pub fn is_valid(&self, allow_http: bool) -> bool {
@@ -71,6 +93,7 @@ impl ChartSource {
             || self
                 .vector_maxzoom
                 .is_some_and(|zoom| zoom < self.minzoom || zoom > self.maxzoom)
+            || self.max_age_seconds == Some(0)
             || self.bounds.is_some_and(|bbox| !valid_source_bbox(bbox))
             || self.coverage.as_ref().is_some_and(|coverage| {
                 coverage.is_empty()
@@ -277,6 +300,56 @@ mod tests {
         )
         .unwrap();
         assert_eq!(without.vector_maxzoom, None);
+    }
+
+    #[test]
+    fn deserializes_max_age_seconds_and_reports_a_source_as_volatile() {
+        let volatile: ChartSource = serde_json::from_str(
+            r#"{"id":"weather-radar-conus","title":"R","tileSize":256,"minzoom":0,"maxzoom":10,
+                "maxAgeSeconds":300,"attribution":"NOAA",
+                "upstream":{"mode":"xyz","urlTemplate":"https://h/{z}/{x}/{y}.png"}}"#,
+        )
+        .unwrap();
+        assert_eq!(volatile.max_age_seconds, Some(300));
+        assert!(volatile.is_volatile());
+        assert!(volatile.is_valid(false));
+
+        // Absent is the common case, and must not be read as a zero-second TTL.
+        let static_source = xyz_source();
+        assert_eq!(static_source.max_age_seconds, None);
+        assert!(!static_source.is_volatile());
+    }
+
+    #[test]
+    fn a_declared_ttl_shortens_the_default_freshness_window_but_never_extends_it() {
+        let mut source = xyz_source();
+        assert_eq!(
+            source.fresh_secs(86_400),
+            86_400,
+            "no TTL keeps the default"
+        );
+
+        source.max_age_seconds = Some(300);
+        assert_eq!(source.fresh_secs(86_400), 300, "a TTL shortens the default");
+        // An operator who lowered the deployment default wants more revalidation, not less, so the
+        // TTL is a ceiling rather than a replacement.
+        assert_eq!(source.fresh_secs(60), 60, "a shorter default still wins");
+
+        // A TTL past i64 cannot overflow the comparison into a negative window, which would make
+        // every stored tile look permanently stale.
+        source.max_age_seconds = Some(u64::MAX);
+        assert_eq!(source.fresh_secs(86_400), 86_400);
+    }
+
+    #[test]
+    fn source_validation_rejects_a_zero_second_ttl() {
+        // Zero would mean "never fresh", which is a config mistake rather than a cache policy: it
+        // would refetch the source on every single tile read.
+        let mut source = xyz_source();
+        source.max_age_seconds = Some(0);
+        assert!(!source.is_valid(false));
+        source.max_age_seconds = Some(1);
+        assert!(source.is_valid(false));
     }
 
     #[test]

@@ -163,6 +163,11 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
     // Every distinct source must be in the allowlist; duplicate ids do not multiply work.
     let mut total = 0u64;
     let mut style_sources = 0usize;
+    let mut volatile_skipped: Vec<String> = Vec::new();
+    // The definitions this job will actually warm, resolved once from the allowlist rather than the
+    // client-sent copies. Collecting them here and handing the same list to run() is what keeps the
+    // counted total and the enumerated work in step; resolving twice let the two disagree.
+    let mut resolved: Vec<ChartSource> = Vec::new();
     let mut requested_ids = std::collections::HashSet::new();
     {
         let map = state.sources.read().await;
@@ -171,7 +176,15 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
                 continue;
             }
             match map.get(&s.id) {
+                // A time-dynamic source is stale within minutes, so warming it fills the cache with
+                // frames nobody will ever see current. Skip it rather than fail the whole job: the
+                // rest of the region is still worth storing. Filtered before the clone, so a skipped
+                // source never pays for copying its strings and its coverage boxes.
+                Some(known) if known.is_volatile() => {
+                    volatile_skipped.push(s.id.clone());
+                }
                 Some(known) if matches!(known.upstream, UpstreamTemplate::Style { .. }) => {
+                    resolved.push(known.clone());
                     style_sources += 1;
                     if style_sources > 1 {
                         return Err(StartError::MultipleStyleSources);
@@ -190,6 +203,7 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
                         .sum::<u64>();
                 }
                 Some(known) => {
+                    resolved.push(known.clone());
                     total += bboxes
                         .iter()
                         .map(|b| tile_count_in_bbox(known, *b, req.minzoom, req.maxzoom))
@@ -199,7 +213,21 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
             }
         }
     }
+    if !volatile_skipped.is_empty() {
+        eprintln!(
+            "event=warm_skipped_volatile_sources sources={}",
+            volatile_skipped.join(",")
+        );
+    }
     if total == 0 {
+        // Distinguish the two ways a job can end up with nothing to do, so the operator is not told
+        // their bbox is wrong when the real answer is that weather layers are never warmed.
+        if !volatile_skipped.is_empty() {
+            return Err(StartError::BadBbox(format!(
+                "every selected source is time-dynamic and is never warmed: {}",
+                volatile_skipped.join(", ")
+            )));
+        }
         return Err(StartError::BadBbox(
             "bbox does not intersect the selected sources".into(),
         ));
@@ -253,16 +281,6 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
         }
         jobs.insert(id.clone(), job.clone());
     }
-    // Resolve the allowlisted source definitions (not the client-sent ones) so the warm uses the trusted config.
-    let resolved: Vec<ChartSource> = {
-        let map = state.sources.read().await;
-        let mut seen = std::collections::HashSet::new();
-        req.sources
-            .iter()
-            .filter(|source| seen.insert(source.id.clone()))
-            .filter_map(|s| map.get(&s.id).cloned())
-            .collect()
-    };
     let st = state.clone();
     state.warm_task_count.fetch_add(1, Ordering::AcqRel);
     tokio::spawn(run(
@@ -535,19 +553,17 @@ async fn expand_warm_sources(
                 .get(name)
                 .copied()
                 .unwrap_or(registry_max);
+            // Only the four fields a learned sub-source redefines are spelled out; the rest come
+            // from the parent by struct update, so a new ChartSource field is inherited here without
+            // anyone having to remember this site.
             out.push(ChartSource {
                 id: crate::style::vector_cache_source_at(&source.id, name, learned.generation),
-                title: source.title.clone(),
                 upstream: UpstreamTemplate::Xyz {
                     url_template: template.clone(),
                 },
-                tile_size: source.tile_size,
-                minzoom: source.minzoom,
                 maxzoom: registry_max.min(native),
                 vector_maxzoom: None,
-                bounds: source.bounds,
-                coverage: source.coverage.clone(),
-                attribution: source.attribution.clone(),
+                ..source.clone()
             });
         }
     }
@@ -1550,6 +1566,7 @@ mod tests {
             vector_maxzoom: None,
             bounds: None,
             coverage: None,
+            max_age_seconds: None,
             attribution: String::new(),
         }
     }
@@ -2104,6 +2121,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_time_dynamic_source_is_never_warmed() {
+        let app = axum::Router::new().route(
+            "/t/{z}/{x}/{y}",
+            get(|| async { ([(header::CONTENT_TYPE, "image/png")], vec![1u8, 2, 3, 4]) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let db = NamedTempFile::new().unwrap();
+        let st = state(&db, dev(), xyz(addr, "t")).await;
+
+        // A warm over the static source is the control: it starts.
+        let source = st.sources.read().await["s"].clone();
+        let request = || WarmRequest {
+            sources: vec![source.clone()],
+            bbox: [-1.0, -1.0, 1.0, 1.0],
+            additional_bbox: None,
+            minzoom: 0,
+            maxzoom: 0,
+            region_id: None,
+        };
+        assert!(start_warm(&st, request()).await.is_ok());
+
+        // Declaring a TTL on the allowlisted definition takes it out of warming entirely, and the
+        // error says why rather than blaming the bbox.
+        st.sources
+            .write()
+            .await
+            .get_mut("s")
+            .unwrap()
+            .max_age_seconds = Some(300);
+        match start_warm(&st, request()).await {
+            Err(StartError::BadBbox(message)) => {
+                assert!(message.contains("time-dynamic"), "{message}");
+                assert!(message.contains('s'), "{message}");
+            }
+            other => panic!("expected a time-dynamic rejection, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn overlapping_warms_for_the_same_region_are_rejected_and_cancel_cleanly() {
         let app = axum::Router::new().route(
             "/slow/{z}/{x}/{y}",
@@ -2248,6 +2308,7 @@ mod tests {
             vector_maxzoom: Some(14),
             bounds: None,
             coverage: None,
+            max_age_seconds: None,
             attribution: String::new(),
         }
     }
