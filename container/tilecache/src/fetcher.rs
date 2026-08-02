@@ -341,7 +341,7 @@ pub async fn get_tile(
                 "event=unsafe_cached_tile_ignored source={source_id} z={z} x={x} y={y} content_type={}",
                 tile.content_type
             );
-        } else if now - tile.fetched_at < state.knobs.fresh_secs {
+        } else if now - tile.fetched_at < source.fresh_secs(state.knobs.fresh_secs) {
             // Throttle the LRU write so a pan does not write to the microSD on every warm-tile read, and
             // run it detached on the blocking pool so the best-effort last_access bump never delays the
             // cache hit or blocks the reactor on a SQLite write.
@@ -495,12 +495,15 @@ async fn fill(
     let _guard = lock.lock().await;
     let now = now_secs();
     // Re-check under the lock: the winning flight may have filled the cache while we waited. Losers
-    // coalesce onto a fresh 200 or a fresh negative here and never refetch.
+    // coalesce onto a fresh 200 or a fresh negative here and never refetch. Resolving the window here
+    // rather than threading it through the spawn keeps it correct across a config push that lands
+    // while this fill was queued, and this is the slow path anyway.
+    let fresh_secs = state.fresh_secs_for(&source_id).await;
     let existing = state.cache_get(&source_id, z, x, y).await.ok().flatten();
     if let Some(tile) = &existing {
         if tile.status == 200
             && acceptable_content_type(&tile.content_type)
-            && now - tile.fetched_at < state.knobs.fresh_secs
+            && now - tile.fetched_at < fresh_secs
         {
             state.inflight_finish(&key, &lock).await;
             return respond_cached(tile, if_none_match.as_deref(), false);
@@ -728,6 +731,7 @@ mod tests {
             vector_maxzoom: None,
             bounds: None,
             coverage: None,
+            max_age_seconds: None,
             attribution: String::new(),
         }
     }

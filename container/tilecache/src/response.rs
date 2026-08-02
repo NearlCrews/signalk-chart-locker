@@ -10,6 +10,21 @@ use bytes::Bytes;
 pub const TILE_CACHE_CONTROL: &str = "public, max-age=86400";
 pub const STALE_TILE_CACHE_CONTROL: &str = "public, max-age=0, must-revalidate";
 
+/// The Cache-Control value for a served tile. A stale tile must always be revalidated. A tile from a
+/// time-dynamic source carries that source's own TTL, because the browser and the webapp's service
+/// worker are caches too: serving a five-minute radar frame with a one-day lifetime would leave a
+/// day-old storm on the chart no matter how correctly the container expires its own copy.
+fn cache_control(stale: bool, max_age_secs: Option<u64>) -> HeaderValue {
+    if stale {
+        return HeaderValue::from_static(STALE_TILE_CACHE_CONTROL);
+    }
+    match max_age_secs {
+        Some(secs) => HeaderValue::try_from(format!("public, max-age={secs}"))
+            .unwrap_or_else(|_| HeaderValue::from_static(STALE_TILE_CACHE_CONTROL)),
+        None => HeaderValue::from_static(TILE_CACHE_CONTROL),
+    }
+}
+
 /// A Content-Type header value, falling back to a generic binary type when the string is not a legal
 /// header value. This fallback is meaningful only for Content-Type; other headers (the ETag) omit
 /// themselves rather than borrow this content-type default.
@@ -35,17 +50,22 @@ pub fn tile_http_response(
     body: Bytes,
     if_none_match: Option<&str>,
 ) -> Response {
+    tile_http_response_with_max_age(content_type, etag, stale, body, if_none_match, None)
+}
+
+/// As `tile_http_response`, with the source's own freshness window for a time-dynamic source.
+pub fn tile_http_response_with_max_age(
+    content_type: &str,
+    etag: &str,
+    stale: bool,
+    body: Bytes,
+    if_none_match: Option<&str>,
+    max_age_secs: Option<u64>,
+) -> Response {
     if if_none_match.is_some_and(|value| crate::fetcher::etag_matches(value, etag)) {
         let mut h = HeaderMap::new();
         insert_etag(&mut h, etag);
-        h.insert(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static(if stale {
-                STALE_TILE_CACHE_CONTROL
-            } else {
-                TILE_CACHE_CONTROL
-            }),
-        );
+        h.insert(header::CACHE_CONTROL, cache_control(stale, max_age_secs));
         if stale {
             h.insert("x-tilecache", HeaderValue::from_static("stale"));
         }
@@ -54,14 +74,7 @@ pub fn tile_http_response(
     let mut h = HeaderMap::new();
     h.insert(header::CONTENT_TYPE, content_type_value(content_type));
     insert_etag(&mut h, etag);
-    h.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static(if stale {
-            STALE_TILE_CACHE_CONTROL
-        } else {
-            TILE_CACHE_CONTROL
-        }),
-    );
+    h.insert(header::CACHE_CONTROL, cache_control(stale, max_age_secs));
     if stale {
         h.insert("x-tilecache", HeaderValue::from_static("stale"));
     }
@@ -105,5 +118,51 @@ mod tests {
             TILE_CACHE_CONTROL
         );
         assert!(!response.headers().contains_key("x-tilecache"));
+    }
+
+    #[test]
+    fn a_time_dynamic_source_tells_the_browser_its_own_freshness_window() {
+        // The browser and the webapp's service worker cache this response too, so a five-minute
+        // radar frame must not be handed out with the one-day tile policy.
+        let response = tile_http_response_with_max_age(
+            "image/png",
+            "\"current\"",
+            false,
+            Bytes::from_static(b"body"),
+            None,
+            Some(300),
+        );
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "public, max-age=300"
+        );
+
+        // A stale tile still has to be revalidated, whatever the source's window says.
+        let stale = tile_http_response_with_max_age(
+            "image/png",
+            "\"current\"",
+            true,
+            Bytes::from_static(b"body"),
+            None,
+            Some(300),
+        );
+        assert_eq!(
+            stale.headers()[header::CACHE_CONTROL],
+            STALE_TILE_CACHE_CONTROL
+        );
+
+        // A static source keeps the ordinary policy.
+        let static_source = tile_http_response_with_max_age(
+            "image/png",
+            "\"current\"",
+            false,
+            Bytes::from_static(b"body"),
+            None,
+            None,
+        );
+        assert_eq!(
+            static_source.headers()[header::CACHE_CONTROL],
+            TILE_CACHE_CONTROL
+        );
     }
 }

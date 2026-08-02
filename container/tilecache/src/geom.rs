@@ -242,6 +242,7 @@ mod tests {
             vector_maxzoom: None,
             bounds,
             coverage: None,
+            max_age_seconds: None,
             attribution: String::new(),
         }
     }
