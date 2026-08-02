@@ -14,14 +14,16 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.7.4
+## What's new in 0.8.0
 
-Version 0.7.4 upgrades the configuration panel to `signalk-nearlcrews-ui` 0.4.1, refreshes the
-compatible npm and Rust toolchains, and hardens panel and plugin configuration handling. Cache
-mutations now wait out stale polls and require a fresh read, malformed API responses degrade safely,
-and invalid startup configuration reports actionable errors.
+Version 0.8.0 upgrades the panel library to `signalk-nearlcrews-ui` 0.6.1 and adopts the full
+`signalk-chart-sources` 0.7.0 contract: time-dynamic weather layers stay out of offline warming end
+to end, and a saved region can pin the light and dark basemaps together in one job. Pinned region
+tiles now serve offline for as long as they stay pinned, time-dynamic tiles never serve past their
+declared lifetime, and container busy signals reach callers as retryable 503s.
 
-See the [0.7.4 changelog](CHANGELOG.md#v074) for the full list.
+See the [0.8.0 changelog](https://github.com/NearlCrews/signalk-chart-locker/blob/main/CHANGELOG.md#v080)
+for the full list.
 
 ## What it does
 

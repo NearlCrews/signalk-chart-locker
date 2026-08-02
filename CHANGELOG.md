@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+<a id="v080"></a>
+
+## [0.8.0] - 2026-08-02
+
+### Added
+
+- A saved region or automatic warm can select several map styles in one job, so the light and dark
+  basemaps pin together for a night passage. One job accepts up to the four styles the container
+  holds learned state for, and every selected style's glyphs and sprites stage and promote
+  together.
+- `GET /api/regions` reports `timeDynamicSourceIds` beside `unavailableSourceIds`, naming selected
+  layers the catalog marks time-dynamic, so a region shows which of its layers are never stored
+  offline.
+
 ### Changed
 
 - Upgrade `signalk-chart-sources` to 0.7.0, adding twenty catalog sources: the OpenFreeMap Dark
@@ -14,11 +28,21 @@ All notable changes to this project are documented here. The format follows
   Regions jurisdiction layers, and UNESCO World Heritage marine sites. Time-dynamic sources now
   declare `maxAgeSeconds`, and the tilecache honors it as a ceiling on the freshness window while
   refusing to warm those sources.
-- Upgrade the configuration panel to `signalk-nearlcrews-ui` 0.5.0. The Advanced section uses the
+- Exclude time-dynamic weather and ocean layers from warming end to end. Region creation and the
+  position-warm configuration refuse them with a 400 naming the offending sources before anything
+  persists or reaches the container, the automatic warm filters them from saved selections instead
+  of retrying a rejected job forever, startup drops them from persisted selections, and a region
+  byte estimate no longer counts tiles the container will never store.
+- Upgrade the configuration panel to `signalk-nearlcrews-ui` 0.6.1. The Advanced section uses the
   merged collapsible-section primitive, the footer action bar declares its bottom stickiness, cache
-  metrics render value and unit through the metric unit slot, and the save-status indicator uses
-  the shared live-announcement prop. A fresh panel follows the Auto theme rather than pinning
-  Light, and the legacy `cl-theme` key is no longer read.
+  metrics render value and unit through the metric unit slot, and the save-status indicator and
+  status bar use the shared live-announcement prop rather than hand-wired attributes. A fresh
+  panel follows the Auto theme rather than pinning Light, an unrecognized value on the shared
+  theme key no longer resets a mounted panel, the legacy `cl-theme` key is no longer read, and
+  panel styles use the published font and weight tokens.
+- Relay a container 503 to the caller as 503 with the container's `Retry-After` preserved, and
+  surface container control-token rejections and internal faults as 502 rather than the caller's
+  own 401 or 500.
 - Mirror the chart-sources 0.6 and 0.7 URL expansion changes in the tilecache: WMS base trailing
   slashes are stripped as ArcGIS already did, and BBOX ordinates snap projection-origin residue to
   zero, so the container and the package write byte-identical upstream requests.
@@ -28,6 +52,27 @@ All notable changes to this project are documented here. The format follows
 - Refresh the compatible npm, Rust, and browser toolchains. Add a Knip dead-code gate and a native
   coverage gate (90 percent lines, 80 percent branches, 90 percent functions) to CI and the release
   preflight, and share one Node test-suite definition between the test and coverage runners.
+  In-range refreshes bring `signalk-container` 1.25.1 and `tsx` 4.23.4.
+
+### Fixed
+
+- A pinned saved-region tile stopped serving offline once it aged past the 30-day staleness bound,
+  so a passage longer than a month lost its own downloaded charts, glyphs, and sprites. A pinned
+  tile now serves for as long as it stays pinned when the upstream is unreachable.
+- A time-dynamic tile could serve from the offline fallback for up to 30 days. The declared
+  `maxAgeSeconds` now bounds every serving path, and a time-dynamic tile never receives the pinned
+  exemption above.
+- Deleting a region left its bytes counted as pinned forever, which could reject a later
+  configuration push with a spurious 409 and cap subsequent region warms below their real budget.
+- Match the container's URL validation to the chart-sources 0.7.0 boundary: ports, IP address
+  literals, and loopback names are rejected in every URL field unless private egress is explicitly
+  enabled for testing.
+- A warm rejected for selecting only time-dynamic sources logged `invalid_geometry`; the log now
+  names the real reason, matching the response body.
+- Cache correctness details: a warm result of 204 no longer stores as 404, a stale cached vector
+  style tile no longer serves as 404, paired byte-accounting statements run in a fixed order, and
+  a source-validator prefix check strips a single occurrence.
+- The panel's cache-statistics fallback paragraph no longer announces twice to screen readers.
 
 <a id="v074"></a>
 
