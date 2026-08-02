@@ -1,0 +1,23 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "src/panel/index.tsx",
+    "fixtures/browser/main.tsx",
+    "fixtures/browser/vite.config.ts",
+    "scripts/*.mjs",
+    "test/*.test.ts",
+    "tests/browser/*.spec.ts"
+  ],
+  "ignoreDependencies": [
+    "signalk-server",
+    "@signalk/server-admin-ui"
+  ],
+  "ignoreExportsUsedInFile": { "interface": true, "type": true },
+  "project": [
+    "src/**/*.{ts,tsx}",
+    "fixtures/**/*.{ts,tsx}",
+    "scripts/*.mjs",
+    "test/**/*.ts",
+    "tests/**/*.ts"
+  ]
+}

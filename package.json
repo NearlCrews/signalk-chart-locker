@@ -23,7 +23,9 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.panel.json && tsc --noEmit -p tsconfig.test.json && tsc --noEmit -p tsconfig.browser.json",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
+    "deadcode": "knip",
     "test": "node scripts/run-node-tests.mjs",
+    "test:coverage": "node scripts/run-node-coverage.mjs",
     "test:node-rust-contract": "node scripts/run-node-rust-contract.mjs",
     "pretest:browser": "npm run build:panel",
     "test:browser": "playwright test --project=chromium",
@@ -34,7 +36,7 @@
     "licenses:rust:update": "node scripts/rust-license-report.mjs --write",
     "licenses:rust:check": "node scripts/rust-license-report.mjs",
     "check:package": "npm run build && node scripts/check-package-contents.mjs",
-    "verify:publish": "npm run licenses:rust:check && npm run typecheck && npm run lint && npm test && npm run test:browser:cross && npm audit --omit=dev && npm run check:package",
+    "verify:publish": "npm run licenses:rust:check && npm run typecheck && npm run lint && npm run deadcode && npm run test:coverage && npm run test:browser:cross && npm audit --omit=dev && npm run check:package",
     "pack:release": "node scripts/create-release-tarball.mjs",
     "verify:release-tarball": "node scripts/verify-release-tarball.mjs",
     "prepublishOnly": "npm run verify:publish"

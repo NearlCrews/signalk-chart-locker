@@ -68,7 +68,8 @@ Run the Node and panel gates from the repository root:
 ```bash
 npm run typecheck
 npm run lint
-npm test
+npm run deadcode
+npm run test:coverage
 npm run test:browser:cross
 npm run build
 npm run check:package
