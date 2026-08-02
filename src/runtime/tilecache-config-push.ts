@@ -109,6 +109,13 @@ export async function pushTilecacheConfig (
       const response = await postJson(url, body, headers, containerFetchSignal(options.signal))
       if (response.ok) return { ok: true, status: response.status }
       const status = response.status
+      // This detail is length-bounded but NOT sanitized, and it does not stay in the debug log: on the
+      // recovery path the plugin rethrows it, the health monitor reports recovery-failed, and the text
+      // lands in the Signal K plugin status line an operator reads. That is safe only because the
+      // container answers a rejected config with a fixed set of bare tokens, which its own suite
+      // enforces in config_rejection_reasons_stay_fixed_tokens. A container change that echoed
+      // anything caller-influenced, such as the offending source id, fails that test first, and would
+      // still need sanitizing there or control-character stripping here.
       const detail = (await readBoundedResponseText(response, MAX_MANAGED_CONTAINER_ERROR_BYTES).catch(() => '')).slice(0, 500)
       lastError = `tilecache rejected config${status === undefined ? '' : ` with HTTP ${status}`}${detail === '' ? '' : `: ${detail}`}`
       const transient = status === undefined || status === 408 || status === 429 || status >= 500

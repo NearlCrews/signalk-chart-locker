@@ -17,6 +17,23 @@ test('buildSourcePayload carries the full registry, the public base, and the cap
   assert.equal(payload.geocodingEnabled, true)
 })
 
+// The container decides freshness, stale serving, and the warm skip from maxAgeSeconds alone, so the
+// field has to survive both the payload build and its serialization. Trimming the pushed source to a
+// smaller shape would silently turn every weather overlay back into a permanently cached one.
+test('buildSourcePayload transmits the declared tile lifetime of a time-dynamic source', async () => {
+  const payload = await buildSourcePayload(2_147_483_648, 1_073_741_824, 64 * 1024 * 1024, 0)
+  const timeDynamic = payload.sources.filter((source) => source.maxAgeSeconds !== undefined)
+  assert.ok(timeDynamic.length > 0, 'the catalog must still carry at least one time-dynamic source')
+  for (const source of timeDynamic) {
+    assert.ok(Number.isInteger(source.maxAgeSeconds) && source.maxAgeSeconds! > 0)
+  }
+  const serialized = JSON.parse(JSON.stringify(payload)) as { sources: Array<{ id: string, maxAgeSeconds?: number }> }
+  assert.deepEqual(
+    serialized.sources.filter((source) => source.maxAgeSeconds !== undefined).map((source) => source.id),
+    timeDynamic.map((source) => source.id)
+  )
+})
+
 test('buildSourcePayload carries scrollTtlSecs', async () => {
   const payload = await buildSourcePayload(100, 50, 5, 86_400)
   assert.equal(payload.scrollTtlSecs, 86_400)

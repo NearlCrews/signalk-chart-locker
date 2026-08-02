@@ -105,6 +105,49 @@ test('does nothing when no position-warm sources are selected', async () => {
   assert.equal(calls, 0)
 })
 
+test('warms only the selected sources a warm can store', async () => {
+  let sent: string[] | undefined
+  const warmer = createPositionWarmer({
+    getStore: () => store({ sources: ['seamark', 'weather-radar-conus'] }),
+    selectWarmable: (ids) => ids.filter((id) => id !== 'weather-radar-conus'),
+    warm: async (_bbox, sources) => {
+      sent = sources
+      return { state: 'done', errors: 0, total: 1 }
+    }
+  })
+  warmer.onPosition({ latitude: 37.5, longitude: -121.5 })
+  await Promise.resolve()
+  assert.deepEqual(sent, ['seamark'])
+})
+
+// A selection of time-dynamic sources alone would otherwise post a job the container rejects, and a
+// rejected start is indistinguishable from an outage here, so the loop would back off and retry forever.
+test('does nothing when every selected source is one a warm cannot store', async () => {
+  let calls = 0
+  const warmer = createPositionWarmer({
+    getStore: () => store({ sources: ['weather-radar-conus', 'ocean-sst-global'] }),
+    selectWarmable: () => [],
+    warm: async () => { calls++; return { state: 'done', errors: 0, total: 0 } }
+  })
+  warmer.onPosition({ latitude: 37.5, longitude: -121.5 })
+  await Promise.resolve()
+  assert.equal(calls, 0)
+})
+
+test('sends the saved selection unchanged when no catalog filter is supplied', async () => {
+  let sent: string[] | undefined
+  const warmer = createPositionWarmer({
+    getStore: () => store({ sources: ['seamark', 'basemap'] }),
+    warm: async (_bbox, sources) => {
+      sent = sources
+      return { state: 'done', errors: 0, total: 1 }
+    }
+  })
+  warmer.onPosition({ latitude: 37.5, longitude: -121.5 })
+  await Promise.resolve()
+  assert.deepEqual(sent, ['seamark', 'basemap'])
+})
+
 test('retries a failed warm after backoff even when the vessel has not moved', async () => {
   let clock = 1_000_000
   let calls = 0

@@ -356,17 +356,19 @@ export function mutateRegionsStore (dataDir: string, mutate: (store: RegionsStor
   return store
 }
 
-/** Remove unavailable catalog entries from automatic position warming while preserving saved regions. */
-export function reconcilePositionWarmSources (dataDir: string, sourceExists: (id: string) => boolean): string[] {
+/** Drop the automatic position-warm sources the caller no longer accepts, preserving saved regions, and
+ * return the dropped ids. The caller supplies the rule, which covers both a source the catalog dropped
+ * and one it now marks as time-dynamic. */
+export function reconcilePositionWarmSources (dataDir: string, keepSource: (id: string) => boolean): string[] {
   const store = loadRegionsStore(dataDir)
-  const unavailable = store.positionWarm.sources.filter((id) => !sourceExists(id))
-  if (unavailable.length === 0) return []
+  const dropped = store.positionWarm.sources.filter((id) => !keepSource(id))
+  if (dropped.length === 0) return []
   store.positionWarm = {
     ...store.positionWarm,
-    sources: store.positionWarm.sources.filter(sourceExists)
+    sources: store.positionWarm.sources.filter(keepSource)
   }
   saveRegionsStore(dataDir, store)
-  return unavailable
+  return dropped
 }
 
 /** Append a region to the persisted store and write it back. */

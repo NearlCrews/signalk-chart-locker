@@ -379,6 +379,30 @@ test('startup marks a saved region for re-download when its cache pins disappear
   await plugin.stop()
 })
 
+// The shared catalog marks a time-dynamic source with maxAgeSeconds, and a cache must never store one
+// ahead of time. Automatic warming is the one selection the plugin owns across restarts, so startup is
+// where a source that gained a lifetime, or left the catalog, stops being warmed.
+test('startup drops automatic sources the catalog no longer allows to be cached', async (t) => {
+  setContainerManager(fakeManager({ address: '127.0.0.1:8080' }))
+  const app = fakeApp()
+  const { loadRegionsStore, saveRegionsStore, DEFAULT_REGIONS_STORE } = await import('../src/runtime/regions-store.js')
+  const { CHART_SOURCES } = await import('signalk-chart-sources')
+  const timeDynamic = CHART_SOURCES.find((source) => source.maxAgeSeconds !== undefined)
+  assert.ok(timeDynamic, 'the catalog must still carry at least one time-dynamic source')
+  saveRegionsStore(app.getDataDirPath(), {
+    ...DEFAULT_REGIONS_STORE,
+    positionWarm: { ...DEFAULT_REGIONS_STORE.positionWarm, sources: ['basemap', timeDynamic.id, 'left-the-catalog'] }
+  })
+  t.mock.method(globalThis, 'fetch', tilecacheFetch(true))
+  const plugin = createPlugin(app as never)
+  await plugin.start({}, () => {})
+  try {
+    assert.deepEqual(loadRegionsStore(app.getDataDirPath()).positionWarm.sources, ['basemap'])
+  } finally {
+    await plugin.stop()
+  }
+})
+
 test('startup refreshes durable terminal region bytes from authoritative cache totals', async (t) => {
   setContainerManager(fakeManager({ address: '127.0.0.1:8080' }))
   const app = fakeApp()

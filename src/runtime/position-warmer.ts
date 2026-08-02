@@ -17,6 +17,10 @@ export interface PositionWarmer {
 interface Deps {
   getStore: () => RegionsStore
   warm: (bbox: LngLatBbox, sources: string[], minzoom: number, maxzoom: number, regionId?: string, additionalBbox?: LngLatBbox, signal?: AbortSignal) => Promise<WarmResult | null>
+  /** Narrow the saved selection to the sources a warm will actually store, so a selection made only of
+   * time-dynamic sources warms nothing instead of posting a job the container rejects. Defaults to the
+   * selection unchanged, for a caller with no catalog. */
+  selectWarmable?: (ids: readonly string[]) => string[]
   now?: () => number
   backoffSecs?: number
   onError?: (error: unknown) => void
@@ -28,6 +32,7 @@ const DEFAULT_BACKOFF_SECS = 600
 
 export function createPositionWarmer (deps: Deps): PositionWarmer {
   const now = deps.now ?? Date.now
+  const selectWarmable = deps.selectWarmable ?? ((ids: readonly string[]) => [...ids])
   const backoffSecs = deps.backoffSecs ?? DEFAULT_BACKOFF_SECS
   const trigger: WarmTrigger = { lastPos: null, lastWarmMs: 0, backoffUntilMs: 0 }
   let inFlight = false
@@ -54,7 +59,8 @@ export function createPositionWarmer (deps: Deps): PositionWarmer {
         return
       }
       const settings = store.positionWarm
-      if (settings.sources.length === 0) return
+      const sources = selectWarmable(settings.sources)
+      if (sources.length === 0) return
       if (!shouldWarm(pos, store.regions, settings, trigger, nowMs)) return
       const bboxes = bboxesAround(pos, settings.radiusMeters)
       const minzoom = Math.max(0, settings.baseZoom - ZOOM_SPREAD)
@@ -65,7 +71,7 @@ export function createPositionWarmer (deps: Deps): PositionWarmer {
       // The inner try/catch handles every error; the outer .catch satisfies no-floating-promises.
       const operation = (async () => {
         try {
-          const result = await deps.warm(bboxes[0]!, settings.sources, minzoom, maxzoom, undefined, bboxes[1], controller.signal)
+          const result = await deps.warm(bboxes[0]!, sources, minzoom, maxzoom, undefined, bboxes[1], controller.signal)
           if (stopped) return
           if (result === null || result.state !== 'done' || result.errors > 0) {
             backOff()

@@ -14,6 +14,7 @@ import { isThirdPartyPmtilesEnabled, watchThirdPartyPmtilesEnabled, type MutualE
 import { registerPmtilesServeRoute, type ServeRouter } from '../http/pmtiles-routes.js'
 import { registerChartManagementRoutes, type ManagementRouter } from '../http/chart-management-routes.js'
 import { OverrideStore } from '../charts/overrides.js'
+import { isWarmableSource, warmableSourceIds, type SourceLookup } from '../charts/source-policy.js'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { readFreeGiB } from '../runtime/free-space.js'
 import { CACHE_CAP_MAX_GIB, CACHE_CAP_MIN_GIB, deriveDefaultCapGiB } from '../shared/cache-cap.js'
@@ -370,10 +371,23 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
     const startupControlToken = getOrCreateControlToken(dataDir)
     controlToken = startupControlToken
     regionsRoutesHandle?.start()
+    // Resolved once and reused by the position warmer below. Null when the ESM catalog import fails,
+    // which also fails the configuration push below, so the warmer finds no configured container and
+    // sends nothing rather than sending an unfiltered selection.
+    let sourceLookup: SourceLookup | null = null
     try {
       const { chartSourceById } = await import('signalk-chart-sources')
-      const unavailable = reconcilePositionWarmSources(dataDir, (id) => chartSourceById(id) !== undefined)
-      if (unavailable.length > 0) app.debug(`Removed unavailable position-warm sources: ${unavailable.join(', ')}`)
+      sourceLookup = chartSourceById
+      // A time-dynamic source is dropped alongside a source the catalog no longer carries: the
+      // container never warms one, so leaving it selected only produces jobs that store nothing.
+      const dropped = reconcilePositionWarmSources(dataDir, (id) => {
+        const source = chartSourceById(id)
+        return source !== undefined && isWarmableSource(source)
+      })
+      // "ahead of time" is the whole distinction: a time-dynamic source still caches on demand under
+      // its declared lifetime, so a log line saying it cannot be cached would send a reader hunting a
+      // bug that is not there.
+      if (dropped.length > 0) app.debug(`Removed position-warm sources that cannot be cached ahead of time: ${dropped.join(', ')}`)
     } catch (error) {
       app.debug('Position-warm source reconciliation failed:', error)
     }
@@ -709,9 +723,11 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
     }
     const regionsLoader = createCachedRegionsLoader(dataDir)
     regionsLoaderStop = regionsLoader.stop
+    const catalog = sourceLookup
     warmer = createPositionWarmer({
       getStore: regionsLoader.getStore,
       onError: (error) => { app.debug('Cannot read position-warm state:', error) },
+      ...(catalog === null ? {} : { selectWarmable: (ids: readonly string[]) => warmableSourceIds(ids, catalog) }),
       warm: async (bbox, sources, minzoom, maxzoom, _regionId, additionalBbox, signal) => {
         const address = tilecacheConfigured ? tilecacheAddress : null
         if (address === null) return null
