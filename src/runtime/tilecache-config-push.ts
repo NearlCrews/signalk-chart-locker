@@ -9,7 +9,7 @@ import { MAX_MANAGED_CONTAINER_ERROR_BYTES, readBoundedResponseText } from './bo
 /** The Signal K server route base the browser reaches the proxy through (for the container style rewrite). */
 export const PLUGIN_PUBLIC_BASE = PLUGIN_MOUNT_PATH
 
-// Chart Locker is a CommonJS Signal K plugin, while chart-sources 0.3.x intentionally exposes an
+// Chart Locker is a CommonJS Signal K plugin, while chart-sources intentionally exposes an
 // ESM-only runtime. Dynamic import is preserved by the NodeNext build and crosses that boundary.
 const chartSources = import('signalk-chart-sources')
 
@@ -45,8 +45,8 @@ export async function buildSourcePayload (
   return { sources: CHART_SOURCES, publicBase, capBytes, regionsBudgetBytes, positionWarmBudgetBytes, scrollTtlSecs, geocodingEnabled }
 }
 
-export type PostJson = (url: string, body: string, headers: Record<string, string>, signal?: AbortSignal) => Promise<Response>
-export type Delay = (ms: number, signal?: AbortSignal) => Promise<void>
+type PostJson = (url: string, body: string, headers: Record<string, string>, signal?: AbortSignal) => Promise<Response>
+type Delay = (ms: number, signal?: AbortSignal) => Promise<void>
 
 export interface TilecacheConfigPushResult {
   ok: boolean

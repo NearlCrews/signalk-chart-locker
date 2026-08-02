@@ -25,8 +25,9 @@ import {
 } from '../runtime/warm-contract.js'
 import { readBoundedResponseJson } from '../runtime/bounded-response.js'
 import { isRecord } from '../shared/record.js'
+import { MIN_WARM_INTERVAL_SECS } from '../runtime/position-warm.js'
 
-// The plugin compiles to CommonJS, while chart-sources 0.3.x exposes an ESM-only runtime.
+// The plugin compiles to CommonJS, while chart-sources exposes an ESM-only runtime.
 const chartSources = import('signalk-chart-sources')
 
 export interface RegionsRequest {
@@ -70,8 +71,6 @@ export interface RegionsRoutesHandle {
   stop: () => Promise<void>
 }
 
-/** The floor for the position-warm interval, enforced server-side as well as in the panel. */
-const MIN_WARM_INTERVAL_SECS = 60
 const MAX_WARM_INTERVAL_SECS = 86_400
 const MAX_WARM_DISTANCE_METERS = 100_000
 const MAX_SOURCE_IDS = 64

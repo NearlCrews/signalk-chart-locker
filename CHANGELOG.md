@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Upgrade `signalk-chart-sources` to 0.7.0, adding twenty catalog sources: the OpenFreeMap Dark
+  basemap, seven NOAA nowCOAST weather and ocean overlays, two GEBCO facets, EMODnet depth
+  contours, four seabed-infrastructure overlays, monthly AIS vessel density, three more Marine
+  Regions jurisdiction layers, and UNESCO World Heritage marine sites. Time-dynamic sources now
+  declare `maxAgeSeconds`, and the tilecache honors it as a ceiling on the freshness window while
+  refusing to warm those sources.
+- Upgrade the configuration panel to `signalk-nearlcrews-ui` 0.5.0. The Advanced section uses the
+  merged collapsible-section primitive, the footer action bar declares its bottom stickiness, cache
+  metrics render value and unit through the metric unit slot, and the save-status indicator uses
+  the shared live-announcement prop. A fresh panel follows the Auto theme rather than pinning
+  Light, and the legacy `cl-theme` key is no longer read.
+- Mirror the chart-sources 0.6 and 0.7 URL expansion changes in the tilecache: WMS base trailing
+  slashes are stripped as ArcGIS already did, and BBOX ordinates snap projection-origin residue to
+  zero, so the container and the package write byte-identical upstream requests.
+- Raise the tilecache style-source capacity from one to four so the shipped light and dark basemaps
+  fit one configuration push, and report configuration-push rejections with a named reason in both
+  the container log and the 400 response body.
+- Refresh the compatible npm, Rust, and browser toolchains. Add a Knip dead-code gate and a native
+  coverage gate (90 percent lines, 80 percent branches, 90 percent functions) to CI and the release
+  preflight, and share one Node test-suite definition between the test and coverage runners.
+
 <a id="v074"></a>
 
 ## [0.7.4] - 2026-07-28

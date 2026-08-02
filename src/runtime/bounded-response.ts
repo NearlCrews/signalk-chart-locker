@@ -1,7 +1,7 @@
 /** Bounded readers for JSON and diagnostic text returned by the managed tilecache container. */
 
 /** Large enough for a MapLibre style document, while preventing an unbounded container response. */
-export const MAX_MANAGED_CONTAINER_JSON_BYTES = 4 * 1024 * 1024
+const MAX_MANAGED_CONTAINER_JSON_BYTES = 4 * 1024 * 1024
 /** Error details are truncated to 500 characters by callers, so a small transport cap is sufficient. */
 export const MAX_MANAGED_CONTAINER_ERROR_BYTES = 16 * 1024
 
@@ -31,7 +31,7 @@ async function cancelResponseBody (response: Pick<Response, 'body'>): Promise<vo
 }
 
 /** Read at most `maxBytes`, bounding both declared and streamed, decompressed response bytes. */
-export async function readBoundedResponseBytes (
+async function readBoundedResponseBytes (
   response: Pick<Response, 'headers' | 'body'>,
   maxBytes = MAX_MANAGED_CONTAINER_JSON_BYTES
 ): Promise<Uint8Array> {

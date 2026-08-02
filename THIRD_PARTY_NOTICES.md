@@ -6,10 +6,12 @@ The published configuration-panel bundle contains code from the following packag
   runtime is bundled, while the core React singleton is provided by the Signal K Admin host.
 - `css-loader` 7.1.4, MIT License, Copyright JS Foundation and other contributors
 - `style-loader` 4.0.0, MIT License, Copyright JS Foundation and other contributors
-- `webpack` 5.109.1, MIT License, Copyright JS Foundation and other contributors
-- `signalk-nearlcrews-ui` 0.4.1, Apache License 2.0, Copyright 2026 Nearl Crews
+- `webpack` 5.109.2, MIT License, Copyright JS Foundation and other contributors
+- `signalk-nearlcrews-ui` 0.5.0, Apache License 2.0, Copyright 2026 Nearl Crews
+- `react-aria` 3.51.0, Apache License 2.0, Copyright 2020 Adobe. Bundled by `signalk-nearlcrews-ui`
+  for its composite widgets.
 
-The Apache License 2.0 text applicable to `signalk-nearlcrews-ui` and the Rust tile-cache workspace is
+The Apache License 2.0 text applicable to `signalk-nearlcrews-ui`, `react-aria`, and the Rust tile-cache workspace is
 included in [LICENSE-APACHE](LICENSE-APACHE). The license texts and package attribution for the locked
 Rust runtime dependency graph are generated in
 [RUST_THIRD_PARTY_LICENSES.md](RUST_THIRD_PARTY_LICENSES.md). Each release image also receives a

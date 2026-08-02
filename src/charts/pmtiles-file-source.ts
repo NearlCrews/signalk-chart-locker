@@ -9,7 +9,7 @@ interface PmtilesFileSourceDeps {
 }
 
 /** A defensive ceiling for one metadata or directory read during discovery. */
-export const MAX_PMTILES_DISCOVERY_READ_BYTES = 16 * 1024 * 1024
+const MAX_PMTILES_DISCOVERY_READ_BYTES = 16 * 1024 * 1024
 
 export class PmtilesFileSource implements Source {
   readonly #filePath: string

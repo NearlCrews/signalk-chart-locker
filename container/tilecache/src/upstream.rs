@@ -6,6 +6,42 @@ use crate::source::{ChartSource, UpstreamTemplate};
 
 const ORIGIN: f64 = 20037508.342789244;
 
+/// Mirror of the package `MAX_TILE_ZOOM`, kept as a named constant because the residue limit is
+/// derived from it just like the package derives its own. The Node integration test in
+/// test/chart-sources-integration.test.ts pins this value to the package's `MAX_TILE_ZOOM`, so a
+/// package bump that moves it fails there instead of silently diverging.
+const MAX_TILE_ZOOM_MIRROR: u32 = 30;
+
+/// Mirror of the package `RESIDUE_LIMIT_METERS`: half the smallest real tile edge, the edge at
+/// `MAX_TILE_ZOOM`, so `ORIGIN / 2^30`. A tile edge on the projection origin is mathematically
+/// zero; a magnitude below this limit is floating-point residue of that zero. The TS copy must snap
+/// it to `0` because `Number#toString` renders it in exponential notation, which the OGC BBOX
+/// grammar rejects. Rust Display never uses exponential notation, but snapping here keeps the two
+/// expansions byte-identical.
+const RESIDUE_LIMIT_METERS: f64 = ORIGIN / (1u64 << MAX_TILE_ZOOM_MIRROR) as f64;
+
+/// One BBOX ordinate as a Display value: sub-limit residue writes as the zero it represents,
+/// everything else writes as the shortest round-trip decimal, matching the package `bboxNumber`.
+/// A Display newtype rather than an owned String keeps a four-ordinate BBOX at one allocation.
+struct BboxNumber(f64);
+
+impl std::fmt::Display for BboxNumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.abs() < RESIDUE_LIMIT_METERS {
+            f.write_str("0")
+        } else {
+            write!(f, "{}", self.0)
+        }
+    }
+}
+
+/// Drop trailing slashes from a base URL, matching the package `withoutTrailingSlashes`. ArcGIS
+/// needs it because the export path is appended and a kept slash would double up; WMS gets the same
+/// treatment so one base cannot produce two spellings of the same request and split the cache.
+fn without_trailing_slashes(base: &str) -> &str {
+    base.trim_end_matches('/')
+}
+
 /// EPSG:3857 bounds [minX, minY, maxX, maxY] of XYZ tile z/x/y. y increases downward.
 pub fn web_mercator_tile_bounds(z: u32, x: u32, y: u32) -> [f64; 4] {
     let size = (2.0 * ORIGIN) / 2f64.powi(z as i32);
@@ -35,7 +71,13 @@ fn in_range(source: &ChartSource, z: u32, x: u32, y: u32) -> Result<(), BadReque
 
 fn bbox_str(z: u32, x: u32, y: u32) -> String {
     let b = web_mercator_tile_bounds(z, x, y);
-    format!("{},{},{},{}", b[0], b[1], b[2], b[3])
+    format!(
+        "{},{},{},{}",
+        BboxNumber(b[0]),
+        BboxNumber(b[1]),
+        BboxNumber(b[2]),
+        BboxNumber(b[3])
+    )
 }
 
 /// Expand the upstream URL for a non-style source at z/x/y. A style source returns its style URL
@@ -58,6 +100,7 @@ pub fn expand_upstream(source: &ChartSource, z: u32, x: u32, y: u32) -> Result<S
             transparent,
         } => {
             in_range(source, z, x, y)?;
+            let base = without_trailing_slashes(base);
             Ok(format!(
                 "{base}?SERVICE=WMS&VERSION={version}&REQUEST=GetMap&LAYERS={layers}&CRS=EPSG:3857&BBOX={}&WIDTH={ts}&HEIGHT={ts}&FORMAT={format}&TRANSPARENT={transparent}&STYLES={styles}",
                 bbox_str(z, x, y),
@@ -66,7 +109,7 @@ pub fn expand_upstream(source: &ChartSource, z: u32, x: u32, y: u32) -> Result<S
         }
         UpstreamTemplate::Arcgis { base } => {
             in_range(source, z, x, y)?;
-            let base = base.trim_end_matches('/');
+            let base = without_trailing_slashes(base);
             Ok(format!(
                 "{base}/export?bbox={}&bboxSR=3857&imageSR=3857&size={ts},{ts}&dpi=96&format=png32&transparent=true&f=image",
                 bbox_str(z, x, y),
@@ -140,5 +183,46 @@ mod tests {
         .unwrap();
         let url = expand_upstream(&source, 0, 0, 0).unwrap();
         assert!(url.starts_with("https://h/MapServer/export?"));
+    }
+
+    #[test]
+    fn wms_normalizes_trailing_slashes() {
+        let source: ChartSource = serde_json::from_str(
+            r#"{"id":"w","title":"W","tileSize":256,"minzoom":0,"maxzoom":18,"attribution":"",
+                "upstream":{"mode":"wms","base":"https://w/wms//","layers":"0","styles":"","version":"1.3.0","format":"image/png","transparent":true}}"#,
+        )
+        .unwrap();
+        let url = expand_upstream(&source, 0, 0, 0).unwrap();
+        assert!(url.starts_with("https://w/wms?SERVICE=WMS"), "{url}");
+    }
+
+    #[test]
+    fn bbox_residue_snaps_to_zero() {
+        assert_eq!(BboxNumber(0.0).to_string(), "0");
+        assert_eq!(BboxNumber(-0.0).to_string(), "0");
+        // 1e-7 is where Number#toString switches to exponential notation; the snap keeps the two
+        // mirrors writing the same "0".
+        assert_eq!(BboxNumber(1e-7).to_string(), "0");
+        assert_eq!(BboxNumber(-1e-7).to_string(), "0");
+        // The limit itself is a genuine tile edge and stays decimal (strict <, as in the package).
+        assert_eq!(
+            BboxNumber(RESIDUE_LIMIT_METERS).to_string(),
+            RESIDUE_LIMIT_METERS.to_string()
+        );
+        assert_eq!(BboxNumber(-ORIGIN).to_string(), "-20037508.342789244");
+    }
+
+    #[test]
+    fn wms_bbox_writes_zero_edges_in_plain_decimal() {
+        // Tile (18, 2^17, 2^17) has two edges on the projection origin.
+        let url = expand_upstream(&wms(), 18, 131_072, 131_072).unwrap();
+        let bbox = url
+            .split("BBOX=")
+            .nth(1)
+            .and_then(|rest| rest.split('&').next())
+            .unwrap();
+        assert!(!bbox.contains(['e', 'E']), "{bbox}");
+        assert!(bbox.starts_with("0,"), "{bbox}");
+        assert!(bbox.ends_with(",0"), "{bbox}");
     }
 }

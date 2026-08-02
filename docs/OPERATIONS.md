@@ -169,6 +169,7 @@ The panel reads these counters from `/api/cache/stats`:
 Relevant structured container events include:
 
 - `event=config_push_applied`
+- `event=config_rejected` (the 400 body carries the same guard reason back to the plugin)
 - `event=warm_rejected`
 - `event=cache_read_failed`
 - `event=cache_write_failed`

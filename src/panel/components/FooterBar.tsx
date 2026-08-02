@@ -60,14 +60,13 @@ export default memo(function FooterBar ({ dirty, unconfigured, justSavedAt, onSa
 
   return (
     <ActionBar
-      sticky
+      sticky='bottom'
       data-panel-action-bar=''
       statusRef={statusRef}
       status={
         <StatusIndicator
           tone={statusTone}
-          role={valid ? 'status' : undefined}
-          aria-live={valid ? 'polite' : 'off'}
+          live={valid ? 'polite' : 'off'}
         >
           {statusText}
         </StatusIndicator>

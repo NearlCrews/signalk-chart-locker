@@ -41,6 +41,7 @@ const normalizedModulePaths = modules
 const expectedBundledPackages = new Set([
   'css-loader',
   'react',
+  'react-aria',
   'signalk-nearlcrews-ui',
   'style-loader'
 ])
@@ -88,7 +89,9 @@ for (const packageName of [...expectedBundledPackages, 'webpack']) {
   }
 }
 
-const PANEL_GZIP_LIMIT_BYTES = 27 * 1024
+// React Aria (bundled for the nearlcrews-ui composite widgets) raised the measured bundle to
+// ~33.5 KiB; the ceiling keeps a small margin above that.
+const PANEL_GZIP_LIMIT_BYTES = 36 * 1024
 const panelGzipBytes = bundles.reduce((total, { source }) => total + gzipSync(source, { level: 9 }).length, 0)
 if (panelGzipBytes > PANEL_GZIP_LIMIT_BYTES) {
   throw new Error(`panel bundle is ${panelGzipBytes} gzip bytes; limit is ${PANEL_GZIP_LIMIT_BYTES}`)

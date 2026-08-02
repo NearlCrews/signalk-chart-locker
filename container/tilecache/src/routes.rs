@@ -299,6 +299,34 @@ struct ConfigBody {
 
 const MAX_CONFIG_SOURCES: usize = 128;
 
+/// The scroll-tile TTL ceiling: one year in seconds. Shared by the config push and the live
+/// scroll-ttl route so the two accept the same range.
+const MAX_SCROLL_TTL_SECS: i64 = 365 * 86_400;
+
+/// Why a config push was rejected. The closed set is named so each reason string exists once; the
+/// string reaches both the container log and the 400 response body.
+enum ConfigRejection {
+    TooManySources,
+    TooManyStyleSources,
+    InvalidSource,
+    InvalidPublicBase,
+    InvalidBudget,
+    InvalidTtl,
+}
+
+impl ConfigRejection {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::TooManySources => "too_many_sources",
+            Self::TooManyStyleSources => "too_many_style_sources",
+            Self::InvalidSource => "invalid_source",
+            Self::InvalidPublicBase => "invalid_public_base",
+            Self::InvalidBudget => "invalid_budget",
+            Self::InvalidTtl => "invalid_ttl",
+        }
+    }
+}
+
 enum CapEnforcement {
     Applied,
     Irreducible { pinned_bytes: i64 },
@@ -345,11 +373,6 @@ async fn config(
             )
         })
         .count();
-    let invalid_sources = body.sources.len() > MAX_CONFIG_SOURCES
-        || style_source_count > crate::style::MAX_LEARNED_STYLE_ENTRIES
-        || body.sources.iter().any(|source| {
-            !source.is_valid(st.knobs.allow_private_egress) || !ids.insert(source.id.as_str())
-        });
     let invalid_public_base = body.public_base.as_ref().is_some_and(|base| {
         !base.starts_with('/')
             || base.starts_with("//")
@@ -357,16 +380,31 @@ async fn config(
             || base.chars().any(|ch| ch.is_control() || ch.is_whitespace())
             || base.contains(['\\', '?', '#'])
     });
-    if invalid_sources
-        || invalid_public_base
-        || cap <= 0
-        || regions < 0
-        || regions > cap
-        || position < 0
-        || position > regions
-        || !(0..=365 * 86_400).contains(&ttl)
-    {
-        return StatusCode::BAD_REQUEST.into_response();
+    // The rejection reason reaches the operator twice: the container log and the 400 body, which
+    // the plugin's push client reads into its own error. A silent 400 leaves a failed push with no
+    // way to tell which guard tripped. Source validity and dedup run before the style-count guard
+    // so a payload failing both is blamed on the disqualifying condition, not the count.
+    let rejection = if body.sources.len() > MAX_CONFIG_SOURCES {
+        Some(ConfigRejection::TooManySources)
+    } else if body.sources.iter().any(|source| {
+        !source.is_valid(st.knobs.allow_private_egress) || !ids.insert(source.id.as_str())
+    }) {
+        Some(ConfigRejection::InvalidSource)
+    } else if style_source_count > crate::style::MAX_LEARNED_STYLE_ENTRIES {
+        Some(ConfigRejection::TooManyStyleSources)
+    } else if invalid_public_base {
+        Some(ConfigRejection::InvalidPublicBase)
+    } else if cap <= 0 || regions < 0 || regions > cap || position < 0 || position > regions {
+        Some(ConfigRejection::InvalidBudget)
+    } else if !(0..=MAX_SCROLL_TTL_SECS).contains(&ttl) {
+        Some(ConfigRejection::InvalidTtl)
+    } else {
+        None
+    };
+    if let Some(rejection) = rejection {
+        let reason = rejection.as_str();
+        eprintln!("event=config_rejected reason={reason}");
+        return (StatusCode::BAD_REQUEST, reason).into_response();
     }
     let source_count = body.sources.len();
     // Odd means a replacement is in progress. Generation-aware warm and style work refuses to commit
@@ -466,7 +504,7 @@ async fn set_scroll_ttl(
     if !mutation_authorized(&st, &headers) {
         return StatusCode::UNAUTHORIZED;
     }
-    if !(0..=365 * 86_400).contains(&body.ttl_secs) {
+    if !(0..=MAX_SCROLL_TTL_SECS).contains(&body.ttl_secs) {
         return StatusCode::BAD_REQUEST;
     }
     st.live_scroll_ttl_secs
@@ -1120,6 +1158,79 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(geocode.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn config_accepts_style_sources_up_to_the_learned_limit_then_caps() {
+        let db = NamedTempFile::new().unwrap();
+        let state = dev_state(&db);
+        let router = app(state.clone());
+        // The shipped catalog carries a light and a dark basemap; both must fit one config push.
+        let accepted = router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "sources": [
+                            crate::style::style_source_json("basemap", 1),
+                            crate::style::style_source_json("basemap-dark", 1)
+                        ] })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::NO_CONTENT);
+        assert_eq!(state.sources.read().await.len(), 2);
+
+        // The learned set admits exactly MAX distinct ids; pin the accept side of the boundary so a
+        // guard flipped from > to >= cannot silently shrink capacity below the learn-side bound.
+        let at_limit: Vec<_> = (0..crate::style::MAX_LEARNED_STYLE_ENTRIES)
+            .map(|index| crate::style::style_source_json(&format!("style{index}"), 1))
+            .collect();
+        let accepted_at_limit = router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "sources": at_limit }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted_at_limit.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            state.sources.read().await.len(),
+            crate::style::MAX_LEARNED_STYLE_ENTRIES
+        );
+
+        let too_many: Vec<_> = (0..=crate::style::MAX_LEARNED_STYLE_ENTRIES)
+            .map(|index| crate::style::style_source_json(&format!("style{index}"), 1))
+            .collect();
+        let rejected = router
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "sources": too_many }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        // The reason reaches the push client through the 400 body, not only the container log.
+        let body = rejected.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body.as_ref(), b"too_many_style_sources");
+        assert_eq!(
+            state.sources.read().await.len(),
+            crate::style::MAX_LEARNED_STYLE_ENTRIES,
+            "a rejected push leaves the previously accepted config in place",
+        );
     }
 
     #[tokio::test]

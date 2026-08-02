@@ -4,11 +4,9 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ContainerConfig, ContainerUpdateService } from '../shared/types.js'
 import { PLUGIN_ID, PLUGIN_REPO_SLUG } from '../shared/plugin-id.js'
-import { makeContainerHealthcheck, probeContainerHealth, probeContainerHealthStatus, type FetchLike } from './container-health.js'
+import { makeContainerHealthcheck, probeContainerHealth, probeContainerHealthStatus } from './container-health.js'
 import { CACHE_CAP_STATIC_DEFAULT_GIB } from '../shared/cache-cap.js'
 import { migrateLegacyTilecacheTag } from '../shared/tilecache-tag.js'
-
-export type { FetchLike }
 
 export const TILECACHE_CONTAINER_NAME = 'chart-locker-tilecache'
 export const TILECACHE_INTERNAL_PORT = 8080
@@ -35,7 +33,7 @@ export const PLUGIN_VERSION = packageVersion()
 export const DEFAULT_TILECACHE_TAG = `v${PLUGIN_VERSION}`
 
 /** The single trim-and-default rule for the container image tag, shared by the container config and the update registration so the badge always reports the tag the container actually runs. */
-export function resolveTilecacheTag (rawTag?: string): string {
+function resolveTilecacheTag (rawTag?: string): string {
   return migrateLegacyTilecacheTag(rawTag) || DEFAULT_TILECACHE_TAG
 }
 

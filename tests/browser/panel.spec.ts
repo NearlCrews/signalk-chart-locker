@@ -6,11 +6,22 @@ import { resolve } from 'node:path'
 // The bundled UI package version, asserted against the served root so a dependency bump that does
 // not reach the bundle fails here instead of shipping a stale runtime. Read from the file because
 // the package's exports map does not expose its package.json for import.
-const snuiVersion = (
-  JSON.parse(
-    readFileSync(resolve('node_modules/signalk-nearlcrews-ui/package.json'), 'utf8')
-  ) as { version: string }
-).version
+const snuiPackage: unknown = JSON.parse(
+  readFileSync(resolve('node_modules/signalk-nearlcrews-ui/package.json'), 'utf8')
+)
+if (typeof snuiPackage !== 'object' || snuiPackage === null ||
+    !('version' in snuiPackage) || typeof snuiPackage.version !== 'string') {
+  throw new Error('signalk-nearlcrews-ui package.json carries no version string')
+}
+const snuiVersion = snuiPackage.version
+
+// The theme storage key, read from the package source because the exports map exposes only the ESM
+// root, which the CommonJS-transformed spec cannot require. Keeps the persistence assertion on the
+// library's published key rather than a restated literal.
+const themeStorageKey = /THEME_STORAGE_KEY = "([^"]+)"/.exec(
+  readFileSync(resolve('node_modules/signalk-nearlcrews-ui/dist/theme/contract.js'), 'utf8')
+)?.[1]
+if (themeStorageKey === undefined) throw new Error('THEME_STORAGE_KEY not found in the signalk-nearlcrews-ui theme contract')
 
 async function expectVisibleFocusRing (control: Locator): Promise<void> {
   const outline = await control.evaluate((element) => {
@@ -41,7 +52,7 @@ test.beforeEach(async ({ page }) => {
   await page.goto('/')
   await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
   await expect(page.getByRole('heading', { name: 'Plugin status' })).toBeVisible()
-  await expect(page.getByText('700.0 MiB')).toBeVisible()
+  await expect(page.getByRole('group', { name: 'Used' })).toContainText('700.0 MiB')
 })
 
 test('loads the production remote and completes save and discard flows', async ({ page }) => {
@@ -94,9 +105,9 @@ test('opens Advanced when a stored setting is invalid', async ({ page }) => {
   await page.goto('/?invalid-advanced')
   await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
 
-  const advanced = page.locator('details').filter({ has: page.getByText('Advanced', { exact: true }) })
+  const advanced = page.getByRole('button', { name: 'Advanced', exact: true })
   const imageTag = page.getByRole('textbox', { name: 'Tile cache container image tag' })
-  await expect(advanced).toHaveAttribute('open', '')
+  await expect(advanced).toHaveAttribute('aria-expanded', 'true')
   await expect(page.getByText('The container image tag is not a valid OCI tag.')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeDisabled()
   await expect(imageTag).toHaveAttribute('aria-invalid', 'true')
@@ -104,12 +115,13 @@ test('opens Advanced when a stored setting is invalid', async ({ page }) => {
   await imageTag.fill('test-build')
   await expect(imageTag).not.toHaveAttribute('aria-invalid')
   await expect(imageTag).toBeFocused()
-  await expect(advanced).toHaveAttribute('open', '')
+  await expect(advanced).toHaveAttribute('aria-expanded', 'true')
 })
 
 test('saves the optional place-name lookup preference', async ({ page }) => {
-  const advanced = page.locator('details').filter({ has: page.getByText('Advanced', { exact: true }) })
-  await advanced.getByText('Advanced', { exact: true }).click()
+  const advanced = page.getByRole('button', { name: 'Advanced', exact: true })
+  await advanced.click()
+  await expect(advanced).toHaveAttribute('aria-expanded', 'true')
 
   const geocoding = page.getByRole('checkbox', { name: 'Enable place-name lookup' })
   await expect(geocoding).toBeChecked()
@@ -122,17 +134,22 @@ test('saves the optional place-name lookup preference', async ({ page }) => {
 test('uses an inline confirmation for destructive cache clearing', async ({ page }) => {
   const clearButton = page.getByRole('button', { name: 'Clear scroll cache', exact: true }).first()
   await clearButton.click()
-  await expect(page.getByRole('heading', { name: 'Clear scroll cache?' })).toBeVisible()
+  const confirmation = page.getByRole('region', { name: 'Clear scroll cache?' })
+  await expect(confirmation).toBeVisible()
+  // Since signalk-nearlcrews-ui 0.5.0, the labelled confirmation container takes focus on open so
+  // the message is announced; the Cancel and Confirm actions follow in the tab order.
+  await expect(confirmation).toBeFocused()
 
-  const cancelButton = page.getByRole('button', { name: 'Cancel' })
-  await expect(cancelButton).toBeFocused()
+  const cancelButton = confirmation.getByRole('button', { name: 'Cancel' })
   await cancelButton.click()
   await expect(clearButton).toBeFocused()
   await expect(page.locator('body')).not.toHaveAttribute('data-clear-request-count')
 
   await clearButton.click()
   await page.keyboard.press('Tab')
-  const confirmButton = page.getByRole('button', { name: 'Clear scroll cache', exact: true }).last()
+  await expect(cancelButton).toBeFocused()
+  await page.keyboard.press('Tab')
+  const confirmButton = confirmation.getByRole('button', { name: 'Clear scroll cache', exact: true })
   await expect(confirmButton).toBeFocused()
   await page.keyboard.press('Enter')
   await expect(page.locator('body')).toHaveAttribute('data-clear-request-count', '1')
@@ -143,7 +160,7 @@ test('uses an inline confirmation for destructive cache clearing', async ({ page
 test('runs cache and chart actions with stable focus, loading state, and repeat suppression', async ({ page }) => {
   await page.goto('/?hold-actions')
   await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
-  await expect(page.getByText('700.0 MiB')).toBeVisible()
+  await expect(page.getByRole('group', { name: 'Used' })).toContainText('700.0 MiB')
 
   const body = page.locator('body')
   const retention = page.getByRole('spinbutton', { name: 'Scroll cache retention (days)' })
@@ -185,9 +202,9 @@ test('runs cache and chart actions with stable focus, loading state, and repeat 
 
   const clear = page.getByRole('button', { name: 'Clear scroll cache', exact: true }).first()
   await clear.click()
-  const confirmation = page.getByRole('heading', { name: 'Clear scroll cache?' }).locator('..')
+  const confirmation = page.getByRole('region', { name: 'Clear scroll cache?' })
   const confirmClear = confirmation.getByRole('button', { name: /Clear scroll cache/ })
-  await expect(page.getByRole('button', { name: 'Cancel' })).toBeFocused()
+  await expect(confirmation).toBeFocused()
 
   await rescan.click()
   await expect(body).toHaveAttribute('data-fixture-pending-action', 'rescan')
@@ -206,7 +223,7 @@ test('runs cache and chart actions with stable focus, loading state, and repeat 
   await expect(rescan).not.toHaveAttribute('aria-busy')
   await expect(rescan).toBeFocused()
   await expect(confirmClear).not.toHaveAttribute('aria-busy')
-  await page.getByRole('button', { name: 'Cancel' }).click()
+  await confirmation.getByRole('button', { name: 'Cancel' }).click()
 })
 
 test('waits out an older cache poll and refreshes again after a mutation', async ({ page }) => {
@@ -233,12 +250,12 @@ test('waits out an older cache poll and refreshes again after a mutation', async
 test('reports action failures and keeps the last successful live data visible', async ({ page }) => {
   await page.goto('/?fail-retention')
   await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
-  await expect(page.getByText('700.0 MiB')).toBeVisible()
+  await expect(page.getByRole('group', { name: 'Used' })).toContainText('700.0 MiB')
 
   await page.getByRole('spinbutton', { name: 'Scroll cache retention (days)' }).fill('31')
   await page.getByRole('button', { name: 'Apply retention', exact: true }).click()
   await expect(page.getByText('Panel action failed: HTTP 503', { exact: true })).toBeVisible()
-  await expect(page.getByText('700.0 MiB')).toBeVisible()
+  await expect(page.getByRole('group', { name: 'Used' })).toContainText('700.0 MiB')
 })
 
 test('explains unavailable filesystem guidance and failed live-data refreshes', async ({ page }) => {
@@ -251,14 +268,14 @@ test('explains unavailable filesystem guidance and failed live-data refreshes', 
   await page.goto('/?fail-cache-info')
   await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
   await expect(page.getByText('Filesystem-specific cache guidance is unavailable: HTTP 503.')).toBeVisible()
-  await expect(page.getByText('700.0 MiB')).toBeVisible()
+  await expect(page.getByRole('group', { name: 'Used' })).toContainText('700.0 MiB')
 
   await page.goto('/?fail-cache-refresh')
   await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
-  await expect(page.getByText('700.0 MiB')).toBeVisible()
+  await expect(page.getByRole('group', { name: 'Used' })).toContainText('700.0 MiB')
   await page.getByRole('button', { name: /Refresh/ }).click()
   await expect(page.getByText('Cache statistics refresh failed: HTTP 503.')).toBeVisible()
-  await expect(page.getByText('700.0 MiB')).toBeVisible()
+  await expect(page.getByRole('group', { name: 'Used' })).toContainText('700.0 MiB')
 })
 
 test('supports keyboard operation and visible focus in every explicit theme', async ({ page }) => {
@@ -268,19 +285,18 @@ test('supports keyboard operation and visible focus in every explicit theme', as
   const dark = page.getByRole('radio', { name: 'Dark' })
   const night = page.getByRole('radio', { name: 'Night' })
 
-  // Since signalk-nearlcrews-ui 0.3.0, a fresh profile defaults to the explicit Light theme, and
-  // the radio group's roving tabindex follows the checked option, so Tab lands on Light.
+  // Since signalk-nearlcrews-ui 0.5.0, a fresh profile resolves to Auto (no explicit theme
+  // attribute), and the radio group's roving tabindex follows the checked option, so Tab lands on
+  // Auto. Arrow keys move the selection through the explicit themes.
   await page.locator('body').click({ position: { x: 1, y: 1 } })
   await page.keyboard.press('Tab')
-  await expect(light).toBeFocused()
-  await expect(root).toHaveAttribute('data-snui-theme', 'light')
-  await expectVisibleFocusRing(light)
-  await page.keyboard.press('ArrowLeft')
   await expect(auto).toBeFocused()
+  await expect(root).not.toHaveAttribute('data-snui-theme')
   await expectVisibleFocusRing(auto)
   await page.keyboard.press('ArrowRight')
   await expect(light).toBeFocused()
   await expect(root).toHaveAttribute('data-snui-theme', 'light')
+  await expectVisibleFocusRing(light)
   await page.keyboard.press('ArrowRight')
   await expect(dark).toBeFocused()
   await expect(root).toHaveAttribute('data-snui-theme', 'dark')
@@ -303,18 +319,12 @@ test('supports keyboard operation and visible focus in every explicit theme', as
   await expect(clear).toBeFocused()
 })
 
-test('migrates the legacy preference and supports every theme', async ({ page }) => {
-  await page.evaluate(() => {
-    localStorage.removeItem('signalk-nearlcrews-ui.theme.v1')
-    localStorage.setItem('cl-theme', 'night')
-  })
-  await page.reload()
-  await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
+test('supports every theme and persists the choice', async ({ page }) => {
+  // The legacy cl-theme key is no longer read: since signalk-nearlcrews-ui 0.5.0 the theme
+  // resolves from the single signalk-nearlcrews-ui.theme.v1 key, and an unresolved preference
+  // falls to Auto rather than Light.
   const root = page.locator('[data-snui-root]')
-  await expect(root).toHaveAttribute('data-snui-theme', 'night')
-  await expect
-    .poll(() => page.evaluate(() => localStorage.getItem('signalk-nearlcrews-ui.theme.v1')))
-    .toBe('night')
+  await expect(root).not.toHaveAttribute('data-snui-theme')
 
   const themeGroup = page.getByRole('radiogroup', { name: 'Panel theme' })
   for (const [label, value] of [
@@ -324,6 +334,9 @@ test('migrates the legacy preference and supports every theme', async ({ page })
   ] as const) {
     await themeGroup.getByRole('radio', { name: label }).click()
     await expect(root).toHaveAttribute('data-snui-theme', value)
+    await expect
+      .poll(() => page.evaluate((key) => localStorage.getItem(key), themeStorageKey))
+      .toBe(value)
   }
   await themeGroup.getByRole('radio', { name: 'Auto' }).click()
   await expect(root).not.toHaveAttribute('data-snui-theme')
@@ -331,7 +344,7 @@ test('migrates the legacy preference and supports every theme', async ({ page })
 
 test('has no Axe findings or page overflow at 320 pixels', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 900 })
-  await page.getByText('700.0 MiB').waitFor()
+  await page.getByRole('group', { name: 'Used' }).waitFor()
 
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)
   expect(overflow).toBeLessThanOrEqual(0)

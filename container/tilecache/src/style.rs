@@ -26,9 +26,10 @@ const MAX_FONTSTACKS: usize = 64;
 const MAX_TEMPLATES_PER_SOURCE: usize = 4;
 const MAX_STYLE_URL_BYTES: usize = 4096;
 const MAX_STYLE_SOURCE_NAME_BYTES: usize = 256;
-/// Chart Locker currently exposes one vector basemap style. Bounding the configured and learned set
-/// prevents persistent parsed style documents from scaling with the generic 128-source catalog limit.
-pub(crate) const MAX_LEARNED_STYLE_ENTRIES: usize = 1;
+/// Chart Locker ships two vector basemap styles (light and dark). The bound leaves headroom for
+/// near-term variants while keeping persistent parsed style documents from scaling with the generic
+/// 128-source catalog limit.
+pub(crate) const MAX_LEARNED_STYLE_ENTRIES: usize = 4;
 /// A map style is metadata, not a tile. Keep its parsed persistent representation far below the tile
 /// body cap while leaving ample room for the shipped OpenFreeMap style.
 pub(crate) const MAX_STYLE_JSON_BYTES: usize = 1024 * 1024;
@@ -1063,6 +1064,26 @@ where
     resp
 }
 
+/// Shared JSON spelling of a style ChartSource for config-route tests across the crate. The host
+/// is a publicly spelled name, so validity always passes and both acceptance and rejection pin the
+/// style-count guard itself rather than source validation.
+#[cfg(test)]
+pub(crate) fn style_source_json(id: &str, maxzoom: u32) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "title": "S",
+        "tileSize": 256,
+        "minzoom": 0,
+        "maxzoom": maxzoom,
+        "attribution": "",
+        "upstream": {
+            "mode": "style",
+            "styleUrl": format!("https://t/{id}"),
+            "allowedHosts": ["t"]
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1433,12 +1454,10 @@ mod tests {
         let db = NamedTempFile::new().unwrap();
         let state = dev_state(&db);
         let router = app(state.clone());
-        let body = r#"{"sources":[
-            {"id":"style-a","title":"A","tileSize":256,"minzoom":0,"maxzoom":20,"attribution":"",
-             "upstream":{"mode":"style","styleUrl":"http://127.0.0.1/a","allowedHosts":["127.0.0.1"]}},
-            {"id":"style-b","title":"B","tileSize":256,"minzoom":0,"maxzoom":20,"attribution":"",
-             "upstream":{"mode":"style","styleUrl":"http://127.0.0.1/b","allowedHosts":["127.0.0.1"]}}
-        ]}"#;
+        let sources: Vec<_> = (0..=super::MAX_LEARNED_STYLE_ENTRIES)
+            .map(|index| super::style_source_json(&format!("style-{index}"), 20))
+            .collect();
+        let body = serde_json::json!({ "sources": sources }).to_string();
         let response = router
             .oneshot(
                 Request::post("/config")

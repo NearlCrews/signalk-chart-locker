@@ -16,11 +16,11 @@ export const CACHE_CAP_STEP_GIB = 4
 export const CACHE_CAP_STATIC_DEFAULT_GIB = 8
 /** Below this much free space, the more conservative percentage applies, to leave more headroom on a
  *  small disk. */
-export const CACHE_CAP_LOW_FREE_THRESHOLD_GIB = 16
+const CACHE_CAP_LOW_FREE_THRESHOLD_GIB = 16
 /** Percentage of free space used at or above the low-free threshold. */
-export const CACHE_CAP_DEFAULT_PERCENTAGE = 0.8
+const CACHE_CAP_DEFAULT_PERCENTAGE = 0.8
 /** Percentage of free space used below the low-free threshold. */
-export const CACHE_CAP_LOW_FREE_PERCENTAGE = 0.5
+const CACHE_CAP_LOW_FREE_PERCENTAGE = 0.5
 
 /**
  * Round a value down to the nearest multiple of `step`, never below zero. A non-finite value or a

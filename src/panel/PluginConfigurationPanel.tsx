@@ -13,7 +13,7 @@ import {
   Button,
   Checkbox,
   Cluster,
-  Disclosure,
+  CollapsibleSection,
   InlineConfirm,
   Metric,
   MetricGrid,
@@ -50,11 +50,17 @@ const SAVED_NOTICE_MS = 2500
 
 type PanelAction = 'retention' | 'clear-scroll' | 'refresh-cache' | 'rescan-charts'
 
+/** Split a byte count into a value and its unit, for the Metric unit suffix slot. */
+function splitBytes (bytes: number | null): { value: string, unit?: string } {
+  if (bytes === null) return { value: 'Unknown' }
+  if (bytes < 1024 ** 2) return { value: `${Math.round(bytes / 1024)}`, unit: 'KiB' }
+  if (bytes < 1024 ** 3) return { value: (bytes / 1024 ** 2).toFixed(1), unit: 'MiB' }
+  return { value: (bytes / 1024 ** 3).toFixed(1), unit: 'GiB' }
+}
+
 function formatBytes (bytes: number | null): string {
-  if (bytes === null) return 'Unknown'
-  if (bytes < 1024 ** 2) return `${Math.round(bytes / 1024)} KiB`
-  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`
-  return `${(bytes / 1024 ** 3).toFixed(1)} GiB`
+  const { value, unit } = splitBytes(bytes)
+  return unit === undefined ? value : `${value} ${unit}`
 }
 
 interface Props {
@@ -211,7 +217,7 @@ function SupportedPluginConfigurationPanel ({ configuration, save }: Props): Rea
   const slowUpstream = Object.entries(cache.stats?.upstream ?? {}).some(([, upstream]) => upstream.slow)
 
   return (
-    <PanelRoot legacyThemeStorageKeys={['cl-theme']}>
+    <PanelRoot>
       <Stack gap={4}>
         <Cluster justify='end'>
           <ThemeToggle />
@@ -255,14 +261,17 @@ function SupportedPluginConfigurationPanel ({ configuration, save }: Props): Rea
                     ? <Banner tone='warning' live='polite'>Cache statistics refresh failed: {cache.error}. Showing the last successful result.</Banner>
                     : null}
                   <MetricGrid>
-                    {[
-                      ['Used', formatBytes(cache.stats.bytes)],
-                      ['Capacity', formatBytes(cache.stats.cap)],
-                      ['Saved regions', formatBytes(cache.stats.pinnedBytes)],
-                      ['Scroll cache', formatBytes(cache.stats.scrollBytes)],
-                      ['Region headroom', formatBytes(cache.stats.regionsFreeBytes)],
-                      ['Filesystem free', formatBytes(cache.stats.availableBytes)]
-                    ].map(([label, value]) => <Metric key={label} label={label} value={value} />)}
+                    {([
+                      ['Used', cache.stats.bytes],
+                      ['Capacity', cache.stats.cap],
+                      ['Saved regions', cache.stats.pinnedBytes],
+                      ['Scroll cache', cache.stats.scrollBytes],
+                      ['Region headroom', cache.stats.regionsFreeBytes],
+                      ['Filesystem free', cache.stats.availableBytes]
+                    ] as const).map(([label, bytes]) => {
+                      const { value, unit } = splitBytes(bytes)
+                      return <Metric key={label} label={label} value={value} unit={unit} />
+                    })}
                   </MetricGrid>
 
                   <NumberField
@@ -457,7 +466,7 @@ function SupportedPluginConfigurationPanel ({ configuration, save }: Props): Rea
           </Stack>
         </Section>
 
-        <Disclosure
+        <CollapsibleSection
           title='Advanced'
           open={advancedOpen}
           onOpenChange={setAdvancedOpen}
@@ -509,7 +518,7 @@ function SupportedPluginConfigurationPanel ({ configuration, save }: Props): Rea
               }
             />
           </Stack>
-        </Disclosure>
+        </CollapsibleSection>
 
         <FooterBar
           dirty={dirty}

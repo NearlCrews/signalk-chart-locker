@@ -5,7 +5,7 @@ import type { ContainerManager } from '../shared/types.js'
 
 /** The global key signalk-container publishes its manager on, mirrored by BRIDGE_GLOBAL_KEY for the bridge. */
 export const CONTAINER_MANAGER_GLOBAL_KEY = '__signalk_containerManager'
-export const CONTAINER_READY_TIMEOUT_MS = 30_000
+const CONTAINER_READY_TIMEOUT_MS = 30_000
 
 type ReadinessOutcome = 'ready' | 'timeout' | 'aborted' | { error: unknown }
 

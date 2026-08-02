@@ -26,7 +26,6 @@ test('NOAA ENC regions outside catalog coverage count and estimate as zero', asy
 test('NOAA ENC coverage produces nonzero estimates limited below its display envelope', async () => {
   const {
     chartSourceById,
-    DEFAULT_TILE_BYTES,
     DEFAULT_TILE_BYTES_BY_MODE,
     estimateBytes,
     tileCountInBbox
@@ -42,12 +41,21 @@ test('NOAA ENC coverage produces nonzero estimates limited below its display env
     assert.ok(estimate > 0)
     assert.equal(
       estimate,
-      coveredTiles * (source.fallbackTileBytes ?? DEFAULT_TILE_BYTES_BY_MODE[source.upstream.mode] ?? DEFAULT_TILE_BYTES)
+      coveredTiles * (source.fallbackTileBytes ?? DEFAULT_TILE_BYTES_BY_MODE[source.upstream.mode])
     )
   }
 })
 
-test('signalk-chart-sources 0.5 counts duplicate source ids once', async () => {
+test('the Rust BBOX residue limit tracks the package MAX_TILE_ZOOM', async () => {
+  const { MAX_TILE_ZOOM } = await chartSources
+  // container/tilecache/src/upstream.rs derives RESIDUE_LIMIT_METERS from its MAX_TILE_ZOOM_MIRROR
+  // the same way. A package bump that moves the zoom ceiling fails here until the Rust mirror and
+  // this literal move with it.
+  const ORIGIN_METERS = 20037508.342789244
+  assert.equal(((2 * ORIGIN_METERS) / 2 ** MAX_TILE_ZOOM) / 2, ORIGIN_METERS / 1_073_741_824)
+})
+
+test('signalk-chart-sources counts duplicate source ids once', async () => {
   const { estimateBytes } = await chartSources
   const once = estimateBytes(['depth-noaa-enc'], WORLD, COVERAGE_ZOOMS, {})
   assert.equal(estimateBytes(['depth-noaa-enc', 'depth-noaa-enc'], WORLD, COVERAGE_ZOOMS, {}), once)

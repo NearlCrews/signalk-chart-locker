@@ -1,8 +1,8 @@
 /** Periodically verifies the host-side container endpoint and repairs a wedged port forward. */
 
-export const HOST_HEALTH_INTERVAL_MS = 30_000
-export const HOST_HEALTH_FAILURE_THRESHOLD = 3
-export const HOST_HEALTH_RECOVERY_COOLDOWN_MS = 5 * 60_000
+const HOST_HEALTH_INTERVAL_MS = 30_000
+const HOST_HEALTH_FAILURE_THRESHOLD = 3
+const HOST_HEALTH_RECOVERY_COOLDOWN_MS = 5 * 60_000
 
 export type HostHealthState =
   | { status: 'healthy' }
