@@ -80,7 +80,12 @@ pub enum StartError {
     BadZoom(String),
     TooMany(u64),
     TooManyJobs,
-    MultipleStyleSources,
+    /// More style sources than the container can hold learned state for, so at least one could not
+    /// be expanded into its vector sub-sources.
+    TooManyStyleSources(usize),
+    /// Every selected source is time-dynamic, so there is nothing to warm. Distinct from a bad bbox
+    /// because the two send an operator looking in opposite directions.
+    AllSourcesTimeDynamic(String),
     RegionBusy,
     BadRegion(String),
     ShuttingDown,
@@ -186,8 +191,11 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
                 Some(known) if matches!(known.upstream, UpstreamTemplate::Style { .. }) => {
                     resolved.push(known.clone());
                     style_sources += 1;
-                    if style_sources > 1 {
-                        return Err(StartError::MultipleStyleSources);
+                    // The ceiling is what the container can keep learned state for, not one: the
+                    // catalog ships a light and a dark basemap, and a boat that saves a region for a
+                    // passage wants both, since one of them is the one it can read at night.
+                    if style_sources > crate::style::MAX_LEARNED_STYLE_ENTRIES {
+                        return Err(StartError::TooManyStyleSources(style_sources));
                     }
                     // The style is not fetched yet, so count one sub-source's worth at the registry
                     // vector maxzoom for the hard-cap gate; run() enumerates each learned sub-source.
@@ -221,12 +229,13 @@ pub async fn start_warm(state: &AppState, req: WarmRequest) -> Result<String, St
     }
     if total == 0 {
         // Distinguish the two ways a job can end up with nothing to do, so the operator is not told
-        // their bbox is wrong when the real answer is that weather layers are never warmed.
+        // their bbox is wrong when the real answer is that weather layers are never warmed. The
+        // rejection carries its own variant so the container log names the real reason too: the log
+        // line is what someone reads while debugging a warm that will not start.
         if !volatile_skipped.is_empty() {
-            return Err(StartError::BadBbox(format!(
-                "every selected source is time-dynamic and is never warmed: {}",
-                volatile_skipped.join(", ")
-            )));
+            return Err(StartError::AllSourcesTimeDynamic(
+                volatile_skipped.join(", "),
+            ));
         }
         return Err(StartError::BadBbox(
             "bbox does not intersect the selected sources".into(),
@@ -628,6 +637,17 @@ async fn flush_pinned(st: &AppState, batch: &mut Vec<WarmRow>, region: &str, bud
 // WarmRow with the synthetic key. Builds the WarmRow directly rather than through warm_one because the
 // sprite JSON is rejected by the tile content-type gate. The caller holds the warm-semaphore permit for
 // this task (like warm_one), so this does not take one.
+/// One queued asset fetch: its cache source, the synthetic x the key uses, the upstream URL, the
+/// validator to apply, and the allowed-host list of the style it belongs to. The cache source and the
+/// host list are shared so a fontstack's 48 ranges reuse one allocation each.
+type AssetJob = (
+    Arc<str>,
+    u32,
+    String,
+    crate::style::StyleAssetKind,
+    Arc<Vec<String>>,
+);
+
 struct WarmAssetSpec<'a> {
     cache_source: &'a str,
     x: u32,
@@ -758,13 +778,18 @@ async fn warm_one_asset(
     }
 }
 
-// Warm the global basemap glyphs and the sprite once, cache-first per key, pinned under
+// Warm the glyphs and the sprite of every selected style, cache-first per key, pinned under
 // __basemap_assets__. Single-flight via the AppState flag (reset on every exit by the RAII guard).
 // Each asset is skipped when already fresh-pinned, so this is idempotent and recovers a partial set.
 // It never touches the region job's counters and bounds its fan-out through the warm semaphore.
+//
+// Every style stages into ONE staging region and is promoted in one replacement, because the target
+// is a single global region whose membership a promotion replaces wholesale: staging each style
+// separately would leave the last one promoted holding the whole region and unpin the others' glyphs.
+// The asset cache keys already carry the style source id, so two styles never collide.
 async fn stage_basemap_assets(
     st: &AppState,
-    style_source: &str,
+    style_sources: &[String],
     job_id: &str,
     cancel: Arc<AtomicBool>,
 ) -> Result<String, ()> {
@@ -795,80 +820,89 @@ async fn stage_basemap_assets(
             .unwrap_or(0)
     };
     let budget = replacement_budget(st, Some(target_region), replacement_credit);
-    // Snapshot the learned templates and the allowed hosts, then drop the read guards before fetching.
-    let (glyph_template, fontstacks, sprite_base, allowed, generation) = {
-        let ss = st.style_state.read().await;
-        let Some(s) = ss.get(style_source) else {
-            return Err(());
-        };
-        let allowed = match st
-            .sources
-            .read()
-            .await
-            .get(style_source)
-            .map(|c| c.upstream.clone())
-        {
-            Some(UpstreamTemplate::Style { allowed_hosts, .. }) => allowed_hosts,
-            _ => return Err(()),
-        };
-        (
-            s.glyphs.clone(),
-            s.fontstacks.clone(),
-            s.sprite_base.clone(),
-            allowed,
-            s.generation,
-        )
-    };
 
     // Build the full asset job list (each glyph range per fontstack, plus the sprite variants) as
-    // (cache_source, synthetic x, upstream URL, asset kind) tuples. The cache_source is shared through
-    // an Arc so a
-    // fontstack's 48 ranges (and the 4 sprite variants) reuse one allocation rather than cloning the
-    // String per job.
-    let mut jobs: Vec<(Arc<str>, u32, String, crate::style::StyleAssetKind)> = Vec::new();
-    if let Some(template) = glyph_template {
-        for fontstack in &fontstacks {
-            let cache_source: Arc<str> = Arc::from(crate::style::glyph_cache_source_at(
-                style_source,
-                fontstack,
-                generation,
-            ));
-            for range_start in (0..GLYPH_RANGE_END).step_by(GLYPH_RANGE_STEP as usize) {
-                let range = format!("{range_start}-{}.pbf", range_start + GLYPH_RANGE_STEP - 1);
-                let url = crate::style::expand_glyph_url(&template, fontstack, &range);
-                jobs.push((
-                    cache_source.clone(),
-                    range_start,
-                    url,
-                    crate::style::StyleAssetKind::Glyph,
+    // (cache_source, synthetic x, upstream URL, asset kind, allowed hosts) tuples. The cache_source
+    // and the allowed-host list are shared through an Arc so a fontstack's 48 ranges (and the 4
+    // sprite variants) reuse one allocation rather than cloning per job. The allowed hosts travel
+    // with the job because each style carries its own list.
+    let mut jobs: Vec<AssetJob> = Vec::new();
+    for style_source in style_sources {
+        // Snapshot the learned templates and the allowed hosts, then drop the read guards before
+        // fetching.
+        let (glyph_template, fontstacks, sprite_base, allowed, generation) = {
+            let ss = st.style_state.read().await;
+            let Some(s) = ss.get(style_source) else {
+                return Err(());
+            };
+            let allowed = match st
+                .sources
+                .read()
+                .await
+                .get(style_source)
+                .map(|c| c.upstream.clone())
+            {
+                Some(UpstreamTemplate::Style { allowed_hosts, .. }) => allowed_hosts,
+                _ => return Err(()),
+            };
+            (
+                s.glyphs.clone(),
+                s.fontstacks.clone(),
+                s.sprite_base.clone(),
+                Arc::new(allowed),
+                s.generation,
+            )
+        };
+        if let Some(template) = glyph_template {
+            for fontstack in &fontstacks {
+                let cache_source: Arc<str> = Arc::from(crate::style::glyph_cache_source_at(
+                    style_source,
+                    fontstack,
+                    generation,
                 ));
+                for range_start in (0..GLYPH_RANGE_END).step_by(GLYPH_RANGE_STEP as usize) {
+                    let range = format!("{range_start}-{}.pbf", range_start + GLYPH_RANGE_STEP - 1);
+                    let url = crate::style::expand_glyph_url(&template, fontstack, &range);
+                    jobs.push((
+                        cache_source.clone(),
+                        range_start,
+                        url,
+                        crate::style::StyleAssetKind::Glyph,
+                        allowed.clone(),
+                    ));
+                }
             }
         }
-    }
-    if let Some(base) = sprite_base {
-        let cache_source: Arc<str> = Arc::from(crate::style::sprite_cache_source_at(
-            style_source,
-            generation,
-        ));
-        for (idx, suffix) in crate::style::SPRITE_VARIANTS {
-            let kind = if suffix.ends_with(".json") {
-                crate::style::StyleAssetKind::SpriteJson
-            } else {
-                crate::style::StyleAssetKind::SpritePng
-            };
-            jobs.push((cache_source.clone(), idx, format!("{base}{suffix}"), kind));
+        if let Some(base) = sprite_base {
+            let cache_source: Arc<str> = Arc::from(crate::style::sprite_cache_source_at(
+                style_source,
+                generation,
+            ));
+            for (idx, suffix) in crate::style::SPRITE_VARIANTS {
+                let kind = if suffix.ends_with(".json") {
+                    crate::style::StyleAssetKind::SpriteJson
+                } else {
+                    crate::style::StyleAssetKind::SpritePng
+                };
+                jobs.push((
+                    cache_source.clone(),
+                    idx,
+                    format!("{base}{suffix}"),
+                    kind,
+                    allowed.clone(),
+                ));
+            }
         }
     }
 
     // Fetch the assets through a JoinSet bounded by the warm semaphore (the same fan-out the tile warm
     // uses), collecting the fetched rows into batches that flush at WARM_BATCH. Serial before, so a
     // fontstack's 48 glyph ranges each blocked on the prior fetch.
-    let allowed = Arc::new(allowed);
     let region_arc: Arc<str> = Arc::from(region.as_str());
     let mut batch: Vec<WarmRow> = Vec::with_capacity(WARM_BATCH);
     let mut set: tokio::task::JoinSet<Result<Option<WarmRow>, ()>> = tokio::task::JoinSet::new();
     let mut success = true;
-    for (cache_source, x, url, kind) in jobs {
+    for (cache_source, x, url, kind, allowed) in jobs {
         let permit = match acquire_warm_permit(st, &cancel).await {
             Some(permit) => permit,
             None => {
@@ -1086,14 +1120,17 @@ async fn warm_one(
                 })
             }
         }
-        Some(Ok((404, _))) | Some(Ok((204, _))) => {
+        // Carry the upstream status through, as the live miss path does. A source with sparse
+        // coverage that answers 204 must read back as 204 whether the row was warmed or fetched
+        // live, or the same empty tile serves two different statuses to the browser.
+        Some(Ok((status @ (404 | 204), _))) => {
             let fetched_at = now_secs();
             Fetched::Negative(WarmRow {
                 source: source.id.clone(),
                 z,
                 x,
                 y,
-                tile: CachedTile::negative(404, fetched_at),
+                tile: CachedTile::negative(i64::from(status), fetched_at),
             })
         }
         Some(_) => Fetched::Error,
@@ -1147,12 +1184,13 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, spec: RunSpec)
         storage: staging_region_id.as_deref().map(Arc::from),
         replacement_credit,
     };
-    // Capture the style source (if any) before expansion replaces it with synthetic XYZ sub-sources,
-    // so the folded assets warm can look up the learned glyph template, fontstacks, and sprite base.
-    let style_source_id: Option<String> = sources
+    // Capture the style sources before expansion replaces them with synthetic XYZ sub-sources, so the
+    // folded assets warm can look up each one's learned glyph template, fontstacks, and sprite base.
+    let style_source_ids: Vec<String> = sources
         .iter()
-        .find(|s| matches!(s.upstream, UpstreamTemplate::Style { .. }))
-        .map(|s| s.id.clone());
+        .filter(|s| matches!(s.upstream, UpstreamTemplate::Style { .. }))
+        .map(|s| s.id.clone())
+        .collect();
     // Expand any style source into generation-aware synthetic XYZ sub-sources (learning the style
     // once), so the enumeration and the pin path below run unchanged for the basemap.
     let sources = match expand_warm_sources(&st, sources).await {
@@ -1328,17 +1366,15 @@ async fn run(st: AppState, job: Arc<tokio::sync::Mutex<WarmJob>>, spec: RunSpec)
     {
         final_state = WarmState::Error;
     }
-    if final_state == WarmState::Done {
-        if let Some(style_id) = style_source_id.as_deref() {
-            match stage_basemap_assets(&st, style_id, &job_id, cancel.clone()).await {
-                Ok(staging) => asset_staging = Some(staging),
-                Err(()) => {
-                    if cancel.load(Ordering::Acquire) {
-                        final_state = WarmState::Cancelled;
-                    } else {
-                        job.lock().await.errors += 1;
-                        final_state = WarmState::Error;
-                    }
+    if final_state == WarmState::Done && !style_source_ids.is_empty() {
+        match stage_basemap_assets(&st, &style_source_ids, &job_id, cancel.clone()).await {
+            Ok(staging) => asset_staging = Some(staging),
+            Err(()) => {
+                if cancel.load(Ordering::Acquire) {
+                    final_state = WarmState::Cancelled;
+                } else {
+                    job.lock().await.errors += 1;
+                    final_state = WarmState::Error;
                 }
             }
         }
@@ -1543,6 +1579,10 @@ mod tests {
             .route(
                 "/error/{z}/{x}/{y}",
                 get(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
+            )
+            .route(
+                "/nocontent/{z}/{x}/{y}",
+                get(|| async { axum::http::StatusCode::NO_CONTENT }),
             );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1810,6 +1850,38 @@ mod tests {
         assert!(
             st.cache.get(TileKey::new("s", 0, 0, 0)).unwrap().is_some(),
             "the warmed box is pinned"
+        );
+    }
+
+    // The live miss path negative-caches the status the upstream actually sent, and the serve path
+    // hands that status straight back, so a warmed 204 that was stored as a 404 made the same empty
+    // tile answer differently depending on which path happened to fill it.
+    #[tokio::test]
+    async fn a_warmed_no_content_tile_keeps_the_upstream_status() {
+        let addr = stub().await;
+        let db = NamedTempFile::new().unwrap();
+        let st = state(&db, dev(), xyz(addr, "nocontent")).await;
+        let job = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![st.sources.read().await["s"].clone()],
+                bbox: [-10.0, -10.0, 10.0, 10.0],
+                additional_bbox: None,
+                minzoom: 0,
+                maxzoom: 0,
+                region_id: Some("no-content".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(wait_done(&st, &job).await["state"], "done");
+        assert_eq!(
+            st.cache
+                .get(TileKey::new("s", 0, 0, 0))
+                .unwrap()
+                .unwrap()
+                .status,
+            204,
         );
     }
 
@@ -2154,10 +2226,11 @@ mod tests {
             .get_mut("s")
             .unwrap()
             .max_age_seconds = Some(300);
+        // Its own variant, not BadBbox: the two send an operator looking in opposite directions, and
+        // the route logs the reason from the variant.
         match start_warm(&st, request()).await {
-            Err(StartError::BadBbox(message)) => {
-                assert!(message.contains("time-dynamic"), "{message}");
-                assert!(message.contains('s'), "{message}");
+            Err(StartError::AllSourcesTimeDynamic(sources)) => {
+                assert_eq!(sources, "s");
             }
             other => panic!("expected a time-dynamic rejection, got {other:?}"),
         }
@@ -2313,8 +2386,11 @@ mod tests {
         }
     }
 
+    // The catalog ships a light and a dark basemap, so selecting both for one saved region is an
+    // ordinary choice: a boat wants the day chart and the one it can read at night. Only the limit on
+    // how many styles the container can hold learned state for still rejects a request.
     #[tokio::test]
-    async fn warm_rejects_multiple_style_sources_before_asset_staging() {
+    async fn warm_accepts_more_than_one_style_source_up_to_the_learned_state_limit() {
         let addr = style_stub().await;
         let db = NamedTempFile::new().unwrap();
         let first = style_source(addr);
@@ -2326,10 +2402,10 @@ mod tests {
             .await
             .insert(second.id.clone(), second.clone());
 
-        let result = start_warm(
+        assert!(start_warm(
             &st,
             WarmRequest {
-                sources: vec![first, second],
+                sources: vec![first.clone(), second.clone()],
                 bbox: [-1.0, -1.0, 1.0, 1.0],
                 additional_bbox: None,
                 minzoom: 0,
@@ -2337,10 +2413,101 @@ mod tests {
                 region_id: Some("r1".into()),
             },
         )
-        .await;
-        assert!(matches!(result, Err(StartError::MultipleStyleSources)));
-        assert!(st.warm_jobs.read().await.is_empty());
-        assert!(st.active_warm_regions.lock().await.is_empty());
+        .await
+        .is_ok());
+
+        let mut selection = vec![first, second];
+        for index in 0..crate::style::MAX_LEARNED_STYLE_ENTRIES {
+            let mut extra = selection[0].clone();
+            extra.id = format!("extra-basemap-{index}");
+            st.sources
+                .write()
+                .await
+                .insert(extra.id.clone(), extra.clone());
+            selection.push(extra);
+        }
+        assert!(matches!(
+            start_warm(
+                &st,
+                WarmRequest {
+                    sources: selection,
+                    bbox: [-1.0, -1.0, 1.0, 1.0],
+                    additional_bbox: None,
+                    minzoom: 0,
+                    maxzoom: 1,
+                    region_id: Some("r2".into()),
+                },
+            )
+            .await,
+            Err(StartError::TooManyStyleSources(_))
+        ));
+        assert!(
+            !st.active_warm_regions.lock().await.contains("r2"),
+            "a rejected request claims no region",
+        );
+    }
+
+    // Both styles' glyphs and sprites must survive the promotion. The assets target is one global
+    // region whose membership a promotion replaces wholesale, so staging the two styles separately
+    // would leave the second promotion unpinning the first style's labels.
+    #[tokio::test]
+    async fn a_two_style_warm_pins_both_styles_assets() {
+        let addr = style_stub_with_assets().await;
+        let db = NamedTempFile::new().unwrap();
+        let light = style_source(addr);
+        let st = state(&db, dev(), light.clone()).await;
+        let mut dark = light.clone();
+        dark.id = "basemap-dark".into();
+        st.sources
+            .write()
+            .await
+            .insert(dark.id.clone(), dark.clone());
+
+        let job = start_warm(
+            &st,
+            WarmRequest {
+                sources: vec![light, dark],
+                bbox: [-0.5, -0.5, 0.5, 0.5],
+                additional_bbox: None,
+                minzoom: 0,
+                maxzoom: 0,
+                region_id: Some("both".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(wait_done(&st, &job).await["state"], "done");
+        wait_assets(&st).await;
+
+        for style in ["basemap", "basemap-dark"] {
+            let generation = st.style_state.read().await[style].generation;
+            let glyphs =
+                crate::style::glyph_cache_source_at(style, "Noto Sans Regular", generation);
+            let sprite = crate::style::sprite_cache_source_at(style, generation);
+            assert!(
+                st.cache
+                    .get(TileKey::new(&glyphs, 0, 0, 0))
+                    .unwrap()
+                    .is_some(),
+                "{style} glyphs are stored",
+            );
+            assert!(
+                st.cache
+                    .get(TileKey::new(&sprite, 0, 0, 0))
+                    .unwrap()
+                    .is_some(),
+                "{style} sprite is stored",
+            );
+            // Both survive a deep eviction, so both are pinned rather than only the last promoted.
+            st.cache.evict_to(0).unwrap();
+            assert!(
+                st.cache
+                    .get(TileKey::new(&glyphs, 0, 0, 0))
+                    .unwrap()
+                    .is_some(),
+                "{style} glyphs stay pinned",
+            );
+        }
     }
 
     #[tokio::test]

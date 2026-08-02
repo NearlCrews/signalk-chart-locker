@@ -75,6 +75,21 @@ impl ChartSource {
     /// ceiling on the deployment-wide default rather than a replacement for it: an operator who
     /// shortened the default wants more revalidation, not less.
     pub fn fresh_secs(&self, default_secs: i64) -> i64 {
+        self.clamped_to_ttl(default_secs)
+    }
+
+    /// How long a stored tile of this source may still be served after it stops being fresh, when the
+    /// upstream cannot be reached. The deployment default is generous because a chart tile does not
+    /// change; a time-dynamic source is clamped to its own TTL instead, because an hours-old hazard
+    /// overlay presented as the current one is worse than an empty layer.
+    pub fn max_stale_secs(&self, default_secs: i64) -> i64 {
+        self.clamped_to_ttl(default_secs)
+    }
+
+    /// A deployment-wide window narrowed by this source's declared TTL, if it declares one. A TTL past
+    /// `i64` cannot overflow the comparison into a negative window, which would make every stored tile
+    /// look permanently expired.
+    fn clamped_to_ttl(&self, default_secs: i64) -> i64 {
         match self.max_age_seconds {
             Some(ttl) => default_secs.min(i64::try_from(ttl).unwrap_or(i64::MAX)),
             None => default_secs,
@@ -134,7 +149,9 @@ impl ChartSource {
                 };
                 !allowed_hosts.is_empty()
                     && allowed_hosts.len() <= MAX_ALLOWED_HOSTS
-                    && allowed_hosts.iter().all(|host| valid_host(host))
+                    && allowed_hosts
+                        .iter()
+                        .all(|host| valid_host(host, allow_http))
                     && allowed_hosts.iter().enumerate().all(|(index, host)| {
                         allowed_hosts[..index]
                             .iter()
@@ -164,6 +181,34 @@ fn valid_source_id(value: &str) -> bool {
         }) == Some(false)
 }
 
+/// The host with any IPv6 brackets removed, as an address if it is an address literal at all. The URL
+/// parser normalizes the decimal, octal, and hexadecimal spellings of an IPv4 host, so a literal
+/// written any of those ways arrives here in dotted-quad form.
+fn host_as_ip(host: &str) -> Option<IpAddr> {
+    host.trim_matches(['[', ']']).parse::<IpAddr>().ok()
+}
+
+/// A loopback host in either spelling the package rejects: the reserved name (RFC 6761 reserves
+/// `localhost` and every name under it) or an address literal in a loopback range.
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .rsplit_once('.')
+            .is_some_and(|(_, last)| last.eq_ignore_ascii_case("localhost"))
+        || host_as_ip(host).is_some_and(|address| address.is_loopback())
+}
+
+/// The shape signalk-chart-sources requires of every URL field as of 0.7.0: a named host, no port,
+/// and no loopback name. Mirrored here so version skew or a direct config push cannot install what
+/// the package boundary would have refused. It is parity rather than the live guard: `ssrf.rs` still
+/// checks every resolved address before connecting.
+fn matches_package_url_shape(url: &reqwest::Url) -> bool {
+    url.port().is_none()
+        && url.host_str().is_some_and(|host| {
+            host_as_ip(host).is_none() && !is_loopback_host(host) && !host.is_empty()
+        })
+}
+
 fn valid_upstream_url(value: &str, allow_http: bool) -> Option<reqwest::Url> {
     if value.is_empty()
         || value.len() > MAX_URL_BYTES
@@ -175,16 +220,12 @@ fn valid_upstream_url(value: &str, allow_http: bool) -> Option<reqwest::Url> {
         return None;
     }
     reqwest::Url::parse(value).ok().filter(|url| {
-        let local_http = url.scheme() == "http"
-            && allow_http
-            && url.host_str().is_some_and(|host| {
-                host.eq_ignore_ascii_case("localhost")
-                    || host
-                        .trim_matches(['[', ']'])
-                        .parse::<IpAddr>()
-                        .is_ok_and(|address| address.is_loopback())
-            });
+        // The dev and test escape hatch, and the only reason a loopback target or an explicit port
+        // ever reaches here. Production leaves allow_http false and gets the package shape.
+        let local_http =
+            url.scheme() == "http" && allow_http && url.host_str().is_some_and(is_loopback_host);
         (url.scheme() == "https" || local_http)
+            && (local_http || matches_package_url_shape(url))
             && url.host().is_some()
             && url.username().is_empty()
             && url.password().is_none()
@@ -224,13 +265,17 @@ fn valid_query_value(value: &str, max_bytes: usize, allow_empty: bool) -> bool {
         && !value.contains(['&', '?', '#', '+'])
 }
 
-fn valid_host(value: &str) -> bool {
+/// One entry of a style source's allowed-host list. The colon rejection already excludes a port and
+/// an IPv6 literal; the package also rejects an IPv4 literal and a loopback name, so those go too
+/// unless the dev and test escape hatch is open (the loopback stub upstream needs them).
+fn valid_host(value: &str, allow_local: bool) -> bool {
     !value.is_empty()
         && value.len() <= MAX_HOST_BYTES
         && !value
             .chars()
             .any(|ch| ch.is_whitespace() || ch.is_control())
         && !value.contains(['/', '@', '?', '#', ':'])
+        && (allow_local || (host_as_ip(value).is_none() && !is_loopback_host(value)))
 }
 
 fn valid_bounded_text(value: &str, max_bytes: usize, allow_empty: bool) -> bool {
@@ -339,6 +384,59 @@ mod tests {
         // every stored tile look permanently stale.
         source.max_age_seconds = Some(u64::MAX);
         assert_eq!(source.fresh_secs(86_400), 86_400);
+    }
+
+    // signalk-chart-sources 0.7.0 rejects a port, an address literal, and a loopback name in every
+    // URL field. The container re-validates the pushed catalog so version skew or a direct push
+    // cannot install what the package boundary would have refused, so the two rule sets must agree.
+    #[test]
+    fn production_validation_rejects_ports_address_literals_and_loopback_names() {
+        let with_template = |template: &str| {
+            let source: ChartSource = serde_json::from_str(&format!(
+                r#"{{"id":"s","title":"S","tileSize":256,"minzoom":0,"maxzoom":18,"attribution":"",
+                    "upstream":{{"mode":"xyz","urlTemplate":"{template}"}}}}"#
+            ))
+            .unwrap();
+            source.is_valid(false)
+        };
+        assert!(with_template("https://tiles.example/{z}/{x}/{y}.png"));
+        for rejected in [
+            "https://tiles.example:8443/{z}/{x}/{y}.png",
+            "https://203.0.113.7/{z}/{x}/{y}.png",
+            "https://[2606:4700::1]/{z}/{x}/{y}.png",
+            // The URL parser normalizes these spellings to a dotted quad, so they are the same host.
+            "https://0x7f000001/{z}/{x}/{y}.png",
+            "https://localhost/{z}/{x}/{y}.png",
+            "https://tiles.localhost/{z}/{x}/{y}.png",
+        ] {
+            assert!(!with_template(rejected), "{rejected} must be rejected");
+        }
+
+        // The dev and test escape hatch still admits the loopback stub upstream, port and all: the
+        // Node contract test pushes one under TILECACHE_ALLOW_PRIVATE=1.
+        let loopback: ChartSource = serde_json::from_str(
+            r#"{"id":"s","title":"S","tileSize":256,"minzoom":0,"maxzoom":18,"attribution":"",
+                "upstream":{"mode":"wms","base":"http://127.0.0.1:8080/wms","layers":"a","styles":"","version":"1.3.0","format":"image/png","transparent":true}}"#,
+        )
+        .unwrap();
+        assert!(loopback.is_valid(true));
+        assert!(!loopback.is_valid(false));
+    }
+
+    #[test]
+    fn production_validation_rejects_an_address_literal_allowed_host() {
+        let style = |host: &str| {
+            let source: ChartSource = serde_json::from_str(&format!(
+                r#"{{"id":"b","title":"B","tileSize":256,"minzoom":0,"maxzoom":20,"attribution":"",
+                    "upstream":{{"mode":"style","styleUrl":"https://tiles.example/s","allowedHosts":["tiles.example","{host}"]}}}}"#
+            ))
+            .unwrap();
+            source.is_valid(false)
+        };
+        assert!(style("fonts.example"));
+        assert!(!style("203.0.113.7"));
+        assert!(!style("localhost"));
+        assert!(!style("cdn.localhost"));
     }
 
     #[test]

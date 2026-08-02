@@ -781,18 +781,26 @@ async fn fetch_asset_response(
             .await;
             StatusCode::NOT_FOUND.into_response()
         }
-        _ => valid_stale
-            .filter(|tile| now_secs() - tile.fetched_at < state.knobs.max_stale_secs)
-            .map(|tile| {
-                crate::response::tile_http_response(
-                    &tile.content_type,
-                    &tile.strong_etag,
-                    true,
-                    tile.blob.unwrap_or_default(),
-                    if_none_match,
-                )
-            })
-            .unwrap_or_else(|| StatusCode::BAD_GATEWAY.into_response()),
+        _ => {
+            let Some(tile) = valid_stale else {
+                return StatusCode::BAD_GATEWAY.into_response();
+            };
+            // Past the stale bound a pinned asset is still served: a warmed basemap region is an
+            // explicit offline download that eviction never touches, so refusing it would blank the
+            // labels and icons of a chart the boat deliberately took with it.
+            if now_secs() - tile.fetched_at >= state.knobs.max_stale_secs
+                && !state.cache_is_pinned(cache_source, z, x, y).await
+            {
+                return StatusCode::BAD_GATEWAY.into_response();
+            }
+            crate::response::tile_http_response(
+                &tile.content_type,
+                &tile.strong_etag,
+                true,
+                tile.blob.unwrap_or_default(),
+                if_none_match,
+            )
+        }
     }
 }
 
@@ -937,7 +945,8 @@ async fn vector_tile(
                 touch_detached(&state, &cache_source, z, x, y, now_secs());
             }
             Some(tile_response(tile, if_none_match.as_deref()))
-        } else if now_secs() - tile.fetched_at < state.knobs.negative_ttl_secs {
+        } else if tile.status != 200 && now_secs() - tile.fetched_at < state.knobs.negative_ttl_secs
+        {
             Some(StatusCode::NOT_FOUND.into_response())
         } else {
             None
@@ -1090,7 +1099,7 @@ mod tests {
         glyph_cache_source_at, sprite_cache_source_at, valid_style_asset, vector_cache_source_at,
         StyleAssetKind,
     };
-    use crate::cache::{TileCache, TileKey};
+    use crate::cache::{CachedTile, TileCache, TileKey};
     use crate::routes::app;
     use crate::state::{AppState, Knobs};
     use axum::body::Body;
@@ -1799,6 +1808,81 @@ mod tests {
         assert!(
             Arc::ptr_eq(&document, &learned_again.document),
             "the parsed style document is Arc-backed"
+        );
+    }
+
+    // The vector-tile route's negative branch has to test the status the way the glyph and sprite
+    // routes do. Without that test a stale but perfectly good 200 fell into it and answered 404, so
+    // the basemap lost the tile instead of revalidating it. Shipped knobs keep the negative TTL well
+    // inside the freshness window, which is the only reason the two windows never overlapped; a
+    // serve rule must not depend on the relative size of two independent knobs.
+    #[tokio::test]
+    async fn a_stale_vector_tile_revalidates_rather_than_answering_not_found() {
+        let addr = spawn_upstream().await;
+        let db = NamedTempFile::new().unwrap();
+        let cache = Arc::new(TileCache::open(db.path()).unwrap());
+        let mut st = AppState::new(
+            cache,
+            Knobs {
+                allow_private_egress: true,
+                fresh_secs: 1,
+                negative_ttl_secs: 600,
+                ..Default::default()
+            },
+        );
+        st.control_token = Some(Arc::from(TEST_CONTROL_TOKEN));
+        let router = crate::routes::app(st.clone());
+        router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr, "127.0.0.1")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(crate::style::ensure_style_learned(&st, "basemap").await);
+        let generation = st.style_state.read().await["basemap"].generation;
+
+        // A stored 200 that is stale by the freshness window but younger than the negative TTL.
+        let stored_at = crate::state::now_secs() - 100;
+        let body = vec![8u8, 8, 8, 8];
+        st.cache
+            .put(
+                TileKey::new(
+                    &vector_cache_source_at("basemap", "openmaptiles", generation),
+                    3,
+                    1,
+                    1,
+                ),
+                &CachedTile {
+                    content_type: "application/x-protobuf".into(),
+                    strong_etag: crate::fetcher::strong_etag(&body),
+                    upstream_validator: None,
+                    status: 200,
+                    fetched_at: stored_at,
+                    last_access: stored_at,
+                    bytes: body.len() as i64,
+                    blob: Some(body.clone().into()),
+                },
+                false,
+                stored_at,
+            )
+            .unwrap();
+
+        let response = router
+            .oneshot(
+                Request::get("/style/basemap/tiles/openmaptiles/3/1/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            body,
         );
     }
 

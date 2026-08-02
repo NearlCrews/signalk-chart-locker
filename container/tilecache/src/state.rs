@@ -136,6 +136,16 @@ pub enum FetchError {
     Transport,
 }
 
+/// The freshness and stale-serve windows that apply to one source's tiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TileWindows {
+    pub fresh_secs: i64,
+    pub max_stale_secs: i64,
+    /// True when the source declares a TTL, so it is time-dynamic and a pinned copy of one of its
+    /// tiles must not be exempted from the stale bound.
+    pub volatile: bool,
+}
+
 /// An upstream response that retains the egress permit through body consumption.
 #[derive(Debug)]
 pub struct GuardedResponse {
@@ -310,12 +320,15 @@ impl AppState {
         timeout: Option<Duration>,
     ) -> Result<GuardedResponse, FetchError> {
         match if_none_match {
+            // strip_prefix, not trim_start_matches: an upstream whose own validator begins with the
+            // tag would otherwise have that repetition eaten too and be revalidated against a
+            // truncated value.
             Some(v) if v.starts_with("last-modified:") => {
                 self.guarded_get_with_headers(
                     url,
                     &[(
                         reqwest::header::IF_MODIFIED_SINCE,
-                        v.trim_start_matches("last-modified:"),
+                        v.strip_prefix("last-modified:").unwrap_or(v),
                     )],
                     timeout,
                 )
@@ -326,7 +339,7 @@ impl AppState {
                     url,
                     &[(
                         reqwest::header::IF_NONE_MATCH,
-                        v.trim_start_matches("etag:"),
+                        v.strip_prefix("etag:").unwrap_or(v),
                     )],
                     timeout,
                 )
@@ -472,17 +485,39 @@ impl AppState {
             .map_err(|_| rusqlite::Error::InvalidQuery)?
     }
 
-    /// The freshness window for one source's tiles. A time-dynamic source declares its own TTL in
-    /// the shared catalog, which shortens the deployment-wide default so a cached radar frame stops
-    /// being served long before an ordinary chart tile would. An unknown id falls back to the
-    /// default; the caller has already rejected it as not allowlisted.
-    pub async fn fresh_secs_for(&self, source_id: &str) -> i64 {
-        let default_secs = self.knobs.fresh_secs;
-        self.sources
-            .read()
-            .await
-            .get(source_id)
-            .map_or(default_secs, |source| source.fresh_secs(default_secs))
+    /// The freshness and stale-serve windows for one source's tiles, resolved together under a single
+    /// allowlist read. A time-dynamic source declares its own TTL in the shared catalog, which
+    /// shortens both deployment-wide defaults so a cached radar frame stops being served long before
+    /// an ordinary chart tile would. An unknown id falls back to the defaults; the caller has already
+    /// rejected it as not allowlisted.
+    pub async fn tile_windows_for(&self, source_id: &str) -> TileWindows {
+        let fresh_secs = self.knobs.fresh_secs;
+        let max_stale_secs = self.knobs.max_stale_secs;
+        self.sources.read().await.get(source_id).map_or(
+            TileWindows {
+                fresh_secs,
+                max_stale_secs,
+                volatile: false,
+            },
+            |source| TileWindows {
+                fresh_secs: source.fresh_secs(fresh_secs),
+                max_stale_secs: source.max_stale_secs(max_stale_secs),
+                volatile: source.is_volatile(),
+            },
+        )
+    }
+
+    /// Execute the synchronous pin lookup away from Tokio's reactor threads.
+    pub async fn cache_is_pinned(&self, source: &str, z: u32, x: u32, y: u32) -> bool {
+        let cache = self.cache.clone();
+        let source = source.to_string();
+        tokio::task::spawn_blocking(move || {
+            cache.is_pinned(crate::cache::TileKey::new(&source, z, x, y))
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(false)
     }
 
     pub fn control_authorized(&self, supplied: Option<&str>) -> bool {
@@ -519,7 +554,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::str::FromStr;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use tempfile::NamedTempFile;
     use tokio::net::TcpListener;
     use tokio::sync::Semaphore;
@@ -666,6 +701,48 @@ mod tests {
             .unwrap();
         assert_eq!(state.read_capped(response).await.unwrap(), "ok");
         assert!(seen.load(Ordering::Acquire));
+    }
+
+    // The stored validator is the upstream value behind a one-word tag. Only that one tag comes off:
+    // an upstream whose own ETag starts with the tag would otherwise be revalidated against a
+    // truncated value, which never matches and refetches the full body forever.
+    #[tokio::test]
+    async fn a_validator_that_repeats_the_tag_is_sent_whole() {
+        let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let seen_by_server = seen.clone();
+        let address = serve(Router::new().route(
+            "/",
+            get(move |headers: HeaderMap| {
+                let seen = seen_by_server.clone();
+                async move {
+                    *seen.lock().unwrap() = headers
+                        .get(header::IF_NONE_MATCH)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string);
+                    "ok"
+                }
+            }),
+        ))
+        .await;
+        let db = NamedTempFile::new().unwrap();
+        let cache = Arc::new(TileCache::open(db.path()).unwrap());
+        let state = AppState::new(
+            cache,
+            Knobs {
+                allow_private_egress: true,
+                ..Default::default()
+            },
+        );
+        let response = state
+            .guarded_get(
+                &format!("http://{address}/"),
+                Some("etag:etag:\"v1\""),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(state.read_capped(response).await.unwrap(), "ok");
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("etag:\"v1\""));
     }
 
     #[tokio::test]

@@ -305,6 +305,13 @@ const MAX_SCROLL_TTL_SECS: i64 = 365 * 86_400;
 
 /// Why a config push was rejected. The closed set is named so each reason string exists once; the
 /// string reaches both the container log and the 400 response body.
+///
+/// Every reason is a fixed token carrying nothing from the request. The plugin relies on that: it
+/// folds this body into the Signal K status line an operator reads, bounded but not stripped of
+/// control characters. Interpolating a rejected source id here (the obvious way to make the message
+/// more useful) would put attacker-influenced text into that status line and into the container log,
+/// where a newline forges log lines, so it requires sanitizing at this end first.
+/// `config_rejection_reasons_stay_fixed_tokens` enforces this.
 enum ConfigRejection {
     TooManySources,
     TooManyStyleSources,
@@ -753,11 +760,27 @@ async fn warm_start(
             eprintln!("event=warm_rejected reason=job_limit");
             StatusCode::TOO_MANY_REQUESTS.into_response()
         }
-        Err(crate::warm::StartError::MultipleStyleSources) => (
-            StatusCode::BAD_REQUEST,
-            "a warm request may select at most one style source",
-        )
-            .into_response(),
+        Err(crate::warm::StartError::TooManyStyleSources(count)) => {
+            st.warm_rejections.fetch_add(1, Ordering::Relaxed);
+            eprintln!("event=warm_rejected reason=style_source_limit styles={count}");
+            (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "a warm request may select at most {} style sources",
+                    crate::style::MAX_LEARNED_STYLE_ENTRIES
+                ),
+            )
+                .into_response()
+        }
+        Err(crate::warm::StartError::AllSourcesTimeDynamic(sources)) => {
+            st.warm_rejections.fetch_add(1, Ordering::Relaxed);
+            eprintln!("event=warm_rejected reason=time_dynamic_sources sources={sources}");
+            (
+                StatusCode::BAD_REQUEST,
+                format!("every selected source is time-dynamic and is never warmed: {sources}"),
+            )
+                .into_response()
+        }
         Err(crate::warm::StartError::RegionBusy) => {
             st.warm_rejections.fetch_add(1, Ordering::Relaxed);
             eprintln!("event=warm_rejected reason=region_busy");
@@ -889,6 +912,32 @@ mod tests {
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    // The plugin folds this body into the operator-visible Signal K status line without stripping
+    // control characters, so the safety of that path rests entirely on every reason being a fixed
+    // token. Enforce it here rather than leaving it to hold by accident: interpolating a rejected
+    // source id would be the natural way to make the message more useful, and this fails the moment
+    // someone does it without sanitizing first.
+    #[test]
+    fn config_rejection_reasons_stay_fixed_tokens() {
+        for rejection in [
+            ConfigRejection::TooManySources,
+            ConfigRejection::TooManyStyleSources,
+            ConfigRejection::InvalidSource,
+            ConfigRejection::InvalidPublicBase,
+            ConfigRejection::InvalidBudget,
+            ConfigRejection::InvalidTtl,
+        ] {
+            let reason = rejection.as_str();
+            assert!(!reason.is_empty());
+            assert!(
+                reason
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+                "{reason} must stay a bare lowercase token: it reaches an operator's status line and the container log unsanitized",
+            );
+        }
     }
 
     #[tokio::test]

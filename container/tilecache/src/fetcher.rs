@@ -5,7 +5,7 @@
 
 use crate::cache::{CachedTile, TileKey};
 use crate::source::UpstreamTemplate;
-use crate::state::{now_secs, AppState, FetchError};
+use crate::state::{now_secs, AppState, FetchError, TileWindows};
 use crate::upstream::expand_upstream;
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
@@ -361,7 +361,7 @@ pub async fn get_tile(
             }
             return respond_cached(&tile, if_none_match.as_deref(), false);
         } else if state.upstream_health.is_slow(source_id)
-            && now - tile.fetched_at < state.knobs.max_stale_secs
+            && now - tile.fetched_at < source.max_stale_secs(state.knobs.max_stale_secs)
         {
             // Stale-while-revalidate for a slow source: serve the stale tile now and revalidate in the
             // background, so a pan does not block on a multi-second revalidation. Spawn at most one fill
@@ -438,6 +438,27 @@ pub async fn wait_for_fills(state: &AppState, timeout: Duration) -> bool {
     .is_ok()
 }
 
+/// Whether a stored tile the upstream could not refresh may still be served. Inside the source's
+/// stale window it always may. Past that window a pinned tile still may: a saved region is an
+/// explicit offline download that eviction never touches, and a boat that saved charts for a
+/// season-long passage must not get a blank chart on day thirty-one. A time-dynamic source is never
+/// exempted, however it was stored: its declared window is the whole point of the TTL, and an
+/// hours-old hazard overlay presented as the current one is worse than an empty layer.
+async fn may_serve_stale(
+    state: &AppState,
+    source_id: &str,
+    z: u32,
+    x: u32,
+    y: u32,
+    fetched_at: i64,
+    windows: TileWindows,
+) -> bool {
+    if now_secs() - fetched_at < windows.max_stale_secs {
+        return true;
+    }
+    !windows.volatile && state.cache_is_pinned(source_id, z, x, y).await
+}
+
 /// Spawn a `fill` and await its outcome, mapping a task-join failure to Unavailable. Used for the miss
 /// and the not-slow stale paths, where the handler serves the fill's result.
 async fn fill_and_await(
@@ -498,12 +519,12 @@ async fn fill(
     // coalesce onto a fresh 200 or a fresh negative here and never refetch. Resolving the window here
     // rather than threading it through the spawn keeps it correct across a config push that lands
     // while this fill was queued, and this is the slow path anyway.
-    let fresh_secs = state.fresh_secs_for(&source_id).await;
+    let windows = state.tile_windows_for(&source_id).await;
     let existing = state.cache_get(&source_id, z, x, y).await.ok().flatten();
     if let Some(tile) = &existing {
         if tile.status == 200
             && acceptable_content_type(&tile.content_type)
-            && now - tile.fetched_at < fresh_secs
+            && now - tile.fetched_at < windows.fresh_secs
         {
             state.inflight_finish(&key, &lock).await;
             return respond_cached(tile, if_none_match.as_deref(), false);
@@ -556,9 +577,9 @@ async fn fill(
                 .await
             }
             // A failed revalidation, including a 404 (which does not negative-cache a live tile), serves
-            // the stale tile while it is within the max-stale bound.
+            // the stale tile while it is still servable.
             _ => {
-                if now - tile.fetched_at < state.knobs.max_stale_secs {
+                if may_serve_stale(&state, &source_id, z, x, y, tile.fetched_at, windows).await {
                     respond_cached(&tile, if_none_match.as_deref(), true)
                 } else {
                     FetchOutcome::Unavailable
@@ -585,13 +606,22 @@ async fn fill(
             }
             Ok(_) => FetchOutcome::Unavailable,
             Err(_) => {
-                // Offline or timed out: serve any cached 200 within the max-stale bound. The single-flight
+                // Offline or timed out: serve any cached 200 that is still servable. The single-flight
                 // lock does not cover the warm engine's batch flush, so a concurrent region or position warm
                 // can have stored a 200 for this key since the re-check.
                 match state.cache_get(&source_id, z, x, y).await {
                     Ok(Some(tile))
                         if tile.status == 200
-                            && now_secs() - tile.fetched_at < state.knobs.max_stale_secs =>
+                            && may_serve_stale(
+                                &state,
+                                &source_id,
+                                z,
+                                x,
+                                y,
+                                tile.fetched_at,
+                                windows,
+                            )
+                            .await =>
                     {
                         FetchOutcome::Hit(to_response(&tile, true))
                     }
@@ -903,6 +933,94 @@ mod tests {
                 .content_type,
             "image/png"
         );
+    }
+
+    // Nothing listens here, so every fetch fails as a transport error: the offline boat.
+    const OFFLINE_TEMPLATE: &str = "http://127.0.0.1:1/img/{z}/{x}/{y}";
+
+    fn store_aged_tile(st: &AppState, age_secs: i64, pinned: bool) -> i64 {
+        let stored_at = now_secs() - age_secs;
+        st.cache
+            .put(
+                TileKey::new("s", 1, 0, 0),
+                &CachedTile {
+                    content_type: "image/png".into(),
+                    strong_etag: "\"e\"".into(),
+                    upstream_validator: None,
+                    status: 200,
+                    fetched_at: stored_at,
+                    last_access: stored_at,
+                    bytes: 4,
+                    blob: Some(vec![1u8, 2, 3, 4].into()),
+                },
+                pinned,
+                stored_at,
+            )
+            .unwrap();
+        stored_at
+    }
+
+    // A saved region is an explicit offline download whose tiles are pinned and never evicted. The
+    // deployment stale bound is thirty days, and a season-long passage is longer than that, so
+    // bounding a pinned tile by it handed back 502 for charts that were sitting on the disk.
+    #[tokio::test]
+    async fn a_pinned_tile_still_serves_offline_past_the_stale_bound() {
+        let db = NamedTempFile::new().unwrap();
+        let st = state_with(&db, dev_knobs(), xyz_source(OFFLINE_TEMPLATE.into())).await;
+        store_aged_tile(&st, st.knobs.max_stale_secs + 86_400, true);
+
+        let FetchOutcome::Hit(response) = get_tile(&st, "s", 1, 0, 0, None).await else {
+            panic!("a pinned saved-region tile must still serve while the upstream is unreachable");
+        };
+        assert!(response.stale, "it is served as stale, not as current");
+        assert_eq!(response.body, Bytes::from_static(&[1, 2, 3, 4]));
+    }
+
+    // The exemption is for the deliberate download only. An unpinned scroll tile that far past the
+    // bound is still refused, so the cache does not quietly become unbounded in time.
+    #[tokio::test]
+    async fn an_unpinned_tile_past_the_stale_bound_is_still_refused() {
+        let db = NamedTempFile::new().unwrap();
+        let st = state_with(&db, dev_knobs(), xyz_source(OFFLINE_TEMPLATE.into())).await;
+        store_aged_tile(&st, st.knobs.max_stale_secs + 86_400, false);
+        assert!(matches!(
+            get_tile(&st, "s", 1, 0, 0, None).await,
+            FetchOutcome::Unavailable
+        ));
+    }
+
+    // A time-dynamic source declares how long one of its tiles stays usable. Handing back an
+    // hour-old NWS watches-and-warnings overlay because the boat is offline presents expired
+    // hazards as the current ones, so the declared window bounds the stale-serve path too.
+    #[tokio::test]
+    async fn a_time_dynamic_source_is_not_served_stale_past_its_declared_window() {
+        let db = NamedTempFile::new().unwrap();
+        let mut source = xyz_source(OFFLINE_TEMPLATE.into());
+        source.max_age_seconds = Some(300);
+        let st = state_with(&db, dev_knobs(), source).await;
+        store_aged_tile(&st, 3_600, false);
+        assert!(matches!(
+            get_tile(&st, "s", 1, 0, 0, None).await,
+            FetchOutcome::Unavailable
+        ));
+
+        // Pinning it changes nothing: the TTL is the point, whatever put the row there.
+        store_aged_tile(&st, 3_600, true);
+        assert!(matches!(
+            get_tile(&st, "s", 1, 0, 0, None).await,
+            FetchOutcome::Unavailable
+        ));
+
+        // The control: the same age on a static source is well inside the deployment bound and is
+        // still served, so the declared window is what changed the outcome.
+        let static_db = NamedTempFile::new().unwrap();
+        let static_st =
+            state_with(&static_db, dev_knobs(), xyz_source(OFFLINE_TEMPLATE.into())).await;
+        store_aged_tile(&static_st, 3_600, false);
+        assert!(matches!(
+            get_tile(&static_st, "s", 1, 0, 0, None).await,
+            FetchOutcome::Hit(_)
+        ));
     }
 
     #[tokio::test]

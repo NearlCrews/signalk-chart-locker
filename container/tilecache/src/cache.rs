@@ -492,6 +492,19 @@ impl TileCache {
         result
     }
 
+    /// True when the row exists and is pinned. A pinned row belongs to a saved region or to the
+    /// basemap asset set, so it is a deliberate offline download rather than a scroll byproduct, and
+    /// the serve path uses this to decide whether the ordinary stale bound applies to it.
+    pub fn is_pinned(&self, key: TileKey) -> rusqlite::Result<bool> {
+        let TileKey { source, z, x, y } = key;
+        let inner = self.lock();
+        inner.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4 AND pinned = 1)",
+            params![source, z, x, y],
+            |row| row.get(0),
+        )
+    }
+
     /// Insert or replace a tile, keeping the running byte total in sync. Returns `Degraded` on a
     /// full disk so the caller serves the bytes without storing them. Pass `pinned = true` to mark
     /// the row eviction-exempt (used by the warm engine; the live proxy always passes `false`).
@@ -642,9 +655,12 @@ impl TileCache {
     }
 
     /// Delete unpinned scroll rows selected by `subquery` (a `SELECT rowid ...` that must filter
-    /// `pinned = 0` and `LIMIT DELETE_CHUNK`), in bounded chunks that release the lock between chunks.
-    /// The SUM and the DELETE share the identical subquery under the held lock, so they target the same
-    /// rowset. Decrements `total_bytes` by the freed bytes; leaves `pinned_bytes` untouched (only
+    /// `pinned = 0`, order by a TOTAL order, and `LIMIT DELETE_CHUNK`), in bounded chunks that release
+    /// the lock between chunks. The SUM and the DELETE share the identical subquery under the held
+    /// lock, and the total order is what makes the two target the same rowset: a `LIMIT` over rows
+    /// that compare equal may return either of them, and picking different ones would leave
+    /// `total_bytes` off by the difference for the rest of the process. Decrements `total_bytes` by
+    /// the freed bytes; leaves `pinned_bytes` untouched (only
     /// `pinned = 0` rows are removed, and an unpinned row carries no `region_tiles` join row, so none is
     /// orphaned). Returns the freed bytes and the freed row count.
     fn delete_unpinned_chunks(
@@ -683,9 +699,10 @@ impl TileCache {
             return Ok((0, 0));
         }
         let cutoff = now - ttl_secs;
-        // The ORDER BY makes the LIMIT deterministic (oldest first).
+        // Oldest first, with rowid breaking ties: whole seconds of last_access collide constantly, so
+        // last_access alone is not the total order the paired SUM and DELETE need.
         self.delete_unpinned_chunks(
-            "SELECT rowid FROM tiles WHERE pinned = 0 AND last_access < ?1 ORDER BY last_access ASC LIMIT ?2",
+            "SELECT rowid FROM tiles WHERE pinned = 0 AND last_access < ?1 ORDER BY last_access ASC, rowid ASC LIMIT ?2",
             &[&cutoff as &dyn rusqlite::ToSql, &DELETE_CHUNK],
         )
     }
@@ -696,7 +713,7 @@ impl TileCache {
     /// the invariant that an unpinned row carries no `region_tiles` join row, so it leaves none orphaned.
     pub fn clear_unpinned(&self) -> rusqlite::Result<(i64, i64)> {
         let result = self.delete_unpinned_chunks(
-            "SELECT rowid FROM tiles WHERE pinned = 0 LIMIT ?1",
+            "SELECT rowid FROM tiles WHERE pinned = 0 ORDER BY rowid ASC LIMIT ?1",
             &[&DELETE_CHUNK as &dyn rusqlite::ToSql],
         )?;
         self.reclaim_free_pages()?;
@@ -1071,28 +1088,20 @@ impl TileCache {
         Ok(true)
     }
 
-    /// Drop a region's join rows; for each tile whose reference count reaches zero, clear its pin and
-    /// subtract its bytes from `pinned_bytes` (it demotes to the scroll cache). `total_bytes` is
-    /// unchanged: the tile is not deleted, only made eviction-eligible. Re-running this at warm start
-    /// clears a region's prior pins before a re-download or a position-warm re-pin, so a narrower tile
-    /// set leaves no orphan join rows.
+    /// Drop a region's join rows; for each tile whose reference count reaches zero, clear its pin (it
+    /// demotes to the scroll cache). `total_bytes` is unchanged: the tile is not deleted, only made
+    /// eviction-eligible. Re-running this at warm start clears a region's prior pins before a
+    /// re-download or a position-warm re-pin, so a narrower tile set leaves no orphan join rows.
+    ///
+    /// The demotion clears every pin that no join row references, not only this region's, so
+    /// `pinned_bytes` is recomputed from the table rather than decremented by this region's share. A
+    /// region-less warm pins rows without recording a join row, and subtracting only the joined bytes
+    /// would leave the running total permanently above the truth, which reads back as a spurious
+    /// `capBelowPinnedBytes` config rejection and as warms capped before their budget is spent.
     pub fn delete_region(&self, region_id: &str) -> rusqlite::Result<()> {
         let mut inner = self.lock();
-        let freed: i64;
         {
             let tx = inner.conn.unchecked_transaction()?;
-            freed = tx.query_row(
-                "SELECT COALESCE(SUM(t.bytes), 0) FROM region_tiles removing JOIN tiles t
-                   ON removing.source = t.source AND removing.z = t.z
-                    AND removing.x = t.x AND removing.y = t.y
-                 WHERE removing.region_id = ?1 AND t.pinned = 1 AND NOT EXISTS (
-                   SELECT 1 FROM region_tiles other WHERE other.source = removing.source
-                    AND other.z = removing.z AND other.x = removing.x AND other.y = removing.y
-                    AND other.region_id != ?1
-                 )",
-                params![region_id],
-                |row| row.get(0),
-            )?;
             tx.execute(
                 "DELETE FROM region_tiles WHERE region_id = ?1",
                 params![region_id],
@@ -1106,7 +1115,11 @@ impl TileCache {
             )?;
             tx.commit()?;
         }
-        inner.pinned_bytes -= freed;
+        inner.pinned_bytes = inner.conn.query_row(
+            "SELECT COALESCE(SUM(bytes), 0) FROM tiles WHERE pinned = 1",
+            [],
+            |row| row.get(0),
+        )?;
         // Region membership changed, so the real-region memo is stale.
         inner.regions_dirty = true;
         Ok(())
@@ -1375,6 +1388,47 @@ mod tests {
         )
         .unwrap();
         c.probe().expect("a populated database is healthy");
+    }
+
+    // The running pinned total must never drift from the pinned rows themselves. delete_region clears
+    // every pin no join row references, not only the deleted region's, so a warm that pinned rows
+    // without a region id (the region-less /warm path) used to leave the total permanently high. That
+    // reads back as a spurious capBelowPinnedBytes rejection of a config push and as region warms
+    // capped before their budget is spent.
+    #[test]
+    fn delete_region_leaves_the_pinned_total_equal_to_the_pinned_rows() {
+        let (_f, c) = open();
+        c.put_many_pinned(&[warm_row("s", 0, 100)], i64::MAX, i64::MAX, None, 1)
+            .unwrap();
+        c.put_many_pinned(
+            &[warm_row("s", 1, 40)],
+            i64::MAX,
+            i64::MAX,
+            Some("region-a"),
+            1,
+        )
+        .unwrap();
+        assert_eq!(c.stats().unwrap().2, 140);
+
+        c.delete_region("region-a").unwrap();
+
+        let stored: i64 = {
+            let inner = c.lock();
+            inner
+                .conn
+                .query_row(
+                    "SELECT COALESCE(SUM(bytes), 0) FROM tiles WHERE pinned = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(stored, 0, "no join row remains, so nothing stays pinned");
+        assert_eq!(
+            c.stats().unwrap().2,
+            stored,
+            "the running pinned total matches the pinned rows",
+        );
     }
 
     #[test]
