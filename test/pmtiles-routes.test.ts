@@ -441,6 +441,96 @@ test('an If-Range that does not match returns the full 200, not a 206', async ()
   }
 })
 
+test('an If-Range that matches the current ETag returns the 206', async () => {
+  const { routes, registry } = collect()
+  const { record, cleanup } = await fixtureRecord()
+  registry.set(record)
+  try {
+    const first = new FakeRes()
+    routes['/pmtiles/:file'](req('sf.pmtiles'), first)
+    await finished(first)
+    const res = new FakeRes()
+    routes['/pmtiles/:file'](req('sf.pmtiles', { range: 'bytes=0-6', 'if-range': first.outHeaders.etag }), res)
+    const body = await finished(res)
+    assert.equal(res.statusCode, 206)
+    assert.equal(body.toString('ascii'), 'PMTiles')
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a suffix range returns the last bytes of the archive', async () => {
+  const { routes, registry } = collect()
+  const { record, cleanup, size } = await fixtureRecord()
+  registry.set(record)
+  try {
+    const full = new FakeRes()
+    routes['/pmtiles/:file'](req('sf.pmtiles'), full)
+    const whole = await finished(full)
+
+    const res = new FakeRes()
+    routes['/pmtiles/:file'](req('sf.pmtiles', { range: 'bytes=-4' }), res)
+    const body = await finished(res)
+    assert.equal(res.statusCode, 206)
+    assert.equal(res.outHeaders['content-range'], `bytes ${size - 4}-${size - 1}/${size}`)
+    assert.equal(res.outHeaders['content-length'], '4')
+    assert.deepEqual(body, whole.subarray(size - 4))
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a suffix range longer than the archive is clamped to the whole archive', async () => {
+  const { routes, registry } = collect()
+  const { record, cleanup, size } = await fixtureRecord()
+  registry.set(record)
+  try {
+    const res = new FakeRes()
+    routes['/pmtiles/:file'](req('sf.pmtiles', { range: `bytes=-${size + 100}` }), res)
+    const body = await finished(res)
+    assert.equal(res.statusCode, 206)
+    assert.equal(res.outHeaders['content-range'], `bytes 0-${size - 1}/${size}`)
+    assert.equal(body.length, size)
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a zero-length suffix range is unsatisfiable', async () => {
+  const { routes, registry } = collect()
+  const { record, cleanup, size } = await fixtureRecord()
+  registry.set(record)
+  try {
+    const res = new FakeRes()
+    routes['/pmtiles/:file'](req('sf.pmtiles', { range: 'bytes=-0' }), res)
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(res.statusCode, 416)
+    assert.equal(res.outHeaders['content-range'], `bytes */${size}`)
+  } finally {
+    await cleanup()
+  }
+})
+
+test('a multi-range and other unparsable range headers fall back to the full 200', async () => {
+  const { routes, registry } = collect()
+  const { record, cleanup, size } = await fixtureRecord()
+  registry.set(record)
+  try {
+    for (const range of ['bytes=0-1, 5-6', 'bytes=-', 'items=0-1', 'bytes=1-0']) {
+      const res = new FakeRes()
+      routes['/pmtiles/:file'](req('sf.pmtiles', { range }), res)
+      const body = await finished(res)
+      // 'bytes=1-0' is a syntactically valid but inverted range, which RFC 9110 makes unsatisfiable.
+      const expected = range === 'bytes=1-0' ? 416 : 200
+      assert.equal(res.statusCode, expected, range)
+      assert.equal(body.length, expected === 200 ? size : 0, range)
+      assert.equal(res.outHeaders['content-range'], expected === 200 ? undefined : `bytes */${size}`, range)
+    }
+  } finally {
+    await cleanup()
+  }
+})
+
 test('an unsatisfiable range returns 416', async () => {
   const { routes, registry } = collect()
   const { record, cleanup, size } = await fixtureRecord()

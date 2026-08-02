@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ServerAPI } from '@signalk/server-api'
 import { registerRegionsRoutes } from '../src/http/regions-routes.js'
-import { fakeApp, makeRegionsRouter, fakeRegionsRes } from './helpers.js'
+import { fakeApp, makeRegionsRouter, fakeRegionsRes, type RecordedRoute } from './helpers.js'
 
 /** The Recorder fake carries the slice registerRegionsRoutes reads (securityStrategy, getDataDirPath). */
 const app = (): ServerAPI => fakeApp() as unknown as ServerAPI
@@ -564,4 +564,183 @@ test('DELETE /api/regions/:id returns 404 for an unknown region without containe
   await del.handler({ params: { id: 'missing' }, body: null }, res)
   assert.equal(responded[0]?.status, 404)
   assert.equal(calls, 0)
+})
+
+// The signalk-chart-sources 0.7.0 contract marks a time-dynamic source with maxAgeSeconds. The
+// container skips such a source when it warms (container/tilecache/src/warm.rs), so the plugin must
+// not charge the regions budget for it, must not save it into a region, and must not report a region
+// holding one as complete. weather-radar-conus carries maxAgeSeconds in the live catalog; seamark and
+// depth-noaa-enc do not.
+const TIME_DYNAMIC_SOURCE = 'weather-radar-conus'
+
+/** Write a region straight into the store, modelling one saved before its source became time-dynamic. */
+async function seedRegion (dataDir: string, sourceIds: string[]): Promise<string> {
+  const { addRegion } = await import('../src/runtime/regions-store.js')
+  const id = '11111111-2222-4333-8444-555555555555'
+  addRegion(dataDir, {
+    id,
+    name: 'Legacy',
+    bbox: [-1, -1, 1, 1],
+    sourceIds,
+    minzoom: 1,
+    maxzoom: 2,
+    createdAt: 1_700_000_000,
+    lastDownloadedAt: null,
+    bytes: 0,
+    status: 'ready'
+  })
+  return id
+}
+
+test('POST /api/regions refuses a time-dynamic source by name, before any container call', async () => {
+  // Both the mixed and the all-weather selection are refused locally. The mixed case is the one with
+  // real impact: the container stores nothing for the weather layer, yet estimateBytes charged the
+  // budget for its tiles, so a region that fits could be refused as over budget.
+  for (const sourceIds of [['seamark', TIME_DYNAMIC_SOURCE], [TIME_DYNAMIC_SOURCE]]) {
+    let calls = 0
+    const { router, routes } = makeRegionsRouter()
+    const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
+    registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
+      dataDir,
+      fetchImpl: async () => { calls++; return new Response('{}', { status: 200 }) }
+    })
+    const route = routes.find(r => r.method === 'POST' && r.path === '/api/regions')!
+    const { responded, res } = fakeRegionsRes()
+    await route.handler({ params: {}, body: { bbox: [-1, -1, 1, 1], sourceIds, minzoom: 1, maxzoom: 2, name: 'Area' } }, res)
+    assert.equal(responded[0]?.status, 400, sourceIds.join(','))
+    assert.match(
+      (responded[0]?.body as { error: string }).error,
+      new RegExp(TIME_DYNAMIC_SOURCE),
+      'the refusal must name the offending source'
+    )
+    assert.equal(calls, 0, 'no container round-trip, so the budget is never charged for skipped tiles')
+    const { listRegions } = await import('../src/runtime/regions-store.js')
+    assert.deepEqual(listRegions(dataDir), [], 'nothing is persisted')
+  }
+})
+
+test('GET /api/regions reports the time-dynamic sources a saved region still lists', async () => {
+  const { router, routes } = makeRegionsRouter()
+  const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
+  await seedRegion(dataDir, ['seamark', TIME_DYNAMIC_SOURCE])
+  registerRegionsRoutes(router, app(), () => null, { dataDir })
+  const route = routes.find(r => r.method === 'GET' && r.path === '/api/regions')!
+  const { responded, res } = fakeRegionsRes()
+  await route.handler({ params: {}, body: null }, res)
+  assert.equal(responded[0]?.status, 200)
+  const [dto] = responded[0]?.body as Array<{ timeDynamicSourceIds: string[], unavailableSourceIds: string[] }>
+  assert.deepEqual(dto?.timeDynamicSourceIds, [TIME_DYNAMIC_SOURCE], 'the never-stored layer must be reported')
+  assert.deepEqual(dto?.unavailableSourceIds, [], 'it is in the catalog, so it is not unavailable')
+})
+
+test('POST /api/regions/:id/redownload sends only the sources the container will store', async () => {
+  const warmBodies: Array<{ sources: string[] }> = []
+  const fetchImpl = async (url: string, init?: { body?: string }) => {
+    if (url.endsWith('/warm')) {
+      warmBodies.push(JSON.parse(init!.body!) as { sources: string[] })
+      return Response.json({ jobId: warmJobId(1) })
+    }
+    throw new Error(`unexpected url: ${url}`)
+  }
+  const { router, routes } = makeRegionsRouter()
+  const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
+  const id = await seedRegion(dataDir, ['seamark', TIME_DYNAMIC_SOURCE])
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  const redownload = routes.find(r => r.method === 'POST' && r.path.endsWith('/redownload'))!
+  const { responded, res } = fakeRegionsRes()
+  await redownload.handler({ params: { id }, body: null }, res)
+  assert.equal(responded[0]?.status, 200)
+  assert.deepEqual(warmBodies[0]?.sources, ['seamark'], 'the time-dynamic id must not be sent')
+})
+
+test('POST /api/regions/:id/redownload refuses a region with nothing storable, without a container call', async () => {
+  let calls = 0
+  const { router, routes } = makeRegionsRouter()
+  const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
+  const id = await seedRegion(dataDir, [TIME_DYNAMIC_SOURCE])
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
+    dataDir,
+    fetchImpl: async () => { calls++; return Response.json({ jobId: warmJobId(1) }) }
+  })
+  const redownload = routes.find(r => r.method === 'POST' && r.path.endsWith('/redownload'))!
+  const { responded, res } = fakeRegionsRes()
+  await redownload.handler({ params: { id }, body: null }, res)
+  assert.equal(responded[0]?.status, 400)
+  assert.match((responded[0]?.body as { error: string }).error, new RegExp(TIME_DYNAMIC_SOURCE))
+  assert.equal(calls, 0)
+})
+
+test('POST /api/position-warm/config refuses a time-dynamic source by name', async () => {
+  const { router, routes } = makeRegionsRouter()
+  const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir })
+  const route = routes.find(r => r.method === 'POST' && r.path === '/api/position-warm/config')!
+  const { responded, res } = fakeRegionsRes()
+  await route.handler({ params: {}, body: { positionWarm: { sources: ['seamark', TIME_DYNAMIC_SOURCE] } } }, res)
+  assert.equal(responded[0]?.status, 400)
+  assert.match((responded[0]?.body as { error: string }).error, new RegExp(TIME_DYNAMIC_SOURCE))
+  const { loadRegionsStore } = await import('../src/runtime/regions-store.js')
+  assert.deepEqual(loadRegionsStore(dataDir).positionWarm.sources, [], 'the rejected selection is not persisted')
+})
+
+/** A create whose budget gate passes, so the test reaches the container warm start. */
+function warmRejectionRoutes (warm: () => Response): { post: RecordedRoute, dataDir: string } {
+  const fetchImpl = async (url: string): Promise<Response> => {
+    if (url.includes('/cache/stats')) {
+      return new Response(JSON.stringify({ regionsFreeBytes: 2_000_000_000, perSourceAvgBytes: { seamark: 1 } }), { status: 200 })
+    }
+    if (url.endsWith('/warm')) return warm()
+    throw new Error(`unexpected url: ${url}`)
+  }
+  const { router, routes } = makeRegionsRouter()
+  const dataDir = mkdtempSync(join(tmpdir(), 'region-route-test-'))
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  return { post: routes.find(r => r.method === 'POST' && r.path === '/api/regions')!, dataDir }
+}
+
+const CREATE_BODY = { bbox: [-1, -1, 1, 1], sourceIds: ['seamark'], minzoom: 1, maxzoom: 2, name: 'Area' }
+
+test('a container warm rejection reaches the caller with the container explanation, not a generic one', async () => {
+  // The container renders a warm rejection as a plain-text axum String, not JSON, so parsing the body
+  // as JSON discarded the one sentence telling the operator what to change. The reachable case is a
+  // region drawn where the selected source has no coverage.
+  const reason = 'bbox does not intersect the selected sources'
+  const { post, dataDir } = warmRejectionRoutes(() => new Response(reason, {
+    status: 400,
+    headers: { 'content-type': 'text/plain; charset=utf-8' }
+  }))
+  const { responded, res } = fakeRegionsRes()
+  await post.handler({ params: {}, body: CREATE_BODY }, res)
+  assert.equal(responded[0]?.status, 400)
+  assert.deepEqual(responded[0]?.body, { error: reason })
+  const { listRegions } = await import('../src/runtime/regions-store.js')
+  assert.deepEqual(listRegions(dataDir), [], 'the rejected region is still rolled back')
+})
+
+test('a container JSON rejection body is still preferred over its text form', async () => {
+  const { post } = warmRejectionRoutes(() => new Response(JSON.stringify({ error: 'too many jobs', retryable: true }), { status: 429 }))
+  const { responded, res } = fakeRegionsRes()
+  await post.handler({ params: {}, body: CREATE_BODY }, res)
+  assert.equal(responded[0]?.status, 429)
+  assert.deepEqual(responded[0]?.body, { error: 'too many jobs', retryable: true })
+})
+
+test('a bodiless container rejection falls back to the generic message', async () => {
+  // The bare status with no body is the container's most common non-2xx shape, including the warm
+  // job-limit 429. An empty body must reach the generic message, never a blank error string.
+  const { post } = warmRejectionRoutes(() => new Response(null, { status: 429 }))
+  const { responded, res } = fakeRegionsRes()
+  await post.handler({ params: {}, body: CREATE_BODY }, res)
+  assert.equal(responded[0]?.status, 429, 'a job-limit rejection stays a 429')
+  assert.deepEqual(responded[0]?.body, { error: 'tilecache rejected warm start' })
+})
+
+test('an unprintable container rejection body falls back to the generic message', async () => {
+  // A bell character: normalizePrintableText rejects the whole body rather than letting a control
+  // character through into the caller's JSON.
+  const { post } = warmRejectionRoutes(() => new Response('rejected\u0007', { status: 400 }))
+  const { responded, res } = fakeRegionsRes()
+  await post.handler({ params: {}, body: CREATE_BODY }, res)
+  assert.equal(responded[0]?.status, 400)
+  assert.deepEqual(responded[0]?.body, { error: 'tilecache rejected warm start' })
 })

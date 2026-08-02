@@ -78,6 +78,113 @@ test('POST /api/cache/clear-scroll authenticates and relays the freed totals', a
   assert.equal(calls[0]?.init?.headers?.['x-tilecache-token'], 'control-secret')
 })
 
+test('POST /api/cache/clear-scroll reports a container auth or server fault as a gateway failure', async () => {
+  // A container 401 means the container rejected the plugin's own control token, and a container 500
+  // or 502 means the container failed outright. Neither is anything the caller sent, so neither may
+  // become the caller's status: on an /api route a 401 tells an integrator to check the Signal K
+  // session. A 503 is deliberately excluded, and covered by the retry test below.
+  for (const status of [401, 500, 502]) {
+    const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
+    const { router, routes } = makeRegionsRouter()
+    registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
+      dataDir,
+      fetchImpl: async () => new Response(null, { status }),
+      getControlToken: () => 'control-secret'
+    })
+    const route = routes.find(r => r.method === 'POST' && r.path === '/api/cache/clear-scroll')!
+    const { responded, res } = fakeRegionsRes()
+    await route.handler({ params: {}, body: {} }, res)
+    // One status call: a second would mean the handler chose a status before it knew whether the body
+    // could be read, and the last one wins on a real response.
+    assert.deepEqual(
+      responded,
+      [{ status: 502, body: { error: 'tilecache request failed' } }],
+      `a container ${status} must not become the caller's status`
+    )
+  }
+})
+
+test('POST /api/cache/config does not surface a container control-token rejection as the caller 401', async () => {
+  // Predates the relay work: this route sets the status from the container directly. The container
+  // gates /cache/scroll-ttl on the control token, so a stale container from an earlier install
+  // answers 401 and the caller was told its own session had failed.
+  const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
+  const { router, routes } = makeRegionsRouter()
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
+    dataDir,
+    fetchImpl: async () => new Response(null, { status: 401 }),
+    getControlToken: () => 'stale-token'
+  })
+  const route = routes.find(r => r.method === 'POST' && r.path === '/api/cache/config')!
+  const { responded, res } = fakeRegionsRes()
+  await route.handler({ params: {}, body: { ttlDays: 7 } }, res)
+  assert.equal(responded[0]?.status, 502)
+  // The TTL is the plugin's own state and is persisted before the container call, so it survives.
+  assert.equal(loadRegionsStore(dataDir).cacheScrollTtlDays, 7)
+})
+
+test('a busy container keeps its 503 and its retry hint instead of becoming a gateway failure', async () => {
+  // The container's admission layer sheds a busy request with 503 and Retry-After, and it wraps every
+  // route, so any forwarded call can shed. 503 is the one 5xx the caller can act on, by retrying, and
+  // collapsing it into 502 would stop a client that retries on 503 and not on 502.
+  const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
+  const headers: Array<[string, string]> = []
+  const { router, routes } = makeRegionsRouter()
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
+    dataDir,
+    fetchImpl: async () => new Response('tile cache is busy', { status: 503, headers: { 'retry-after': '1' } }),
+    getControlToken: () => 'control-secret'
+  })
+  const route = routes.find(r => r.method === 'POST' && r.path === '/api/cache/clear-scroll')!
+  const { responded, res } = fakeRegionsRes()
+  await route.handler({ params: {}, body: {} }, { ...res, setHeader: (n, v) => headers.push([n, v]) })
+  assert.equal(responded[0]?.status, 503, 'a shed request stays retryable')
+  assert.deepEqual(headers, [['retry-after', '1']], "the container's own timing hint must survive the forward")
+})
+
+test('a malformed container retry hint is not forwarded to the caller', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
+  const headers: Array<[string, string]> = []
+  const { router, routes } = makeRegionsRouter()
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
+    dataDir,
+    fetchImpl: async () => new Response(null, { status: 503, headers: { 'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT' } })
+  })
+  const route = routes.find(r => r.method === 'POST' && r.path === '/api/cache/clear-scroll')!
+  const { responded, res } = fakeRegionsRes()
+  await route.handler({ params: {}, body: {} }, { ...res, setHeader: (n, v) => headers.push([n, v]) })
+  assert.equal(responded[0]?.status, 503, 'the status still relays')
+  assert.deepEqual(headers, [], 'only the delay-seconds form the container emits is forwarded')
+})
+
+test('a container status that describes the caller request is still relayed', async () => {
+  // The gateway rule must not swallow the documented client-facing statuses.
+  const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
+  const { router, routes } = makeRegionsRouter()
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
+    dataDir,
+    fetchImpl: async () => new Response(null, { status: 429 })
+  })
+  const route = routes.find(r => r.method === 'POST' && r.path === '/api/cache/config')!
+  const { responded, res } = fakeRegionsRes()
+  await route.handler({ params: {}, body: { ttlDays: 7 } }, res)
+  assert.equal(responded[0]?.status, 429)
+})
+
+test('POST /api/cache/clear-scroll still reports 502 when a successful container response is malformed', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
+  const { router, routes } = makeRegionsRouter()
+  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
+    dataDir,
+    fetchImpl: async () => new Response('{ not json', { status: 200, headers: { 'content-type': 'application/json' } })
+  })
+  const route = routes.find(r => r.method === 'POST' && r.path === '/api/cache/clear-scroll')!
+  const { responded, res } = fakeRegionsRes()
+  await route.handler({ params: {}, body: {} }, res)
+  assert.equal(responded[0]?.status, 502)
+  assert.deepEqual(responded[0]?.body, { error: 'tilecache returned a malformed response' })
+})
+
 test('GET /api/cache/stats merges ttlDays from the store and passes bySource through', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
   saveRegionsStore(dataDir, { ...DEFAULT_REGIONS_STORE, cacheScrollTtlDays: 14 })

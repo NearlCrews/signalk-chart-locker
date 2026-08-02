@@ -34,14 +34,12 @@ export function registerCacheInfoRoute (router: CacheInfoRouter, app: ServerAPI,
   router.get('/api/cache-info', (_req, res) => {
     try {
       const configuredPath = deps.cachePath?.() ?? null
-      let measuredPath = configuredPath ?? dataDir
       let usingFallback = false
       let freeGiB: number
       try {
-        freeGiB = readFreeGiB(measuredPath, deps.statfs)
+        freeGiB = readFreeGiB(configuredPath ?? dataDir, deps.statfs)
       } catch (error) {
         if (configuredPath === null) throw error
-        measuredPath = dataDir
         usingFallback = true
         freeGiB = readFreeGiB(dataDir, deps.statfs)
       }

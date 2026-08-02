@@ -23,9 +23,10 @@ import {
   type WarmJobSnapshot,
   type WarmSnapshot
 } from '../runtime/warm-contract.js'
-import { readBoundedResponseJson } from '../runtime/bounded-response.js'
+import { MAX_MANAGED_CONTAINER_ERROR_BYTES, readBoundedResponseJson, readBoundedResponseText } from '../runtime/bounded-response.js'
 import { isRecord } from '../shared/record.js'
 import { MIN_WARM_INTERVAL_SECS } from '../runtime/position-warm.js'
+import { isWarmableSource, timeDynamicSourceIds, warmableSourceIds } from '../charts/source-policy.js'
 
 // The plugin compiles to CommonJS, while chart-sources exposes an ESM-only runtime.
 const chartSources = import('signalk-chart-sources')
@@ -40,6 +41,8 @@ export interface RegionsResponse {
   status (code: number): RegionsResponse
   json (value: unknown): void
   end (): void
+  /** Optional so the route fakes stay minimal. Express supplies it; only the retry hint uses it. */
+  setHeader?: (name: string, value: string) => void
 }
 
 export interface RegionsRouter {
@@ -76,6 +79,12 @@ const MAX_WARM_DISTANCE_METERS = 100_000
 const MAX_SOURCE_IDS = 64
 const MAX_SOURCE_ID_LENGTH = 256
 const MAX_REGION_NAME_LENGTH = 120
+
+/** The one wording for a selection the container will never store, so the region route, the
+ * position-warm route, and the re-download route all explain the refusal the same way. */
+function timeDynamicRejection (ids: readonly string[]): string {
+  return `these sources are time-dynamic and are never stored offline: ${ids.join(', ')}`
+}
 
 // Container route bases reached from more than one handler, named so each path lives once. Single-use
 // routes (scroll-ttl, clear-scroll, and geocode) stay inline at their one call site.
@@ -122,6 +131,69 @@ function readContainerStats (value: unknown): ContainerStats | undefined {
   return { regionsFreeBytes: value.regionsFreeBytes, perSourceAvgBytes: averages }
 }
 
+/**
+ * The status the caller sees for a container response the plugin forwarded on its behalf.
+ *
+ * A container 401 means the container rejected the plugin's own control token, and a container 500 or
+ * 502 means the container failed outright. Neither is anything the caller sent or can act on, so
+ * neither may become the caller's status: 401 on an /api route tells an integrator to check the
+ * Signal K session (see docs/API.md), and RFC 9110 requires a challenge the plugin cannot supply.
+ * Both are gateway conditions, which the documented 502 already covers.
+ *
+ * A container 503 is the exception among the 5xx, and is relayed. The admission layer sheds a busy
+ * request with 503 and a Retry-After, and a warm start during shutdown answers the same way. Both
+ * mean retry shortly, which is what the caller can act on and what this plugin's own 503 already
+ * means. Every remaining status describes the caller's own request (a 400 bbox, a 404 region, a 409
+ * conflict, a 429 job limit) and is relayed too.
+ */
+function callerStatus (containerStatus: number): number {
+  if (containerStatus === 503) return 503
+  return containerStatus === 401 || containerStatus >= 500 ? 502 : containerStatus
+}
+
+/** Only the admission shed sets Retry-After, always as delay-seconds. Bounded and digit-checked so a
+ * malformed value cannot reach the caller's headers or make setHeader throw inside a handler. */
+const RETRY_AFTER_SECONDS = /^\d{1,5}$/
+
+/**
+ * The body for a rejected container control request.
+ *
+ * The container explains a warm rejection in a plain-text body, because axum renders a String that
+ * way: "bbox does not intersect the selected sources" is the message the operator needs, and parsing
+ * it as JSON discards exactly that. Prefer a JSON object when the container sent one, fall back to its
+ * text bounded and checked for printability, and only then to a generic message. Bounded to the same
+ * 500 characters the configuration push uses for a container error detail.
+ */
+async function containerErrorBody (upstream: Response, fallback: string): Promise<Record<string, unknown>> {
+  let text: string
+  try {
+    text = await readBoundedResponseText(upstream, MAX_MANAGED_CONTAINER_ERROR_BYTES)
+  } catch {
+    return { error: fallback }
+  }
+  try {
+    const parsed = JSON.parse(text) as unknown
+    if (isRecord(parsed)) return parsed
+  } catch {
+    // Not JSON, so fall through to the text form below.
+  }
+  return { error: normalizePrintableText(text.slice(0, 500), 500) ?? fallback }
+}
+
+/**
+ * Set the caller's status for a forwarded container response, carrying the container's own retry hint
+ * when the status it produced is one the caller can retry. Every forwarding site goes through this, so
+ * the mapping and the hint cannot drift apart.
+ */
+function reportContainerStatus (res: RegionsResponse, upstream: Response): RegionsResponse {
+  const status = callerStatus(upstream.status)
+  if (status === 503) {
+    const retryAfter = upstream.headers.get('retry-after')
+    if (retryAfter !== null && RETRY_AFTER_SECONDS.test(retryAfter)) res.setHeader?.('retry-after', retryAfter)
+  }
+  return res.status(status)
+}
+
 function storageStatus (error: unknown): number {
   const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined
   return code === 'ENOSPC' || code === 'EDQUOT' ? 507 : 500
@@ -161,6 +233,11 @@ function readPositionWarmPatch (value: unknown, sourceById: (id: string) => Char
   }
   if ('sources' in value) {
     if (!validSourceIds(value.sources, true, sourceById)) return 'sources must be a unique array of valid source IDs'
+    // Refuse here rather than let the warmer drop them: a stored time-dynamic id survives until the
+    // next start, where the startup reconcile removes it, so the saved selection would change under
+    // the operator with no explanation.
+    const timeDynamic = timeDynamicSourceIds(value.sources, sourceById)
+    if (timeDynamic.length > 0) return timeDynamicRejection(timeDynamic)
     patch.sources = value.sources
   }
   return patch
@@ -198,6 +275,10 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     return address
   }
 
+  // The container answers a rejected or failed control request with a bare status and no body, so an
+  // unparseable body means a malformed response only when the container claimed success. Every other
+  // status is relayed as-is, so the caller sees the real failure (the documented 400, 404, and 502 on
+  // geocode, or a 401 or 500 on a cache mutation) instead of a blanket 502.
   const relay = async (res: RegionsResponse, upstream: Promise<Response>): Promise<void> => {
     let response: Response
     try {
@@ -206,11 +287,15 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
       res.status(502).json({ error: 'tilecache unreachable' })
       return
     }
+    let body: unknown
     try {
-      res.status(response.status).json(await readBoundedResponseJson(response))
+      body = await readBoundedResponseJson(response)
     } catch {
-      res.status(502).json({ error: 'tilecache returned a malformed response' })
+      if (response.ok) res.status(502).json({ error: 'tilecache returned a malformed response' })
+      else reportContainerStatus(res, response).json({ error: 'tilecache request failed' })
+      return
     }
+    reportContainerStatus(res, response).json(body)
   }
 
   // The latest warm job per region. The container lookup by region recovers this map after a lost POST
@@ -459,7 +544,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     try {
       const upstream = await fetchImpl(`http://${address}/cache/scroll-ttl`, warmInit({ ttlSecs: ttlDays * 86_400 }))
       if (!upstream.ok) {
-        res.status(upstream.status).json({ error: 'tilecache rejected cache configuration' }); return
+        reportContainerStatus(res, upstream).json({ error: 'tilecache rejected cache configuration' }); return
       }
       res.status(204).end()
     } catch {
@@ -494,7 +579,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     }
     try {
       const ttlDays = loadRegionsStore(dataDir).cacheScrollTtlDays
-      res.status(response.status).json({ ...body, ttlDays })
+      reportContainerStatus(res, response).json({ ...body, ttlDays })
     } catch (error) {
       storageFailure(res, error)
     }
@@ -516,12 +601,20 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     let regions: SavedRegion[]
     try {
       const { chartSourceById } = await chartSources
-      reconcilePositionWarmSources(dataDir, (id) => chartSourceById(id) !== undefined)
+      // The same rule the plugin start applies, so a time-dynamic id cannot linger in the saved
+      // selection when a failed start meant the startup reconcile never ran.
+      reconcilePositionWarmSources(dataDir, (id) => {
+        const source = chartSourceById(id)
+        return source !== undefined && isWarmableSource(source)
+      })
       regions = listRegions(dataDir)
       const totals = address === null ? null : await allRegionBytes(address)
+      // A region saved before a source became time-dynamic still lists it, and the container silently
+      // stores nothing for it. Report those ids so a client does not present the region as complete.
       const dtos = regions.map((region) => ({
         ...region,
         unavailableSourceIds: region.sourceIds.filter((id) => chartSourceById(id) === undefined),
+        timeDynamicSourceIds: timeDynamicSourceIds(region.sourceIds, chartSourceById),
         cachedBytes: totals?.[region.id] ?? (totals === null ? region.bytes : 0)
       }))
       res.status(200).json(dtos)
@@ -543,6 +636,13 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
         normalizedName === undefined) {
       res.status(400).json({ error: `bbox must be within world bounds; sourceIds must be non-empty and unique; zooms must be integers from 0 to ${MAX_WARM_ZOOM}; name must be 1 to ${MAX_REGION_NAME_LENGTH} printable characters` }); return
     }
+    // A time-dynamic source expires on a timer, so the container skips it and stores nothing for it.
+    // Refusing here keeps the saved region honest about what it holds, and keeps the estimate below
+    // from charging the regions budget for tiles that will never exist.
+    const timeDynamic = timeDynamicSourceIds(sourceIds, chartSourceById)
+    if (timeDynamic.length > 0) {
+      res.status(400).json({ error: timeDynamicRejection(timeDynamic) }); return
+    }
     const address = withAddress(res); if (address === null) return
     // Re-validate the byte estimate authoritatively server-side, upfront, with the SHARED estimateBytes
     // (so the panel and the plugin agree), and refuse over-budget BEFORE persisting or starting the job.
@@ -553,7 +653,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
       res.status(502).json({ error: 'tilecache unreachable' }); return
     }
     if (!statsResponse.ok) {
-      res.status(statsResponse.status).json({ error: 'tilecache statistics unavailable' }); return
+      reportContainerStatus(res, statsResponse).json({ error: 'tilecache statistics unavailable' }); return
     }
     let stats: ContainerStats | undefined
     try {
@@ -604,13 +704,13 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     try {
       const warmResp = await fetchImpl(`http://${address}${CONTAINER_WARM_PATH}`, warmInit({ sources: sourceIds, bbox, minzoom, maxzoom, regionId: region.id }))
       if (!warmResp.ok) {
-        const body = await readBoundedResponseJson(warmResp).catch(() => null)
+        const body = await containerErrorBody(warmResp, 'tilecache rejected warm start')
         try {
           removeRegion(dataDir, region.id)
         } catch (error) {
           storageFailure(res, error); return
         }
-        res.status(warmResp.status).json(isRecord(body) ? body : { error: 'tilecache rejected warm start' })
+        reportContainerStatus(res, warmResp).json(body)
         return
       }
       const warmBody = (await readBoundedResponseJson(warmResp)) as { jobId?: unknown }
@@ -649,7 +749,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     const address = withAddress(res); if (address === null) return
     try {
       const r = await fetchImpl(`http://${address}${CONTAINER_REGION_PATH}/${encodeURIComponent(id)}`, { method: 'DELETE', headers: mutationHeaders() })
-      if (!r.ok) { res.status(r.status).end(); return }
+      if (!r.ok) { reportContainerStatus(res, r).end(); return }
     } catch {
       res.status(503).end(); return
     }
@@ -715,17 +815,29 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
       storageFailure(res, error); return
     }
     if (!region) { res.status(404).json({ error: 'no such region' }); return }
+    // A region saved before a source became time-dynamic still lists it. Unlike POST /api/regions this
+    // is not a selection the caller is making now, so send the storable subset rather than refuse a
+    // retry, and refuse only when nothing in the region can be stored at all.
+    const { chartSourceById } = await chartSources
+    const warmable = warmableSourceIds(region.sourceIds, chartSourceById)
+    if (warmable.length === 0) {
+      const timeDynamic = timeDynamicSourceIds(region.sourceIds, chartSourceById)
+      res.status(400).json({
+        error: timeDynamic.length > 0
+          ? timeDynamicRejection(timeDynamic)
+          : `no source in this region is in the chart catalog: ${region.sourceIds.join(', ')}`
+      }); return
+    }
     const address = withAddress(res); if (address === null) return
     // No upfront estimate gate here, unlike POST /api/regions. The container stages the replacement
     // under a temporary id, credits the target's current bytes during the download, and atomically
     // swaps the pins only when the final set fits the live budget.
     try {
       const warmResp = await fetchImpl(`http://${address}${CONTAINER_WARM_PATH}`, warmInit({
-        sources: region.sourceIds, bbox: region.bbox, minzoom: region.minzoom, maxzoom: region.maxzoom, regionId: region.id
+        sources: warmable, bbox: region.bbox, minzoom: region.minzoom, maxzoom: region.maxzoom, regionId: region.id
       }))
       if (!warmResp.ok) {
-        const body = await readBoundedResponseJson(warmResp).catch(() => null)
-        res.status(warmResp.status).json(isRecord(body) ? body : { error: 'tilecache rejected re-download' })
+        reportContainerStatus(res, warmResp).json(await containerErrorBody(warmResp, 'tilecache rejected re-download'))
         return
       }
       const body = (await readBoundedResponseJson(warmResp)) as { jobId?: unknown }

@@ -19,7 +19,11 @@ be present in the discovered registry.
 Chart management, saved-region management, cache configuration, cache clearing, and reverse
 geocoding remain administrator-only. A 401 or 403 from an `/api` route should be checked against
 `/skServer/loginStatus` before prompting the user to sign in because a valid non-administrator
-session and a route-permission failure are distinct conditions.
+session and a route-permission failure are distinct conditions. A 401 always concerns the caller's
+own Signal K session: the tile-cache container authenticates the plugin with a private control token
+the caller cannot influence, so a container rejection of that token is reported as 502, never
+relayed as the caller's 401. A container 503 is relayed as 503, with the container's `Retry-After`
+when it sent one, because a shed or shutting-down container is retryable.
 
 ## Browser-facing routes
 
@@ -42,7 +46,9 @@ session and a route-permission failure are distinct conditions.
 
 `ttlDays` must be an integer. A value of 0 disables age-based removal. The setting is persisted before
 the container call, so a 503 or 502 still leaves it ready for the next plugin start. A non-success
-container response is relayed rather than converted to success.
+container response is reported rather than converted to success: a status describing the request is
+relayed, as is a retryable 503, while a container control-token rejection or outright server fault
+becomes 502.
 
 Important cache-stat fields include:
 
@@ -103,6 +109,9 @@ Validation rules:
   -90 through 90. West greater than east represents an antimeridian-crossing region.
 - `sourceIds` contains 1 through 64 unique identifiers from the shared chart-source catalog, each no
   longer than 256 characters.
+- No selected source may be time-dynamic. The catalog marks such a source with `maxAgeSeconds`,
+  meaning its tiles expire on a timer, so the cache never stores it ahead of time. Selecting one
+  returns 400 naming the offending identifiers.
 - Zooms are integers from 0 through 24, and `minzoom` cannot exceed `maxzoom`.
 - The trimmed name contains 1 through 120 characters.
 - The server planning estimate must fit `regionsFreeBytes` before the region is persisted.
@@ -117,6 +126,15 @@ whose response is lost or lacks a valid identifier returns HTTP 202 with
 
 A successful re-download response contains `{ "jobId": "..." }`. An accepted re-download whose
 response is lost or lacks a valid identifier returns HTTP 202 with `{ "recovery": "pending" }`.
+
+A region saved before one of its sources became time-dynamic keeps listing that source. Re-download
+sends only the sources the cache will store, rather than refusing the retry, and returns 400 only when
+the region has no storable source left. Each listed region reports its unstorable identifiers so a
+client does not present the region as complete:
+
+- `unavailableSourceIds`: identifiers the chart-source catalog no longer carries.
+- `timeDynamicSourceIds`: identifiers the catalog still carries but marks with `maxAgeSeconds`, so
+  nothing was ever stored for them.
 
 In either recovery case, the durable region remains `downloading` while the plugin recovers the
 retained job by region ID. A deterministic container rejection does not enter recovery pending.
@@ -145,6 +163,9 @@ Example patch:
 
 Limits are documented in the [operations guide](OPERATIONS.md#position-warming). Unknown fields are
 ignored, but every recognized field that is supplied must have the documented type and range.
+`sources` follows the same time-dynamic rule as a saved region: a source the catalog marks with
+`maxAgeSeconds` is refused with 400 naming it, rather than accepted and then dropped at the next
+plugin start.
 
 ## Chart management
 
@@ -177,9 +198,9 @@ false, the private container endpoint and this proxy return 404 without contacti
 
 | Status | Meaning |
 | ------ | ------- |
-| 400 | Malformed input, invalid bounds, unknown sources, invalid estimate data, invalid zooms, or a region estimate above budget |
+| 400 | Malformed input, invalid bounds, unknown sources, a time-dynamic source, invalid estimate data, invalid zooms, or a region estimate above budget |
 | 404 | Unknown chart, region, source, or warm job, or reverse geocoding is disabled |
 | 409 | PMTiles management is disabled by a provider conflict, the saved-region limit is reached, a region warm is already active, or deletion could not stop an active warm |
 | 429 | The container warm-job limit is active |
-| 502 | The container request failed or returned an invalid response |
-| 503 | The tile-cache container, its address, or a required internal service is temporarily unavailable |
+| 502 | The container request failed, returned an invalid response, rejected the plugin's control token, or reported an outright server fault |
+| 503 | The tile-cache container, its address, or a required internal service is temporarily unavailable, or the container shed the request while busy. Retryable, and carries `Retry-After` when the container supplied one |

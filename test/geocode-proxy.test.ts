@@ -44,6 +44,40 @@ test('GET /api/geocode returns 400 when lat or lon is missing', async () => {
   assert.equal(responded[2]?.status, 400, 'missing lon must be 400')
 })
 
+test('GET /api/geocode relays the documented container statuses when the body is empty', async () => {
+  // The container answers an invalid point with 400, a disabled or unknown geocode endpoint with 404,
+  // and an unreachable provider with 502, each as a bare status with no body. docs/API.md documents
+  // those statuses on this route, so they must reach the caller rather than collapsing into one 502.
+  for (const status of [400, 404, 502]) {
+    const { router, routes } = makeRegionsRouter()
+    registerRegionsRoutes(router, securedApp(), () => '127.0.0.1:9999', {
+      fetchImpl: async () => new Response(null, { status })
+    })
+    const route = routes.find(c => c.path === '/api/geocode')!
+    const { responded, res } = fakeRegionsRes()
+    await route.handler({ params: {}, body: null, query: { lat: '37.77', lon: '-122.41' } }, res)
+    // One status call, carrying the container status: a second call would mean the handler chose a
+    // status before it knew whether the body could be read, and the last one wins on a real response.
+    assert.deepEqual(
+      responded,
+      [{ status, body: { error: 'tilecache request failed' } }],
+      `a bodyless container ${status} must be relayed`
+    )
+  }
+})
+
+test('GET /api/geocode reports 502 when a successful container response is malformed', async () => {
+  const { router, routes } = makeRegionsRouter()
+  registerRegionsRoutes(router, securedApp(), () => '127.0.0.1:9999', {
+    fetchImpl: async () => new Response('{ not json', { status: 200, headers: { 'content-type': 'application/json' } })
+  })
+  const route = routes.find(c => c.path === '/api/geocode')!
+  const { responded, res } = fakeRegionsRes()
+  await route.handler({ params: {}, body: null, query: { lat: '37.77', lon: '-122.41' } }, res)
+  assert.equal(responded[0]?.status, 502)
+  assert.deepEqual(responded[0]?.body, { error: 'tilecache returned a malformed response' })
+})
+
 test('GET /api/geocode returns 404 without egress when geocoding is disabled', async () => {
   let calls = 0
   const { router, routes } = makeRegionsRouter()

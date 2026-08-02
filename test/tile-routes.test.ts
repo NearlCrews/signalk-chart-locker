@@ -23,16 +23,21 @@ function collectRoutes (): { routes: Record<string, (req: ProxyRequest, res: nev
   return { routes, router }
 }
 
+/** Dispatches by event name, so a listener registered for one request event can never stand in for
+ *  another: moving the proxy's cancel hook onto a different event has to fail these tests. */
 function fakeReq (url: string, headers: Record<string, string> = {}): ProxyRequest & { triggerClose: () => void, triggerAborted: () => void } {
-  const closeCb: () => void = () => {}
-  let abortedCb: () => void = () => {}
+  const listeners = new Map<string, Array<() => void>>()
   return {
     url,
     headers,
-    on (_event, cb) { abortedCb = cb },
-    triggerClose () { closeCb() },
-    triggerAborted () { abortedCb() }
-  } as ProxyRequest & { triggerClose: () => void, triggerAborted: () => void }
+    on (event: string, cb: () => void) {
+      const registered = listeners.get(event) ?? []
+      registered.push(cb)
+      listeners.set(event, registered)
+    },
+    triggerClose () { for (const cb of listeners.get('close') ?? []) cb() },
+    triggerAborted () { for (const cb of listeners.get('aborted') ?? []) cb() }
+  } as unknown as ProxyRequest & { triggerClose: () => void, triggerAborted: () => void }
 }
 
 const tilePath = '/tile/:source/:z/:x/:y'
@@ -148,7 +153,7 @@ test('a browser cancel aborts the upstream fetch', async () => {
   assert.equal(aborted, true)
 })
 
-test('a normal completed request close does not abort the pending upstream response', async () => {
+test('a request close, which fires on every completed request, does not abort the pending upstream response', async () => {
   const { routes, router } = collectRoutes()
   let signal: AbortSignal | undefined
   let resolveFetch: ((response: Response) => void) | undefined
