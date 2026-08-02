@@ -18,10 +18,14 @@ const snuiVersion = snuiPackage.version
 // The theme storage key, read from the package source because the exports map exposes only the ESM
 // root, which the CommonJS-transformed spec cannot require. Keeps the persistence assertion on the
 // library's published key rather than a restated literal.
-const themeStorageKey = /THEME_STORAGE_KEY = "([^"]+)"/.exec(
-  readFileSync(resolve('node_modules/signalk-nearlcrews-ui/dist/theme/contract.js'), 'utf8')
-)?.[1]
-if (themeStorageKey === undefined) throw new Error('THEME_STORAGE_KEY not found in the signalk-nearlcrews-ui theme contract')
+function readThemeStorageKey (): string {
+  const key = /THEME_STORAGE_KEY = "([^"]+)"/.exec(
+    readFileSync(resolve('node_modules/signalk-nearlcrews-ui/dist/theme/contract.js'), 'utf8')
+  )?.[1]
+  if (key === undefined) throw new Error('THEME_STORAGE_KEY not found in the signalk-nearlcrews-ui theme contract')
+  return key
+}
+const themeStorageKey = readThemeStorageKey()
 
 async function expectVisibleFocusRing (control: Locator): Promise<void> {
   const outline = await control.evaluate((element) => {
@@ -46,6 +50,24 @@ async function holdNextFixtureAction (page: Page, action: string): Promise<void>
     if (typeof hold !== 'function') throw new Error('Fixture action hold function is unavailable.')
     hold(actionName)
   }, action)
+}
+
+/**
+ * Writes the shared theme key the way another document would, then waits for the panel to commit
+ * whatever the resulting storage event produced. Without the wait, asserting that a theme stayed
+ * put would pass while a reset was still pending.
+ */
+async function writeSharedThemeFromAnotherDocument (page: Page, value: string | null): Promise<void> {
+  await page.evaluate(({ key, newValue }) => {
+    if (newValue === null) localStorage.removeItem(key)
+    else localStorage.setItem(key, newValue)
+    window.dispatchEvent(new StorageEvent('storage', { key, newValue, storageArea: localStorage }))
+  }, { key: themeStorageKey, newValue: value })
+  await page.evaluate(async () => {
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    })
+  })
 }
 
 test.beforeEach(async ({ page }) => {
@@ -263,7 +285,16 @@ test('explains unavailable filesystem guidance and failed live-data refreshes', 
   await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
   const unavailableStats = page.getByText('Statistics unavailable: HTTP 503', { exact: true })
   await expect(unavailableStats).toHaveAttribute('role', 'status')
-  await expect(unavailableStats).toHaveAttribute('aria-live', 'polite')
+
+  // A roled live region must not also carry aria-live, which double announces on some screen
+  // readers. Both roles that imply a live region are covered, the panel's own and the library's
+  // alike, and the attribute selector pins the literal pairing the rule is about.
+  const roledRegions = page.locator('[role="status"], [role="alert"]')
+  const roledRegionCount = await roledRegions.count()
+  expect(roledRegionCount).toBeGreaterThan(0)
+  for (let index = 0; index < roledRegionCount; index += 1) {
+    await expect(roledRegions.nth(index)).not.toHaveAttribute('aria-live')
+  }
 
   await page.goto('/?fail-cache-info')
   await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
@@ -339,6 +370,24 @@ test('supports every theme and persists the choice', async ({ page }) => {
       .toBe(value)
   }
   await themeGroup.getByRole('radio', { name: 'Auto' }).click()
+  await expect(root).not.toHaveAttribute('data-snui-theme')
+})
+
+test('keeps its theme when another panel version writes an unrecognized shared value', async ({ page }) => {
+  // Signal K Admin can load panels built against different versions of the library, and they all
+  // share one theme key. A value this version does not recognize is ignored, so the panel does not
+  // fight the theme another panel just wrote. Only a genuine clear returns it to Auto.
+  const root = page.locator('[data-snui-root]')
+  await page.getByRole('radiogroup', { name: 'Panel theme' }).getByRole('radio', { name: 'Night' }).click()
+  await expect(root).toHaveAttribute('data-snui-theme', 'night')
+
+  await writeSharedThemeFromAnotherDocument(page, 'midnight-red')
+  await expect(root).toHaveAttribute('data-snui-theme', 'night')
+
+  await writeSharedThemeFromAnotherDocument(page, 'light')
+  await expect(root).toHaveAttribute('data-snui-theme', 'light')
+
+  await writeSharedThemeFromAnotherDocument(page, null)
   await expect(root).not.toHaveAttribute('data-snui-theme')
 })
 

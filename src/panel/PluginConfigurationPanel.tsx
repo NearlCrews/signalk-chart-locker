@@ -251,7 +251,9 @@ function SupportedPluginConfigurationPanel ({ configuration, save }: Props): Rea
           <Stack gap={3}>
             {cache.stats === null
               ? (
-                <p className={styles.secondaryText} role='status' aria-live='polite'>
+                // A roled live region carries no aria-live: the pair double announces on some
+                // screen readers, and status already implies polite.
+                <p className={styles.secondaryText} role='status'>
                   {cache.error === null ? 'Loading cache statistics...' : `Statistics unavailable: ${cache.error}`}
                 </p>
                 )

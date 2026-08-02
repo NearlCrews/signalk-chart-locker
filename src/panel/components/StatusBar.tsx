@@ -51,7 +51,7 @@ export default memo(function StatusBar ({ status, lastUpdatedMs }: Props): React
         : undefined}
     >
       {status === null
-        ? <StatusIndicator tone='neutral' role='status' aria-live='polite'>Loading status...</StatusIndicator>
+        ? <StatusIndicator tone='neutral' live='polite'>Loading status...</StatusIndicator>
         : <StatusLine status={status} />}
     </Section>
   )
@@ -62,10 +62,10 @@ function StatusLine ({ status }: { status: PluginRuntimeStatus }): React.ReactEl
   const { enabled, statusMessage } = status
   if (statusMessage !== '') {
     return (
-      <StatusIndicator tone={enabled ? 'success' : 'neutral'} role='status' aria-live='polite'>{statusMessage}</StatusIndicator>
+      <StatusIndicator tone={enabled ? 'success' : 'neutral'} live='polite'>{statusMessage}</StatusIndicator>
     )
   }
   return enabled
-    ? <StatusIndicator tone='success' role='status' aria-live='polite'>Plugin enabled.</StatusIndicator>
-    : <StatusIndicator tone='neutral' role='status' aria-live='polite'>Plugin disabled. Enable it above to start the tile cache.</StatusIndicator>
+    ? <StatusIndicator tone='success' live='polite'>Plugin enabled.</StatusIndicator>
+    : <StatusIndicator tone='neutral' live='polite'>Plugin disabled. Enable it above to start the tile cache.</StatusIndicator>
 }
