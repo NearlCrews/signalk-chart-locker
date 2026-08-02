@@ -1474,7 +1474,7 @@ limitations under the License.
 
 
 **Used by:**
-- `http` 1.4.2
+- `http` 1.5.0
 
                                       Apache License
                         Version 2.0, January 2004
@@ -2092,14 +2092,14 @@ limitations under the License.
 
 
 **Used by:**
-- `async-compression` 0.4.42
+- `async-compression` 0.4.43
 - `atomic-waker` 1.1.2
 - `base64` 0.22.1
 - `bitflags` 2.13.1
 - `cfg-if` 1.0.4
 - `compression-codecs` 0.4.38
 - `compression-core` 0.4.32
-- `displaydoc` 0.2.6
+- `displaydoc` 0.2.7
 - `errno` 0.3.14
 - `flate2` 1.1.9
 - `form_urlencoded` 1.2.2
@@ -2115,7 +2115,7 @@ limitations under the License.
 - `openssl-probe` 0.2.1
 - `percent-encoding` 2.3.2
 - `rustls-native-certs` 0.8.4
-- `rustls` 0.23.42
+- `rustls` 0.23.43
 - `signal-hook-registry` 1.4.8
 - `smallvec` 1.15.2
 - `socket2` 0.6.5
@@ -2537,7 +2537,7 @@ limitations under the License.
 - `cpufeatures` 0.3.0
 - `crypto-common` 0.2.2
 - `digest` 0.11.3
-- `hybrid-array` 0.4.13
+- `hybrid-array` 0.4.14
 - `sha2` 0.11.0
 
                                       Apache License
@@ -3812,7 +3812,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 
 **Used by:**
-- `tokio-macros` 2.7.1
+- `tokio-macros` 2.7.2
 
         MIT License
 
