@@ -39,11 +39,6 @@ export type ProxyFetch = (url: string, init: { headers: Record<string, string>, 
 
 /** Upstream headers relayed to the browser verbatim, so the HTTP cache, range, and stale signal all work. */
 const RELAYED_HEADERS = ['content-type', 'etag', 'content-range', 'accept-ranges', 'content-length', 'cache-control', 'x-tilecache', 'last-modified']
-/** Freshness headers relayed on the REWRITTEN style document. The body is transformed (the sprite URL is
- * absolutized), so the upstream strong etag and content-length no longer describe it and are not relayed;
- * cache-control and last-modified are body-independent, so relaying them gives the style the same browser
- * caching every other proxied path gets instead of none. */
-const STYLE_CACHE_HEADERS = ['cache-control', 'last-modified']
 /** Statuses with no body: piping `Readable.fromWeb(null)` would throw, so end without a body. */
 const BODYLESS = new Set([204, 304, 416])
 const NO_SNIFF_HEADER = 'X-Content-Type-Options'
@@ -248,7 +243,9 @@ async function rewriteStyleSprite (req: ProxyRequest, res: ProxyResponse, addres
   }
   res.status(upstream.status)
   res.setHeader('content-type', 'application/json')
-  relayHeaders(upstream, res, STYLE_CACHE_HEADERS)
+  // The body and sprite URL depend on this request's trusted origin, so upstream validators and
+  // shared-cache policy cannot safely describe the rewritten representation.
+  res.setHeader('cache-control', 'no-store')
   res.end(JSON.stringify(style))
 }
 

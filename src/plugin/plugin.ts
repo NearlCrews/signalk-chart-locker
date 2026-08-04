@@ -948,9 +948,9 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
       lifecycle = lifecycle.then(() => doStop())
       return lifecycle
     },
-    // Mount the tile and style proxy through the readonly scope when the server supports scoped plugin
-    // routers. Released servers without access() keep the fallback routes inside their blanket
-    // administrator-only plugin mount. Management routes stay admin-gated and fail closed.
+    // Mount browser-facing reads through the readonly scope when the server supports scoped plugin
+    // routers. Servers without access() retain the legacy public-read route behavior required by
+    // chart clients. Management routes stay admin-gated and fail closed.
     registerWithRouter (router) {
       const accessRouter = router as unknown as AccessAwarePluginRouter
       const readRouter = accessRouter.access?.('readonly') ?? router

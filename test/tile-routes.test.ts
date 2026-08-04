@@ -197,7 +197,14 @@ test('the style route rewrites the sprite to an absolute same-origin URL and pas
     sources: { openmaptiles: { type: 'vector', maxzoom: 14 } },
     layers: [{ id: 'bg', type: 'background' }]
   }
-  const fetchImpl: ProxyFetch = async () => new Response(JSON.stringify(upstreamStyle), { status: 200, headers: { 'content-type': 'application/json' } })
+  const fetchImpl: ProxyFetch = async () => new Response(JSON.stringify(upstreamStyle), {
+    status: 200,
+    headers: {
+      'content-type': 'application/json',
+      'cache-control': 'public, max-age=86400',
+      'last-modified': 'Tue, 04 Aug 2026 12:00:00 GMT'
+    }
+  })
   registerTileRoutes(router, () => 'c:8080', fetchImpl, '/plugins/signalk-chart-locker')
   const res = new FakeRes()
   const chunks: Buffer[] = []
@@ -211,6 +218,8 @@ test('the style route rewrites the sprite to an absolute same-origin URL and pas
   assert.equal(body.glyphs, upstreamStyle.glyphs)
   assert.deepEqual(body.layers, upstreamStyle.layers)
   assert.equal(res.outHeaders['content-type'], 'application/json')
+  assert.equal(res.outHeaders['cache-control'], 'no-store')
+  assert.equal(res.outHeaders['last-modified'], undefined)
   assert.equal(res.outHeaders['x-content-type-options'], 'nosniff')
 })
 

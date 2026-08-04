@@ -11,10 +11,11 @@ security strategy, Chart Locker fails closed and does not mount them.
 
 When Signal K exposes scoped plugin routers, the tile, style, readiness, and PMTiles GET routes use
 its `readonly` access scope and are available to authenticated `readonly`, `readwrite`, and
-administrator users. Released servers without that API keep the fallback routes inside their blanket
-administrator-only plugin mount. When Signal K security is disabled, the read routes remain available
-to every client. Tile source identifiers come from the trusted source catalog, and PMTiles files must
-be present in the discovered registry.
+administrator users. Servers without that API retain the legacy public-read routes so existing
+chart clients can continue loading tiles and local archives. Management routes do not use this
+fallback. When Signal K security is disabled, the read routes remain available to every client.
+Tile source identifiers come from the trusted source catalog, and PMTiles files must be present in
+the discovered registry.
 
 Chart management, saved-region management, cache configuration, cache clearing, and reverse
 geocoding remain administrator-only. A 401 or 403 from an `/api` route should be checked against

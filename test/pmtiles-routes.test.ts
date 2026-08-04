@@ -100,7 +100,7 @@ test('a full GET returns 200 with a strong ETag and Accept-Ranges', async () => 
     assert.equal(res.outHeaders['accept-ranges'], 'bytes')
     assert.match(res.outHeaders.etag, /^"\d+-\d+-\d+-\d+"$/)
     assert.equal(res.outHeaders.etag.startsWith('"W/'), false)
-    assert.equal(res.outHeaders['cache-control'], 'public, max-age=0, must-revalidate')
+    assert.equal(res.outHeaders['cache-control'], 'private, max-age=0, must-revalidate')
     assert.equal(res.outHeaders['x-content-type-options'], 'nosniff')
     assert.equal(body.length, size)
   } finally {
@@ -218,7 +218,7 @@ test('HEAD returns full and range headers without creating a source stream', asy
     assert.equal((await finished(full)).length, 0)
     assert.equal(full.statusCode, 200)
     assert.equal(full.outHeaders['content-length'], String(size))
-    assert.equal(full.outHeaders['cache-control'], 'public, max-age=0, must-revalidate')
+    assert.equal(full.outHeaders['cache-control'], 'private, max-age=0, must-revalidate')
 
     const range = new FakeRes()
     routes['/pmtiles/:file'](req('sf.pmtiles', { range: 'bytes=0-6' }, 'HEAD'), range)
@@ -245,7 +245,7 @@ test('conditional and unsatisfiable HEAD requests close without streaming', asyn
     routes['/pmtiles/:file'](req('sf.pmtiles', { 'if-none-match': first.outHeaders.etag }, 'HEAD'), conditional)
     assert.equal((await finished(conditional)).length, 0)
     assert.equal(conditional.statusCode, 304)
-    assert.equal(conditional.outHeaders['cache-control'], 'public, max-age=0, must-revalidate')
+    assert.equal(conditional.outHeaders['cache-control'], 'private, max-age=0, must-revalidate')
 
     const unsatisfiable = new FakeRes()
     routes['/pmtiles/:file'](req('sf.pmtiles', { range: `bytes=${size + 1}-` }, 'HEAD'), unsatisfiable)

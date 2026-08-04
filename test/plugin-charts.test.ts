@@ -122,7 +122,7 @@ test('registerWithRouter mounts chart reads through the readonly access scope', 
   }
 })
 
-test('registerWithRouter safely falls back when scoped plugin routers are unavailable', async () => {
+test('registerWithRouter preserves legacy public read routes when scoped routers are unavailable', async () => {
   const root = await configRoot()
   setContainerManager(fakeManager())
   const { app } = chartApp(root)

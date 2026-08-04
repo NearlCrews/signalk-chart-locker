@@ -17,11 +17,11 @@ health, and pushes the source allowlist and cache budgets. The internal containe
 published directly.
 
 Signal K servers with scoped plugin routers grant tile, style, readiness, and PMTiles GET routes to
-authenticated `readonly`, `readwrite`, and administrator users. Released servers without that API
-keep the fallback read routes inside the administrator-only plugin mount. Saved-region, cache,
-reverse-geocoding, and chart-management routes remain administrator-only. On a secured server, use
-`/skServer/loginStatus` to distinguish a signed-out browser, a non-administrator user, and an
-administrator session before diagnosing an access failure.
+authenticated `readonly`, `readwrite`, and administrator users. Servers without that API retain the
+legacy public-read routes needed by chart clients. Saved-region, cache, reverse-geocoding, and
+chart-management routes remain administrator-only. On a secured server, use `/skServer/loginStatus`
+to distinguish a signed-out browser, a non-administrator user, and an administrator session before
+diagnosing an access failure.
 
 ## Readiness states
 

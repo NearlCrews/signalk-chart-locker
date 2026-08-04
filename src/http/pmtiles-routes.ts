@@ -153,7 +153,7 @@ function serve (req: ServeRequest, res: ServeResponse, registry: ChartRegistry, 
   res.setHeader('Content-Type', 'application/octet-stream')
   // Archives are mutable at a stable URL. Permit storage, but require validation before reuse so an
   // atomic replacement is observed through the strong file-identity ETag.
-  res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate')
+  res.setHeader('Cache-Control', 'private, max-age=0, must-revalidate')
   const isHead = req.method?.toUpperCase() === 'HEAD'
 
   // If-None-Match takes precedence over Range (RFC 9110): a matching validator returns 304 regardless of a

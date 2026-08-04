@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+<a id="v081"></a>
+
+## [0.8.1] - 2026-08-04
+
+### Security
+
+- Marked local PMTiles responses private so a shared intermediary cannot retain vessel-specific
+  chart archives.
+- Marked rewritten style documents `no-store` and stopped relaying upstream validators that do not
+  describe the transformed, origin-specific response.
+
+### Changed
+
+- Updated `signalk-nearlcrews-ui` to 0.6.2, `signalk-chart-sources` to 0.7.2, and Node.js type
+  declarations to the supported Node.js 22 line.
+- Clarified the intentional legacy public-read fallback used when scoped Signal K plugin routers
+  are unavailable, while preserving administrator-only management routes.
+- Replaced package-relative README references with links that work from npm and removed a stale
+  internal release-plan link.
+
 <a id="v080"></a>
 
 ## [0.8.0] - 2026-08-02

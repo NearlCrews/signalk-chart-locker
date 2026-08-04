@@ -14,15 +14,14 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.8.0
+## What's new in 0.8.1
 
-Version 0.8.0 upgrades the panel library to `signalk-nearlcrews-ui` 0.6.1 and adopts the full
-`signalk-chart-sources` 0.7.0 contract: time-dynamic weather layers stay out of offline warming end
-to end, and a saved region can pin the light and dark basemaps together in one job. Pinned region
-tiles now serve offline for as long as they stay pinned, time-dynamic tiles never serve past their
-declared lifetime, and container busy signals reach callers as retryable 503s.
+Version 0.8.1 prevents shared caches from retaining vessel-specific PMTiles archives and prevents
+rewritten style documents from being reused with stale upstream validators. It also updates the
+shared panel library to `signalk-nearlcrews-ui` 0.6.2 and source validation to
+`signalk-chart-sources` 0.7.2.
 
-See the [0.8.0 changelog](https://github.com/NearlCrews/signalk-chart-locker/blob/main/CHANGELOG.md#v080)
+See the [0.8.1 changelog](https://github.com/NearlCrews/signalk-chart-locker/blob/main/CHANGELOG.md#v081)
 for the full list.
 
 ## What it does
@@ -93,8 +92,8 @@ tiles. A standalone install of Binnacle is unaffected.
 
 On secured Signal K servers that expose scoped plugin routers, chart tiles, styles, readiness checks,
 and PMTiles files are available to authenticated `readonly`, `readwrite`, and administrator users.
-Released servers without that router API keep all plugin routes behind their administrator-only
-mount. Saving regions, changing cache settings, reverse geocoding, and editing chart metadata always
+Servers without that router API preserve the legacy public-read routes required by chart clients.
+Saving regions, changing cache settings, reverse geocoding, and editing chart metadata always
 require an administrator session. Signal K servers with security disabled expose the read routes
 without a login.
 
@@ -200,14 +199,16 @@ restore without another container restart.
 - Position-warm, saved-region, chart override, and direct plugin configuration inputs are validated
   at their server boundaries.
 
-See [Operations](docs/OPERATIONS.md) for status interpretation, diagnostics, recovery procedures,
-and structured log events. See [HTTP API](docs/API.md) for the plugin routes and validation limits.
+See [Operations](https://github.com/NearlCrews/signalk-chart-locker/blob/main/docs/OPERATIONS.md) for
+status interpretation, diagnostics, recovery procedures, and structured log events. See the
+[HTTP API](https://github.com/NearlCrews/signalk-chart-locker/blob/main/docs/API.md) for the plugin
+routes and validation limits.
 
 ## Configuration panel
 
 | Light | Dark | Night red |
 | ----- | ---- | --------- |
-| ![Light configuration panel](assets/screenshots/config-panel.png) | ![Dark configuration panel](assets/screenshots/config-panel-dark.png) | ![Night-red configuration panel](assets/screenshots/config-panel-night.png) |
+| ![Light configuration panel](https://raw.githubusercontent.com/NearlCrews/signalk-chart-locker/main/assets/screenshots/config-panel.png) | ![Dark configuration panel](https://raw.githubusercontent.com/NearlCrews/signalk-chart-locker/main/assets/screenshots/config-panel-dark.png) | ![Night-red configuration panel](https://raw.githubusercontent.com/NearlCrews/signalk-chart-locker/main/assets/screenshots/config-panel-night.png) |
 
 ## Development
 
@@ -244,16 +245,19 @@ cd ..
 TILECACHE_BIN="$PWD/container/target/release/tilecache" npm run test:node-rust-contract
 ```
 
-Before a release, also verify the panel in a real browser and follow the
-[publish runbook](docs/superpowers/2026-06-30-publish-runbook.md). Publishing the npm package or
-creating the version tag requires explicit owner approval.
+Before a release, also verify the panel in a real browser and follow the repository's protected
+release workflow. Publishing the npm package or creating the version tag requires explicit owner
+approval.
 
 ## License
 
 The Node.js plugin is MIT licensed. The Rust tile-cache workspace is Apache-2.0 licensed. See
-[LICENSE](LICENSE), [LICENSE-APACHE](LICENSE-APACHE), and
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Locked Rust runtime dependency licenses are
-recorded in [RUST_THIRD_PARTY_LICENSES.md](RUST_THIRD_PARTY_LICENSES.md). The software is provided
+the [MIT license](https://github.com/NearlCrews/signalk-chart-locker/blob/main/LICENSE), the
+[Apache 2.0 license](https://github.com/NearlCrews/signalk-chart-locker/blob/main/LICENSE-APACHE), and
+[third-party notices](https://github.com/NearlCrews/signalk-chart-locker/blob/main/THIRD_PARTY_NOTICES.md).
+Locked Rust runtime dependency licenses are recorded in the
+[Rust license report](https://github.com/NearlCrews/signalk-chart-locker/blob/main/RUST_THIRD_PARTY_LICENSES.md).
+The software is provided
 "AS IS", without warranty of any kind.
 
 ## Acknowledgments
