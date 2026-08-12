@@ -14,14 +14,15 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.8.1
+## What's new in 0.8.3
 
-Version 0.8.1 prevents shared caches from retaining vessel-specific PMTiles archives and prevents
-rewritten style documents from being reused with stale upstream validators. It also updates the
-shared panel library to `signalk-nearlcrews-ui` 0.6.2 and source validation to
-`signalk-chart-sources` 0.7.2.
+Version 0.8.3 persists learned vector-style documents, expanded sources, glyph templates, and
+sprite templates in SQLite. An unchanged catalog restores up to four styles after an offline
+container restart, so previously warmed basemap assets remain routable. The configuration panel
+also moves to `signalk-nearlcrews-ui` 0.7.1 with the System theme, viewport-aware save actions,
+forward-compatible configuration saves, and stronger package and federation checks.
 
-See the [0.8.1 changelog](https://github.com/NearlCrews/signalk-chart-locker/blob/main/CHANGELOG.md#v081)
+See the [0.8.3 changelog](https://github.com/NearlCrews/signalk-chart-locker/blob/main/CHANGELOG.md#v083)
 for the full list.
 
 ## What it does

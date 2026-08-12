@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+<a id="v083"></a>
+
+## [0.8.3] - 2026-08-12
+
+This patch release preserves learned vector-style state across offline
+container restarts, refreshes the shared configuration panel, and strengthens
+release verification. No configuration migration is required.
+
 ### Added
 
 - The configuration panel now explains when its required native CSS scope
@@ -687,3 +695,6 @@ All tile-cache compute lives in the container.
   live tile reads; a warm is gated on its true tile total; a corrupt cache file self-heals by
   recreating rather than crash-looping; and the egress SSRF guard also rejects the IPv6 6to4 and
   NAT64 transition ranges.
+
+[Unreleased]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.1...v0.8.3
