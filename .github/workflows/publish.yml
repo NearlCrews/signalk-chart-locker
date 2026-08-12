@@ -20,6 +20,7 @@ permissions:
 
 jobs:
   resolve-release:
+    if: github.event_name == 'release' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:

@@ -111,7 +111,8 @@ contents, audit results, and container-image plan to the owner. Stop here until 
 approves npm publication and creation of the version tag.
 
 Before the first release, configure a GitHub tag ruleset for `refs/tags/v*` that restricts creation to
-release maintainers and blocks tag updates and deletion. The image workflow independently refuses to
+release maintainers and blocks tag updates and deletion. Keep those immutable version-tag rules
+enabled for every release. The image workflow independently refuses to
 move an existing version tag to a different digest. It can move `latest` only during a stable version
 tag push; manual runs and prereleases cannot change it. Image promotion is serialized across releases,
 and a queued older release drops `latest` from its promotion when a higher stable version tag exists.
@@ -160,7 +161,9 @@ Before the first release through this workflow, configure npm trusted publishing
 workflow `publish.yml`, GitHub environment `npm`, and the `npm publish` allowed action. The publish
 job uses GitHub OIDC on a GitHub-hosted runner with Node 24 and npm 12.0.2. Once the first trusted
 publish succeeds, revoke obsolete npm automation tokens and restrict token-based package publishing.
-Do not add an `NPM_TOKEN` fallback.
+Do not add an `NPM_TOKEN` fallback. Configure the GitHub `npm` environment with a required release
+maintainer reviewer and a deployment tag policy restricted to `v*`. Manual recovery runs are
+restricted to the `main` workflow definition and cannot enter this environment.
 
 After the image workflow succeeds, publish the GitHub release for the same version tag. The `release:
 published` event starts `.github/workflows/publish.yml`, including when a prepared draft is made

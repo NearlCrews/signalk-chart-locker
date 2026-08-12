@@ -416,6 +416,7 @@ test('manual publish recovery freezes the release revision and isolates publishe
 
   assert.equal(workflow.match(/ref: refs\/tags\/\$\{\{ env\.RELEASE_TAG \}\}/g)?.length, 1)
   assert.match(resolveJob, /ref: refs\/tags\/\$\{\{ env\.RELEASE_TAG \}\}/)
+  assert.match(resolveJob, /^ {4}if: github\.event_name == 'release' \|\| github\.ref == 'refs\/heads\/main'$/m)
   assert.doesNotMatch(downstreamJobs, /ref: refs\/tags\/\$\{\{ env\.RELEASE_TAG \}\}/)
   assert.equal(downstreamJobs.match(/ref: \$\{\{ needs\.resolve-release\.outputs\.revision \}\}/g)?.length, 5)
   for (const output of ['image', 'npm_tag', 'revision', 'tag', 'version']) {
