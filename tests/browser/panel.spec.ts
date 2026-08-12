@@ -14,8 +14,8 @@ if (typeof snuiPackage !== 'object' || snuiPackage === null ||
   throw new Error('signalk-nearlcrews-ui package.json carries no version string')
 }
 const snuiVersion = snuiPackage.version
-if (snuiVersion !== '0.7.0') {
-  throw new Error(`expected signalk-nearlcrews-ui 0.7.0, found ${snuiVersion}`)
+if (snuiVersion !== '0.7.1') {
+  throw new Error(`expected signalk-nearlcrews-ui 0.7.1, found ${snuiVersion}`)
 }
 
 // The theme storage key, read from the package source because the exports map exposes only the ESM

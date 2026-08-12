@@ -15,9 +15,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- The panel targets `signalk-nearlcrews-ui` 0.7.0, adds the System theme,
-  docks save actions to the viewport when needed, and consumes React and
-  React DOM as host-provided Module Federation singletons.
+- The panel targets `signalk-nearlcrews-ui` 0.7.1, adds the System theme,
+  docks save actions to the viewport when needed, consumes React and React DOM
+  at the UI package's `^19.2.0` host range, and verifies that no other package
+  enters the host share scope.
 - Save and discard actions now report that the host request was issued and
   move focus to the stable completion message.
 - Compatible dependencies and release workflows are refreshed. Release

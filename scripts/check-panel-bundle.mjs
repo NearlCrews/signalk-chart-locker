@@ -26,7 +26,7 @@ const modules = flattenModules(stats.modules)
 const consumedHostReact = modules.some((module) =>
   module.moduleType === 'consume-shared-module' &&
   typeof module.name === 'string' &&
-  module.name.includes('react@>=19.2.0 <20.0.0') &&
+  module.name.includes('react@^19.2.0') &&
   module.name.includes('(singleton)')
 )
 if (!consumedHostReact) {
@@ -37,14 +37,15 @@ const require = createRequire(import.meta.url)
 const webpackConfig = require('../webpack.config.cjs')
 const federation = webpackConfig.plugins.find((plugin) => plugin?.options?.shared !== undefined)
 const shared = federation?.options?.shared
+const sharedPackageNames = Object.keys(shared ?? {}).sort()
+if (JSON.stringify(sharedPackageNames) !== JSON.stringify(['react', 'react-dom'])) {
+  throw new Error(`Module Federation must share only React and React DOM; found ${sharedPackageNames.join(', ')}`)
+}
 for (const packageName of ['react', 'react-dom']) {
   const entry = shared?.[packageName]
-  if (entry?.singleton !== true || entry?.import !== false || entry?.requiredVersion !== '>=19.2.0 <20.0.0') {
+  if (entry?.singleton !== true || entry?.import !== false || entry?.requiredVersion !== '^19.2.0') {
     throw new Error(`${packageName} must be configured as an exact host-provided singleton share`)
   }
-}
-if (shared?.['signalk-nearlcrews-ui'] !== undefined) {
-  throw new Error('signalk-nearlcrews-ui must stay bundled rather than entering the host share scope')
 }
 
 const normalizedModulePaths = modules

@@ -6,8 +6,8 @@ const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.me
 if (packageJson.dependencies?.['signalk-nearlcrews-ui'] !== undefined) {
   throw new Error('signalk-nearlcrews-ui must be a bundled development dependency')
 }
-if (packageJson.devDependencies?.['signalk-nearlcrews-ui'] !== '0.7.0') {
-  throw new Error('signalk-nearlcrews-ui must be pinned to exact version 0.7.0')
+if (packageJson.devDependencies?.['signalk-nearlcrews-ui'] !== '0.7.1') {
+  throw new Error('signalk-nearlcrews-ui must be pinned to exact version 0.7.1')
 }
 
 const output = execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
