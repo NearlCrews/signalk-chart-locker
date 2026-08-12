@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Persist learned vector-style documents, glyph and sprite templates, and expanded tile sources in
+  SQLite. An unchanged catalog now rehydrates up to four styles during configuration, preserving the
+  cache namespace of warmed assets so saved regions continue rendering after an offline container
+  restart. Changed or removed style sources invalidate their stored metadata.
+
 <a id="v081"></a>
 
 ## [0.8.1] - 2026-08-04

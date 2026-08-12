@@ -52,7 +52,8 @@ tiles. A standalone install of Binnacle is unaffected.
 - **Shared boat-wide tile cache.** Every raster overlay, the vector basemap, and its glyphs are
   fetched and cached through the Signal K server. Every device on the boat reads from the same
   cache, the same tile is never fetched more than once, and the overlays keep rendering offline
-  at sea.
+  at sea. Learned vector-style metadata is stored with the cache, so warmed styles, glyphs, sprites,
+  and tiles remain routable after the container restarts without internet access.
 - **Saved regions.** Draw a box in the Binnacle chartplotter and download the raster overlays
   covering it into the shared cache before leaving internet coverage. Each region is named
   automatically by an optional reverse geocode, saved durably, and can be re-downloaded or deleted.

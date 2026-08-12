@@ -467,9 +467,14 @@ async fn config(
             .map(|source| (source.id.clone(), source))
             .collect();
     }
-    // Drop the learned per-style templates so a re-pushed style with a changed URL or allowed hosts is
-    // relearned on the next GET /style, not served from stale glyph and tile templates.
-    st.style_state.write().await.clear();
+    // Rehydrate only exact catalog matches. Changed or removed style sources are deleted from the
+    // durable metadata table, while an unchanged source keeps the cache-key generation that names its
+    // pinned glyphs, sprites, and tiles.
+    let published_generation = st
+        .config_generation
+        .load(Ordering::Acquire)
+        .saturating_add(1);
+    crate::style::rehydrate_style_state(&st, published_generation).await;
     if let Some(pb) = body.public_base {
         *st.public_base.write().await = pb;
     }

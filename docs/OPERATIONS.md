@@ -70,6 +70,13 @@ and other host activity. When a write would consume that reserve:
 The safe clear action deletes only unpinned scroll rows. It does not remove saved-region tiles,
 position-warm pins, or global basemap assets.
 
+SQLite also retains the learned documents and upstream templates for up to four vector styles. The
+first configuration push after a container restart restores entries whose complete catalog source
+definition is unchanged, including the cache namespace used by pinned glyphs, sprites, and tiles.
+A changed or removed style source deletes its retained metadata and must be learned again from the
+upstream. This metadata is not removed by the safe clear action and remains usable offline past the
+normal style freshness window.
+
 Cache-cap configuration publication is transactional. The container validates irreducible pinned
 bytes first, then evicts eligible scroll data, returns free SQLite pages to the filesystem, and
 publishes the candidate settings only after enforcement succeeds. A cap below pinned saved coverage

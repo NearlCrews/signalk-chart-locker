@@ -2,7 +2,7 @@
 //! `POST /config` payload (camelCase JSON from the `signalk-chart-sources` package). The
 //! container holds only this; it never reads Signal K.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
 const MAX_TITLE_BYTES: usize = 256;
@@ -15,7 +15,7 @@ const MAX_WMS_FORMAT_BYTES: usize = 128;
 const MAX_ALLOWED_HOSTS: usize = 32;
 const MAX_HOST_BYTES: usize = 253;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartSource {
     pub id: String,
@@ -40,7 +40,7 @@ pub struct ChartSource {
     pub attribution: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "mode", rename_all = "camelCase")]
 pub enum UpstreamTemplate {
     #[serde(rename_all = "camelCase")]
