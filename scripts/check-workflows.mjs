@@ -39,7 +39,12 @@ for (const expected of [
   'pack:release',
   'verify:release-tarball',
   "if: github.event_name == 'release'",
+  'resolve-release:',
+  'needs.resolve-release.outputs.revision',
   'RELEASE_REF_TYPE: tag',
+  "needs.publish-npm.result == 'skipped'",
+  'Recheck immutable release tag before publication',
+  'Recheck immutable release tag before registry verification',
   'Verify npm registry contract',
   '.release-tooling/scripts/verify-npm-registry.mjs'
 ]) {

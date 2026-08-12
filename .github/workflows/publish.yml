@@ -19,13 +19,15 @@ permissions:
   contents: read
 
 jobs:
-  verify-image:
+  resolve-release:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      attestations: read
-      contents: read
-      packages: read
+    timeout-minutes: 5
+    outputs:
+      image: ${{ steps.release.outputs.image }}
+      npm_tag: ${{ steps.release.outputs.npm_tag }}
+      revision: ${{ steps.source.outputs.revision }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,7 +44,6 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
-
       - name: Derive and validate release metadata
         id: release
         env:
@@ -50,10 +51,33 @@ jobs:
           RELEASE_REF_TYPE: tag
           RELEASE_TAG: ${{ env.RELEASE_TAG }}
         run: node .release-tooling/scripts/release-metadata.mjs
-
-      - name: Record the release commit
+      - name: Freeze the peeled release revision
         id: source
         run: echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Require a release event to identify the same revision
+        if: github.event_name == 'release'
+        env:
+          EVENT_REVISION: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EVENT_REVISION"
+
+  verify-image:
+    needs: resolve-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      attestations: read
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.resolve-release.outputs.revision }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -68,10 +92,10 @@ jobs:
       - name: Verify the versioned image
         id: image
         env:
-          EXPECTED_REVISION: ${{ steps.source.outputs.revision }}
-          EXPECTED_VERSION: ${{ steps.release.outputs.version }}
-          IMAGE: ${{ steps.release.outputs.image }}
-          IMAGE_TAG: ${{ steps.release.outputs.tag }}
+          EXPECTED_REVISION: ${{ needs.resolve-release.outputs.revision }}
+          EXPECTED_VERSION: ${{ needs.resolve-release.outputs.version }}
+          IMAGE: ${{ needs.resolve-release.outputs.image }}
+          IMAGE_TAG: ${{ needs.resolve-release.outputs.tag }}
         run: node scripts/verify-container-image.mjs
 
       - name: Install Cosign
@@ -81,9 +105,9 @@ jobs:
 
       - name: Verify the keyless image signature
         env:
-          IMAGE: ${{ steps.release.outputs.image }}
+          IMAGE: ${{ needs.resolve-release.outputs.image }}
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
         run: |
           cosign verify \
             --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/container-image.yml@refs/tags/${RELEASE_TAG}" \
@@ -94,11 +118,11 @@ jobs:
         env:
           AMD64_DIGEST: ${{ steps.image.outputs.amd64_digest }}
           ARM64_DIGEST: ${{ steps.image.outputs.arm64_digest }}
-          EXPECTED_REVISION: ${{ steps.source.outputs.revision }}
+          EXPECTED_REVISION: ${{ needs.resolve-release.outputs.revision }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE: ${{ steps.release.outputs.image }}
+          IMAGE: ${{ needs.resolve-release.outputs.image }}
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
         run: |
           for reference in \
             "${IMAGE}@${IMAGE_DIGEST}|https://slsa.dev/provenance/v1" \
@@ -116,6 +140,7 @@ jobs:
           done
 
   build-package:
+    needs: resolve-release
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -123,13 +148,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: refs/tags/${{ env.RELEASE_TAG }}
-      - name: Check out release tooling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          ref: ${{ github.sha }}
-          path: .release-tooling
+          ref: ${{ needs.resolve-release.outputs.revision }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
@@ -137,14 +156,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
-
-      - name: Derive and validate release metadata
-        id: release
-        env:
-          RELEASE_CHECKOUT: ${{ github.workspace }}
-          RELEASE_REF_TYPE: tag
-          RELEASE_TAG: ${{ env.RELEASE_TAG }}
-        run: node .release-tooling/scripts/release-metadata.mjs
 
       - name: Require the release commit to belong to main
         run: |
@@ -169,7 +180,7 @@ jobs:
       - name: Upload the exact tested tarball
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: npm-package-${{ steps.release.outputs.version }}
+          name: npm-package-${{ needs.resolve-release.outputs.version }}
           path: |
             package/*.tgz
             package/*.sha256
@@ -177,7 +188,7 @@ jobs:
           retention-days: 14
 
   verify-signalk-admin:
-    needs: build-package
+    needs: [resolve-release, build-package]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -192,32 +203,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: refs/tags/${{ env.RELEASE_TAG }}
-      - name: Check out release tooling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          ref: ${{ github.sha }}
-          path: .release-tooling
+          ref: ${{ needs.resolve-release.outputs.revision }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           package-manager-cache: false
-
-      - name: Derive and validate release metadata
-        id: release
-        env:
-          RELEASE_CHECKOUT: ${{ github.workspace }}
-          RELEASE_REF_TYPE: tag
-          RELEASE_TAG: ${{ env.RELEASE_TAG }}
-        run: node .release-tooling/scripts/release-metadata.mjs
 
       - run: npm ci
 
       - name: Download the exact tested tarball
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: npm-package-${{ steps.release.outputs.version }}
+          name: npm-package-${{ needs.resolve-release.outputs.version }}
           path: package
 
       - run: npm run verify:release-tarball
@@ -271,7 +268,8 @@ jobs:
           fi
 
   publish-npm:
-    needs: [verify-image, build-package, verify-signalk-admin]
+    if: github.event_name == 'release'
+    needs: [resolve-release, verify-image, build-package, verify-signalk-admin]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: npm
@@ -282,28 +280,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: refs/tags/${{ env.RELEASE_TAG }}
-      # Recovery runs still build and verify the immutable release tag above. Obtain only the
-      # release metadata and registry verifier tooling from the exact workflow commit.
-      - name: Check out release tooling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          ref: ${{ github.sha }}
-          path: .release-tooling
+          ref: ${{ needs.resolve-release.outputs.revision }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org/
           package-manager-cache: false
 
-      - name: Derive and validate release metadata
-        id: release
+      - name: Recheck immutable release tag before publication
         env:
-          RELEASE_CHECKOUT: ${{ github.workspace }}
-          RELEASE_REF_TYPE: tag
-          RELEASE_TAG: ${{ env.RELEASE_TAG }}
-        run: node .release-tooling/scripts/release-metadata.mjs
+          EXPECTED_REVISION: ${{ needs.resolve-release.outputs.revision }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: |
+          git fetch --no-tags --force origin "refs/tags/${RELEASE_TAG}:refs/remotes/origin/release-tag"
+          test "$(git rev-parse refs/remotes/origin/release-tag^0)" = "$EXPECTED_REVISION"
 
       - name: Pin the trusted-publishing npm client
         working-directory: ${{ runner.temp }}
@@ -314,7 +304,7 @@ jobs:
       - name: Download the exact tested tarball
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: npm-package-${{ steps.release.outputs.version }}
+          name: npm-package-${{ needs.resolve-release.outputs.version }}
           path: package
 
       - run: npm run verify:release-tarball
@@ -322,14 +312,59 @@ jobs:
       # npm trusted publishing exchanges the job's GitHub OIDC identity for a short-lived publish
       # credential. No long-lived npm token is available to this workflow.
       - name: Publish the tested tarball with trusted publishing
-        if: github.event_name == 'release'
         env:
-          NPM_TAG: ${{ steps.release.outputs.npm_tag }}
+          NPM_TAG: ${{ needs.resolve-release.outputs.npm_tag }}
         run: npm publish ./package/*.tgz --ignore-scripts --access public --tag "$NPM_TAG"
 
+  verify-registry:
+    if: >-
+      ${{ always() && needs.resolve-release.result == 'success' &&
+      needs.verify-image.result == 'success' && needs.build-package.result == 'success' &&
+      needs.verify-signalk-admin.result == 'success' &&
+      ((github.event_name == 'release' && needs.publish-npm.result == 'success') ||
+      (github.event_name == 'workflow_dispatch' && needs.publish-npm.result == 'skipped')) }}
+    needs: [resolve-release, verify-image, build-package, verify-signalk-admin, publish-npm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.resolve-release.outputs.revision }}
+      - name: Check out release tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          path: .release-tooling
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Pin the registry-verification npm client
+        working-directory: ${{ runner.temp }}
+        # zizmor: ignore[adhoc-packages] Verification must reproduce npm 12 registry JSON behavior.
+        run: npm install --global npm@12.0.2
+      - name: Download the exact tested tarball
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-package-${{ needs.resolve-release.outputs.version }}
+          path: package
+      - run: npm run verify:release-tarball
+      - name: Recheck immutable release tag before registry verification
+        env:
+          EXPECTED_REVISION: ${{ needs.resolve-release.outputs.revision }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
+        run: |
+          git fetch --no-tags --force origin "refs/tags/${RELEASE_TAG}:refs/remotes/origin/release-tag"
+          test "$(git rev-parse refs/remotes/origin/release-tag^0)" = "$EXPECTED_REVISION"
       - name: Verify npm registry contract
         env:
           PACKAGE_DIRECTORY: package
           PACKAGE_NAME: signalk-chart-locker
-          PACKAGE_VERSION: ${{ steps.release.outputs.version }}
-        run: EXPECTED_GIT_HEAD="$(git rev-parse HEAD)" node .release-tooling/scripts/verify-npm-registry.mjs
+          PACKAGE_VERSION: ${{ needs.resolve-release.outputs.version }}
+          EXPECTED_GIT_HEAD: ${{ needs.resolve-release.outputs.revision }}
+        run: node .release-tooling/scripts/verify-npm-registry.mjs

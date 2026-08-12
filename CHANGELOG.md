@@ -11,8 +11,9 @@ All notable changes to this project are documented here. The format follows
 - Accept npm 12's singleton-array `npm view` output while rejecting ambiguous
   registry metadata, and verify the published `gitHead` and `dist.integrity`
   against the exact tested tarball. An explicit manual recovery dispatch now
-  repeats every release gate for an immutable tag, skips npm publication, and
-  verifies the already-published registry artifact.
+  freezes an immutable tag revision, repeats every release gate against it,
+  skips the privileged npm job, and verifies the already-published registry
+  artifact without npm environment or OIDC access.
 
 <a id="v083"></a>
 

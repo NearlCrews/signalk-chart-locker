@@ -174,11 +174,14 @@ If npm publication succeeds but the final registry check fails, do not rerun
 the publish step and do not replace the version tag. Dispatch `publish.yml` from
 `main` with the required `release_tag` input. A manual dispatch repeats the
 versioned-image, full build, cross-browser, exact-tarball, and Signal K Admin
-gates against that immutable tag. It skips only `npm publish`, then verifies the
+gates against one peeled revision resolved from the requested `refs/tags/`
+namespace. Every downstream source checkout uses that frozen revision. The
+manual path skips the entire privileged publish job, so it never enters the npm
+environment or receives an OIDC token. A separate unprivileged job verifies the
 existing registry `gitHead` and `dist.integrity` against the newly rebuilt exact
-tarball. The release checkout is forced through the requested `refs/tags/`
-namespace; a separate checkout pinned to the workflow commit supplies only the
-recovery tooling added after an older tag.
+tarball. It uses recovery tooling pinned to the workflow commit, and re-fetches
+the tag to prove it still peels to the frozen revision. Release-event runs also
+recheck that tag immediately before `npm publish`.
 
 Stable npm versions use the `latest` dist-tag. Prerelease versions use `next`, so a prerelease cannot
 replace the package users receive from an unqualified install.

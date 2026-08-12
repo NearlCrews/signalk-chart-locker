@@ -389,23 +389,54 @@ test('npm registry contract binds the release commit and exact tarball bytes', (
   }), /dist\.integrity/)
 })
 
-test('manual publish recovery verifies the exact tag and skips only npm publication', () => {
+test('manual publish recovery freezes the release revision and isolates publisher authority', () => {
   const workflow = readFileSync(new URL('../.github/workflows/publish.yml', import.meta.url), 'utf8')
-  assert.match(workflow, /workflow_dispatch:\r?\n {4}inputs:\r?\n {6}release_tag:[\s\S]*?required: true/)
+    .replace(/\r\n/g, '\n')
+  assert.match(workflow, /workflow_dispatch:\n {4}inputs:\n {6}release_tag:[\s\S]*?required: true/)
   assert.match(workflow, /RELEASE_TAG: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.release_tag/)
-  assert.equal(workflow.match(/ref: refs\/tags\/\$\{\{ env\.RELEASE_TAG \}\}/g)?.length, 4)
-  assert.equal(workflow.match(/RELEASE_REF_TYPE: tag/g)?.length, 4)
-  assert.equal(workflow.match(/node \.release-tooling\/scripts\/release-metadata\.mjs/g)?.length, 4)
-  assert.equal(workflow.match(/name: Check out release tooling/g)?.length, 4)
-  assert.match(workflow, /name: Check out release tooling[\s\S]*?ref: \$\{\{ github\.sha \}\}[\s\S]*?path: \.release-tooling/)
 
-  const publishStep = workflow.indexOf('- name: Publish the tested tarball with trusted publishing')
-  const registryStep = workflow.indexOf('- name: Verify npm registry contract')
-  assert.ok(publishStep >= 0)
-  assert.ok(registryStep > publishStep)
-  assert.match(workflow.slice(publishStep, registryStep), /if: github\.event_name == 'release'/)
-  assert.doesNotMatch(workflow.slice(registryStep), /if: github\.event_name == 'release'/)
-  assert.match(workflow.slice(registryStep), /\.release-tooling\/scripts\/verify-npm-registry\.mjs/)
+  const resolveStart = workflow.indexOf('  resolve-release:')
+  const imageStart = workflow.indexOf('  verify-image:')
+  const publishStart = workflow.indexOf('  publish-npm:')
+  const registryStart = workflow.indexOf('  verify-registry:')
+  assert.ok(resolveStart >= 0)
+  assert.ok(imageStart > resolveStart)
+  assert.ok(publishStart > imageStart)
+  assert.ok(registryStart > publishStart)
+
+  const resolveJob = workflow.slice(resolveStart, imageStart)
+  const downstreamJobs = workflow.slice(imageStart)
+  const publishJob = workflow.slice(publishStart, registryStart)
+  const registryJob = workflow.slice(registryStart)
+
+  assert.equal(workflow.match(/ref: refs\/tags\/\$\{\{ env\.RELEASE_TAG \}\}/g)?.length, 1)
+  assert.match(resolveJob, /ref: refs\/tags\/\$\{\{ env\.RELEASE_TAG \}\}/)
+  assert.doesNotMatch(downstreamJobs, /ref: refs\/tags\/\$\{\{ env\.RELEASE_TAG \}\}/)
+  assert.equal(downstreamJobs.match(/ref: \$\{\{ needs\.resolve-release\.outputs\.revision \}\}/g)?.length, 5)
+  for (const output of ['image', 'npm_tag', 'revision', 'tag', 'version']) {
+    assert.match(resolveJob, new RegExp(`^ {6}${output}:`, 'm'))
+  }
+  assert.match(resolveJob, /RELEASE_REF_TYPE: tag/)
+  assert.match(resolveJob, /node \.release-tooling\/scripts\/release-metadata\.mjs/)
+  assert.match(resolveJob, /revision=\$\(git rev-parse HEAD\)/)
+  assert.match(resolveJob, /if: github\.event_name == 'release'[\s\S]*?EVENT_REVISION: \$\{\{ github\.sha \}\}[\s\S]*?git rev-parse HEAD/)
+
+  assert.equal(workflow.match(/name: Check out release tooling/g)?.length, 2)
+  assert.equal(workflow.match(/ref: \$\{\{ github\.sha \}\}/g)?.length, 2)
+  assert.match(publishJob, /^ {4}if: github\.event_name == 'release'/m)
+  assert.match(publishJob, /^ {4}environment: npm$/m)
+  assert.match(publishJob, /^ {6}id-token: write$/m)
+  assert.doesNotMatch(publishJob, /workflow_dispatch/)
+
+  assert.match(registryJob, /\$\{\{ always\(\)/)
+  assert.match(registryJob, /github\.event_name == 'release' && needs\.publish-npm\.result == 'success'/)
+  assert.match(registryJob, /github\.event_name == 'workflow_dispatch' && needs\.publish-npm\.result == 'skipped'/)
+  assert.match(registryJob, /^ {4}permissions:\n {6}contents: read$/m)
+  assert.doesNotMatch(registryJob, /environment: npm|id-token: write|npm publish/)
+  assert.match(registryJob, /\.release-tooling\/scripts\/verify-npm-registry\.mjs/)
+  assert.equal(workflow.match(/git fetch --no-tags --force origin "refs\/tags\/\$\{RELEASE_TAG\}:refs\/remotes\/origin\/release-tag"/g)?.length, 2)
+  assert.match(publishJob, /Recheck immutable release tag before publication/)
+  assert.match(registryJob, /Recheck immutable release tag before registry verification/)
 })
 
 test('release metadata uses an explicit release ref type over the workflow branch context', () => {
