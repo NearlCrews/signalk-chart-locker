@@ -389,6 +389,11 @@ test('npm registry contract binds the release commit and exact tarball bytes', (
   }), /dist\.integrity/)
 })
 
+test('npm registry verification is pinned to the public npm registry', () => {
+  const verifier = readFileSync(new URL('../scripts/verify-npm-registry.mjs', import.meta.url), 'utf8')
+  assert.match(verifier, /'--registry=https:\/\/registry\.npmjs\.org\/'/)
+})
+
 test('manual publish recovery freezes the release revision and isolates publisher authority', () => {
   const workflow = readFileSync(new URL('../.github/workflows/publish.yml', import.meta.url), 'utf8')
     .replace(/\r\n/g, '\n')

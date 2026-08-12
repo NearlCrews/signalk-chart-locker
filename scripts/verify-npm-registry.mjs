@@ -31,7 +31,8 @@ for (let attempt = 1; attempt <= attempts; attempt++) {
       'view',
       specification,
       fieldName,
-      '--json'
+      '--json',
+      '--registry=https://registry.npmjs.org/'
     ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }), fieldName)
     assertNpmRegistryContract({
       actualGitHead: view('gitHead'),
