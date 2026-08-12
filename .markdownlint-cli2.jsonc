@@ -7,6 +7,8 @@
     "MD033": false
   },
   "ignores": [
+    ".aider.chat.history.md",
+    "RUST_THIRD_PARTY_LICENSES.md",
     "docs/superpowers/plans/**",
     "docs/superpowers/2026-06-28-tilecache-release-and-roadmap-plan.md"
   ]

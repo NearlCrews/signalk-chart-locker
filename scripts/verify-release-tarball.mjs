@@ -27,7 +27,9 @@ const packedPackage = JSON.parse(execFileSync('tar', [
   'package/package.json'
 ], { encoding: 'utf8' }))
 const sourcePackage = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'))
+const sourceGitHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
 assert.equal(packedPackage.name, sourcePackage.name, 'release tarball package name does not match the checkout')
 assert.equal(packedPackage.version, sourcePackage.version, 'release tarball version does not match the checkout')
+assert.equal(packedPackage.gitHead, sourceGitHead, 'release tarball gitHead does not match the checkout')
 
 process.stdout.write(`Release tarball verified: ${packedPackage.name}@${packedPackage.version} (sha256:${digest}).\n`)

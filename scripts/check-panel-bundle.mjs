@@ -1,4 +1,5 @@
 import { readFileSync, readdirSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { gzipSync } from 'node:zlib'
 import vm from 'node:vm'
 import React from 'react'
@@ -30,6 +31,20 @@ const consumedHostReact = modules.some((module) =>
 )
 if (!consumedHostReact) {
   throw new Error('webpack stats do not prove that the panel consumes singleton React from the host')
+}
+
+const require = createRequire(import.meta.url)
+const webpackConfig = require('../webpack.config.cjs')
+const federation = webpackConfig.plugins.find((plugin) => plugin?.options?.shared !== undefined)
+const shared = federation?.options?.shared
+for (const packageName of ['react', 'react-dom']) {
+  const entry = shared?.[packageName]
+  if (entry?.singleton !== true || entry?.import !== false || entry?.requiredVersion !== '>=19.2.0 <20.0.0') {
+    throw new Error(`${packageName} must be configured as an exact host-provided singleton share`)
+  }
+}
+if (shared?.['signalk-nearlcrews-ui'] !== undefined) {
+  throw new Error('signalk-nearlcrews-ui must stay bundled rather than entering the host share scope')
 }
 
 const normalizedModulePaths = modules

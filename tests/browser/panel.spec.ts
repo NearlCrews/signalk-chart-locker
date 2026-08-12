@@ -14,6 +14,9 @@ if (typeof snuiPackage !== 'object' || snuiPackage === null ||
   throw new Error('signalk-nearlcrews-ui package.json carries no version string')
 }
 const snuiVersion = snuiPackage.version
+if (snuiVersion !== '0.7.0') {
+  throw new Error(`expected signalk-nearlcrews-ui 0.7.0, found ${snuiVersion}`)
+}
 
 // The theme storage key, read from the package source because the exports map exposes only the ESM
 // root, which the CommonJS-transformed spec cannot require. Keeps the persistence assertion on the
@@ -107,13 +110,20 @@ test('loads the production remote and completes save and discard flows', async (
   await expect(chartsPathError).toHaveCount(0)
   await expect(page.getByText('Unsaved changes', { exact: true })).toBeVisible()
   await expect(saveButton).toBeEnabled()
+  const actionStatus = page.locator('[data-panel-action-bar] [tabindex="-1"]')
   await saveButton.click()
 
+  // Check the transient request acknowledgement before slower serialization
+  // assertions so a busy cross-browser run cannot outlive its display timer.
+  await expect(actionStatus).toBeFocused()
+  await expect(actionStatus).toContainText('Save requested')
   await expect(page.locator('body')).toHaveAttribute('data-save-count', '1')
   await expect(page.locator('body')).toHaveAttribute('data-saved-configuration', /charts\/new/)
-  const actionStatus = page.locator('[data-panel-action-bar] [tabindex="-1"]')
-  await expect(actionStatus).toBeFocused()
-  await expect(actionStatus).toContainText('Saved')
+  const savedConfiguration = JSON.parse(
+    await page.locator('body').getAttribute('data-saved-configuration') ?? '{}'
+  )
+  expect(savedConfiguration.futurePluginSetting).toEqual({ enabled: true, strategy: 'coastal' })
+  expect(savedConfiguration.charts.futureChartSetting).toBe('keep-me')
   await expect(saveButton).toBeDisabled()
 
   await chartsPath.fill('charts/discard-me')
@@ -312,18 +322,23 @@ test('explains unavailable filesystem guidance and failed live-data refreshes', 
 test('supports keyboard operation and visible focus in every explicit theme', async ({ page }) => {
   const root = page.locator('[data-snui-root]')
   const auto = page.getByRole('radio', { name: 'Auto' })
+  const system = page.getByRole('radio', { name: 'System' })
   const light = page.getByRole('radio', { name: 'Light' })
   const dark = page.getByRole('radio', { name: 'Dark' })
   const night = page.getByRole('radio', { name: 'Night' })
 
   // Since signalk-nearlcrews-ui 0.5.0, a fresh profile resolves to Auto (no explicit theme
   // attribute), and the radio group's roving tabindex follows the checked option, so Tab lands on
-  // Auto. Arrow keys move the selection through the explicit themes.
+  // Auto. Arrow keys move the selection through System and the explicit themes.
   await page.locator('body').click({ position: { x: 1, y: 1 } })
   await page.keyboard.press('Tab')
   await expect(auto).toBeFocused()
   await expect(root).not.toHaveAttribute('data-snui-theme')
   await expectVisibleFocusRing(auto)
+  await page.keyboard.press('ArrowRight')
+  await expect(system).toBeFocused()
+  await expect(root).toHaveAttribute('data-snui-theme', 'system')
+  await expectVisibleFocusRing(system)
   await page.keyboard.press('ArrowRight')
   await expect(light).toBeFocused()
   await expect(root).toHaveAttribute('data-snui-theme', 'light')
@@ -359,6 +374,7 @@ test('supports every theme and persists the choice', async ({ page }) => {
 
   const themeGroup = page.getByRole('radiogroup', { name: 'Panel theme' })
   for (const [label, value] of [
+    ['System', 'system'],
     ['Light', 'light'],
     ['Dark', 'dark'],
     ['Night', 'night']

@@ -13,6 +13,22 @@ test('normalizeConfig yields the schema defaults for a never-configured plugin',
   assert.equal(config.advanced.cacheVolumeSource, '')
 })
 
+test('normalizeConfig preserves unknown top-level and grouped keys', () => {
+  const futurePluginSetting = { enabled: true, strategy: 'coastal' }
+  const config = normalizeConfig({
+    futurePluginSetting,
+    tileCache: { cacheCapGiB: 8, futureCacheSetting: 'keep-cache' },
+    charts: { path: 'charts', futureChartSetting: 'keep-chart' }
+  }) as unknown as Record<string, unknown> & {
+    tileCache: Record<string, unknown>
+    charts: Record<string, unknown>
+  }
+
+  assert.equal(config.futurePluginSetting, futurePluginSetting)
+  assert.equal(config.tileCache.futureCacheSetting, 'keep-cache')
+  assert.equal(config.charts.futureChartSetting, 'keep-chart')
+})
+
 test('normalizeConfig clamps a cap below the minimum up to 4', () => {
   assert.equal(normalizeConfig({ tileCache: { cacheCapGiB: 2 } }).tileCache.cacheCapGiB, 4)
 })

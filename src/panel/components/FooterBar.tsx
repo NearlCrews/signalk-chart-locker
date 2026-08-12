@@ -1,9 +1,9 @@
 /**
- * Panel footer: the Save and Discard controls plus a dirty / just-saved
+ * Panel footer: the Save and Discard controls plus a dirty or requested
  * indicator. Save is disabled for invalid configuration, or when the
  * configuration is unchanged and the plugin has already been configured.
- * When the plugin has never been saved, Save stays enabled so the user can
- * persist defaults without making a throwaway edit first.
+ * When the host supplies no configuration, Save stays enabled so the user can
+ * request the defaults without making a throwaway edit first.
  */
 
 import type * as React from 'react'
@@ -15,12 +15,12 @@ interface Props {
   dirty: boolean
   /**
    * True when the admin UI passed a null or undefined configuration prop,
-   * meaning the plugin has never been saved. Save stays enabled in this
-   * state so the user can persist defaults to enable the plugin.
+   * meaning the plugin has not been configured. Save stays enabled in this
+   * state so the user can request the defaults.
    */
   unconfigured: boolean
-  /** Epoch milliseconds of the last successful save, or null. Drives the temporary Saved status. */
-  justSavedAt: number | null
+  /** Epoch milliseconds of the last save request, or null. */
+  saveRequestedAt: number | null
   onSave: () => void
   onDiscard: () => void
   valid?: boolean
@@ -29,17 +29,17 @@ interface Props {
 /**
  * The configuration panel's footer bar. Memoized: the panel root keeps the
  * two callbacks identity-stable, so field edits re-render the footer only when
- * its dirty, configured, validity, or saved-notice state changes.
+ * its dirty, configured, validity, or request-notice state changes.
  */
-export default memo(function FooterBar ({ dirty, unconfigured, justSavedAt, onSave, onDiscard, valid = true }: Props): React.ReactElement {
+export default memo(function FooterBar ({ dirty, unconfigured, saveRequestedAt, onSave, onDiscard, valid = true }: Props): React.ReactElement {
   const saveDisabled = !valid || saveButtonDisabled(dirty, unconfigured)
   const statusRef = useRef<HTMLDivElement>(null)
   const statusTone: StatusTone = !valid
     ? 'danger'
     : dirty
       ? 'warning'
-      : justSavedAt !== null
-        ? 'success'
+      : saveRequestedAt !== null
+        ? 'info'
         : unconfigured
           ? 'info'
           : 'neutral'
@@ -47,8 +47,8 @@ export default memo(function FooterBar ({ dirty, unconfigured, justSavedAt, onSa
     ? 'Fix validation errors before saving.'
     : dirty
       ? 'Unsaved changes'
-      : justSavedAt !== null
-        ? 'Saved'
+      : saveRequestedAt !== null
+        ? 'Save requested'
         : unconfigured
           ? 'Save to enable the plugin.'
           : 'No unsaved changes'
@@ -60,7 +60,7 @@ export default memo(function FooterBar ({ dirty, unconfigured, justSavedAt, onSa
 
   return (
     <ActionBar
-      sticky='bottom'
+      sticky='viewport-bottom'
       data-panel-action-bar=''
       statusRef={statusRef}
       status={

@@ -1,4 +1,5 @@
 import * as React from 'react'
+import * as ReactDOM from 'react-dom'
 import { createRoot } from 'react-dom/client'
 
 declare const __REMOTE_URL__: string
@@ -14,16 +15,19 @@ interface RemoteContainer {
 }
 
 interface ShareScope {
-  readonly react: Record<string, {
-    readonly eager: boolean
-    readonly from: string
-    readonly get: () => Promise<() => typeof React>
-    readonly loaded: boolean
-    readonly shareConfig: {
-      readonly requiredVersion: string
-      readonly singleton: boolean
-    }
-  }>
+  readonly react: Record<string, ShareScopeEntry<typeof React>>
+  readonly 'react-dom': Record<string, ShareScopeEntry<typeof ReactDOM>>
+}
+
+interface ShareScopeEntry<T> {
+  readonly eager: boolean
+  readonly from: string
+  readonly get: () => Promise<() => T>
+  readonly loaded: boolean
+  readonly shareConfig: {
+    readonly requiredVersion: string
+    readonly singleton: boolean
+  }
 }
 
 const parameters = new URLSearchParams(window.location.search)
@@ -179,6 +183,18 @@ const shareScope: ShareScope = {
         singleton: true
       }
     }
+  },
+  'react-dom': {
+    [ReactDOM.version]: {
+      eager: true,
+      from: 'chart-locker-browser-fixture',
+      get: () => Promise.resolve(() => ReactDOM),
+      loaded: true,
+      shareConfig: {
+        requiredVersion: `^${ReactDOM.version}`,
+        singleton: true
+      }
+    }
   }
 }
 
@@ -204,8 +220,9 @@ try {
   if (!(rootElement instanceof HTMLElement)) throw new Error('Fixture root is missing.')
 
   const initialConfiguration = {
+    futurePluginSetting: { enabled: true, strategy: 'coastal' },
     tileCache: { cacheCapGiB: 8, regionsBudgetGiB: 4 },
-    charts: { path: 'charts/pmtiles' },
+    charts: { path: 'charts/pmtiles', futureChartSetting: 'keep-me' },
     advanced: {
       geocodingEnabled: true,
       imageTag: parameters.has('invalid-advanced') ? 'invalid tag' : '',

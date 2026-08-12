@@ -1,7 +1,7 @@
 /**
  * React state hook for the panel's working configuration. It wraps the pure
  * configReducer in a useReducer, normalizes the raw `configuration` prop the
- * admin UI hands in, and tracks the last-saved snapshot for the dirty check.
+ * admin UI hands in, and tracks the last requested snapshot for the dirty check.
  */
 
 import type { Dispatch } from 'react'
@@ -14,14 +14,14 @@ import { normalizeConfig } from '../normalize-config.js'
 export interface UseConfigResult {
   /** The current working configuration, including any unsaved edits. */
   state: ChartLockerConfig
-  /** The configuration as of the last save (or the initial load). */
-  savedState: ChartLockerConfig
+  /** The configuration as of the last save request (or the initial load). */
+  requestedState: ChartLockerConfig
   /** Dispatches a ConfigAction through the reducer. */
   dispatch: Dispatch<ConfigAction>
-  /** Records the current state as saved, clearing the dirty flag. */
-  markSaved: () => void
+  /** Records the current state as requested, clearing the dirty flag. */
+  markSaveRequested: () => void
   /**
-   * Replace both the working state and the saved snapshot with `config`, so the panel adopts a value
+   * Replace both the working state and requested snapshot with `config`, so the panel adopts a value
    * (for example a free-space-seeded default) without counting it as an unsaved edit. Both point at
    * the same object, so the identity dirty check reads clean.
    */
@@ -31,28 +31,28 @@ export interface UseConfigResult {
 /**
  * Manage the panel's configuration state. `configuration` is read once at
  * mount; later changes to the prop are ignored, because the panel itself is
- * the only writer and updates `savedState` directly through markSaved.
+ * the only writer and updates `requestedState` directly through markSaveRequested.
  */
 export function useConfig (configuration: unknown): UseConfigResult {
   const [initial] = useState<ChartLockerConfig>(() => normalizeConfig(configuration))
   const [state, dispatch] = useReducer(configReducer, initial)
-  const [savedState, setSavedState] = useState<ChartLockerConfig>(initial)
+  const [requestedState, setRequestedState] = useState<ChartLockerConfig>(initial)
 
-  // Keep markSaved's identity stable across renders by reading the latest
+  // Keep markSaveRequested's identity stable across renders by reading the latest
   // state through a ref, assigned during render (the same pattern the panel
   // root uses for handleSave) so the ref can never lag a committed state.
   const stateRef = useRef(state)
   stateRef.current = state
-  const markSaved = useCallback((): void => {
-    setSavedState(stateRef.current)
+  const markSaveRequested = useCallback((): void => {
+    setRequestedState(stateRef.current)
   }, [])
 
-  // Point the working state and the saved snapshot at the same object, so state === savedState holds
+  // Point the working state and requested snapshot at the same object, so state === requestedState holds
   // and the panel does not read as dirty after adopting the seeded config.
   const reseed = useCallback((config: ChartLockerConfig): void => {
     dispatch({ type: 'discard', config })
-    setSavedState(config)
+    setRequestedState(config)
   }, [])
 
-  return { state, savedState, dispatch, markSaved, reseed }
+  return { state, requestedState, dispatch, markSaveRequested, reseed }
 }

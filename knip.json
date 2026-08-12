@@ -3,7 +3,7 @@
   "entry": [
     "src/panel/index.tsx",
     "fixtures/browser/main.tsx",
-    "fixtures/browser/vite.config.ts",
+    "fixtures/browser/vite.config.mts",
     "scripts/*.mjs",
     "test/*.test.ts",
     "tests/browser/*.spec.ts"

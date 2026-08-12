@@ -21,7 +21,8 @@ import {
   Section,
   Stack,
   supportsNativeCssScope,
-  ThemeToggle
+  ThemeToggle,
+  UnsupportedBrowserNotice
 } from 'signalk-nearlcrews-ui'
 import StatusBar from './components/StatusBar.js'
 import RangeField from './components/RangeField.js'
@@ -45,8 +46,8 @@ import { validatePanelConfig } from './validate-config.js'
 import { MAX_CONFIG_PATH_LENGTH } from '../shared/config-path.js'
 import styles from './PluginConfigurationPanel.module.css'
 
-/** How long, in milliseconds, the "Saved" confirmation stays visible. */
-const SAVED_NOTICE_MS = 2500
+/** How long, in milliseconds, the save-request confirmation stays visible. */
+const SAVE_REQUEST_NOTICE_MS = 2500
 
 type PanelAction = 'retention' | 'clear-scroll' | 'refresh-cache' | 'rescan-charts'
 
@@ -66,7 +67,7 @@ function formatBytes (bytes: number | null): string {
 interface Props {
   /** The plugin configuration supplied by the admin UI. Untyped at the federation boundary. */
   configuration: unknown
-  /** Persists the configuration. Fire-and-forget: it returns void and must not be awaited. */
+  /** Requests a configuration save. Fire-and-forget: it returns void and must not be awaited. */
   save: (configuration: unknown) => void
 }
 
@@ -74,13 +75,10 @@ interface Props {
 export default function PluginConfigurationPanel (props: Props): React.ReactElement {
   if (!supportsNativeCssScope(window)) {
     return (
-      <div className={styles.compatibilityMessage} data-browser-compatibility-message='' role='alert'>
-        <h2>Browser update required</h2>
-        <p>
-          This panel requires native CSS @scope. Update the browser or embedded WebView before
-          reopening Signal K Admin.
-        </p>
-      </div>
+      <UnsupportedBrowserNotice>
+        This panel requires native CSS @scope. Update the browser or embedded WebView before
+        reopening Signal K Admin.
+      </UnsupportedBrowserNotice>
     )
   }
 
@@ -98,8 +96,8 @@ function SupportedPluginConfigurationPanel ({ configuration, save }: Props): Rea
   } = useCacheInfo()
   const cache = useCacheOperations()
   const charts = useChartDiscovery()
-  const { state, savedState, dispatch, markSaved, reseed } = useConfig(configuration)
-  const [justSavedAt, setJustSavedAt] = useState<number | null>(null)
+  const { state, requestedState, dispatch, markSaveRequested, reseed } = useConfig(configuration)
+  const [saveRequestedAt, setSaveRequestedAt] = useState<number | null>(null)
   const [ttlDraft, setTtlDraft] = useState(30)
   const [actionError, setActionError] = useState<string | null>(null)
   const [clearScrollConfirmation, setClearScrollConfirmation] = useState(false)
@@ -116,22 +114,22 @@ function SupportedPluginConfigurationPanel ({ configuration, save }: Props): Rea
     if (cache.stats !== null) setTtlDraft(cache.stats.ttlDays)
   }, [cache.stats?.ttlDays])
 
-  // Whether the plugin has ever been saved. The admin UI does not re-pass configuration after a
-  // save, so this local state flips on the first save instead of deriving forever from the mount prop.
-  const [everSaved, setEverSaved] = useState(configuration != null)
+  // Whether the plugin has received a save request. The admin UI does not re-pass configuration
+  // after a request, so this local state flips instead of deriving forever from the mount prop.
+  const [saveWasRequested, setSaveWasRequested] = useState(configuration != null)
 
   useEffect(() => {
-    if (justSavedAt === null) return
-    const timeoutId = setTimeout(() => setJustSavedAt(null), SAVED_NOTICE_MS)
+    if (saveRequestedAt === null) return
+    const timeoutId = setTimeout(() => setSaveRequestedAt(null), SAVE_REQUEST_NOTICE_MS)
     return () => clearTimeout(timeoutId)
-  }, [justSavedAt])
+  }, [saveRequestedAt])
 
   // Every reducer case returns a new object only on a real change, so identity inequality against
-  // the last-saved snapshot is a sound dirty check.
-  const dirty = state !== savedState
+  // the last-requested snapshot is a sound dirty check.
+  const dirty = state !== requestedState
 
-  // Save stays enabled before the first configuration is persisted so defaults can enable the plugin.
-  const unconfigured = !everSaved
+  // Save stays enabled before the first request so defaults can enable the plugin.
+  const unconfigured = !saveWasRequested
 
   const validation = useMemo(() => validatePanelConfig(state), [state])
   const validationErrors = Object.values(validation).filter((error): error is string => error !== null)
@@ -145,11 +143,11 @@ function SupportedPluginConfigurationPanel ({ configuration, save }: Props): Rea
   const restartChanges = useMemo(() => {
     if (!dirty) return []
     const changes: string[] = []
-    if (state.tileCache !== savedState.tileCache) changes.push('tile-cache limits')
-    if (state.charts !== savedState.charts) changes.push('chart discovery')
-    if (state.advanced !== savedState.advanced) changes.push('container settings')
+    if (state.tileCache !== requestedState.tileCache) changes.push('tile-cache limits')
+    if (state.charts !== requestedState.charts) changes.push('chart discovery')
+    if (state.advanced !== requestedState.advanced) changes.push('container settings')
     return changes
-  }, [dirty, state, savedState])
+  }, [dirty, state, requestedState])
 
   const runAction = useCallback((
     key: PanelAction,
@@ -205,14 +203,14 @@ function SupportedPluginConfigurationPanel ({ configuration, save }: Props): Rea
   stateRef.current = state
   const handleSave = useCallback((): void => {
     save(stateRef.current)
-    markSaved()
-    setJustSavedAt(Date.now())
-    setEverSaved(true)
-  }, [save, markSaved])
+    markSaveRequested()
+    setSaveRequestedAt(Date.now())
+    setSaveWasRequested(true)
+  }, [save, markSaveRequested])
 
   const handleDiscard = useCallback((): void => {
-    dispatch({ type: 'discard', config: savedState })
-  }, [dispatch, savedState])
+    dispatch({ type: 'discard', config: requestedState })
+  }, [dispatch, requestedState])
 
   const slowUpstream = Object.entries(cache.stats?.upstream ?? {}).some(([, upstream]) => upstream.slow)
 
@@ -525,7 +523,7 @@ function SupportedPluginConfigurationPanel ({ configuration, save }: Props): Rea
         <FooterBar
           dirty={dirty}
           unconfigured={unconfigured}
-          justSavedAt={justSavedAt}
+          saveRequestedAt={saveRequestedAt}
           onSave={handleSave}
           onDiscard={handleDiscard}
           valid={validationErrors.length === 0}

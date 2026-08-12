@@ -5,7 +5,7 @@
  *
  * Every case returns a new object only on a real change, and returns the input
  * state otherwise, so the panel can use identity equality against the
- * last-saved snapshot as a sound dirty check.
+ * last-requested snapshot as a sound dirty check.
  */
 
 import type {

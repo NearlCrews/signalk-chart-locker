@@ -3,7 +3,7 @@ import { chromium } from '@playwright/test'
 import { createServer } from 'vite'
 
 const server = await createServer({
-  configFile: resolve('fixtures/browser/vite.config.ts'),
+  configFile: resolve('fixtures/browser/vite.config.mts'),
   logLevel: 'warn'
 })
 await server.listen()
@@ -16,14 +16,13 @@ try {
     deviceScaleFactor: 1,
     locale: 'en-US',
     timezoneId: 'America/Detroit',
-    viewport: { width: 1212, height: 1908 }
+    viewport: { width: 1280, height: 800 }
   })
   await page.goto('http://127.0.0.1:4175/?screenshots')
   await page.locator('body[data-fixture-ready="true"]').waitFor()
   await page.getByText('700.0 MiB').waitFor()
   await page.getByText('2 valid charts, 0 invalid.', { exact: false }).waitFor()
 
-  const panel = page.locator('[data-snui-root]')
   const themeGroup = page.getByRole('radiogroup', { name: 'Panel theme' })
   for (const [theme, path] of [
     ['Light', 'assets/screenshots/config-panel.png'],
@@ -36,7 +35,7 @@ try {
       theme.toLowerCase()
     )
     await page.mouse.move(0, 0)
-    await panel.screenshot({ animations: 'disabled', path })
+    await page.screenshot({ animations: 'disabled', path })
   }
 } finally {
   await browser?.close()

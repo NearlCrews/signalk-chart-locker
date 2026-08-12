@@ -74,7 +74,9 @@ tiles. A standalone install of Binnacle is unaffected.
   clear only unpinned scroll tiles, refresh live state, and request a chart rescan from the same panel.
   The panel uses the accessible, theme-aware
   [`signalk-nearlcrews-ui`](https://github.com/NearlCrews/signalk-nearlcrews-ui) primitives and shares
-  its Auto, Light, Dark, and Night preference with other NearlCrews plugin panels.
+  its Auto, System, Light, Dark, and Night preference with other NearlCrews plugin panels. Auto
+  follows an explicit host theme and otherwise uses Light, while System follows the operating-system
+  color scheme.
 
 ## Requirements
 

@@ -91,7 +91,11 @@ export function normalizeConfig (configuration: unknown): ChartLockerConfig {
   )
 
   return {
+    // Keep configuration introduced by newer plugin versions through an edit
+    // and save instead of silently erasing data this panel does not understand.
+    ...raw,
     tileCache: {
+      ...tileCache,
       cacheCapGiB,
       // No upper bound: the plugin clamps a budget above the cache cap down to
       // the cap at start, so the panel accepts any non-negative whole number.
@@ -103,9 +107,11 @@ export function normalizeConfig (configuration: unknown): ChartLockerConfig {
       )
     },
     charts: {
+      ...charts,
       path: readString(charts, 'path')
     },
     advanced: {
+      ...advanced,
       geocodingEnabled: readBoolean(advanced, 'geocodingEnabled', true),
       imageTag: migrateLegacyTilecacheTag(readString(advanced, 'imageTag')) ?? '',
       cacheVolumeSource: readString(advanced, 'cacheVolumeSource')

@@ -37,8 +37,8 @@ serves, and any implementation ideas you have.
    `cargo audit --file Cargo.lock` from `container/`, then run
    `TILECACHE_BIN="$PWD/container/target/release/tilecache" npm run test:node-rust-contract` and
    `npm run licenses:rust:check` from the repository root.
-7. Exercise panel layout and interaction changes in a real browser in light, dark, and night-red
-   themes. Update the App Store screenshots when the visible panel changes materially.
+7. Exercise panel layout and interaction changes in a real browser in Auto, System, light, dark, and
+   night-red themes. Update the App Store screenshots when the visible panel changes materially.
 8. Update the maintained documentation surfaces that apply: `README.md`, `CHANGELOG.md`,
    `docs/OPERATIONS.md`, `docs/API.md`, `.github/SECURITY.md`, and the publish runbook.
 9. Open a pull request with a clear description of the change.

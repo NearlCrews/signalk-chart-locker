@@ -13,7 +13,7 @@ export default defineConfig({
     trace: 'retain-on-failure'
   },
   webServer: {
-    command: 'vite --config fixtures/browser/vite.config.ts',
+    command: 'vite --config fixtures/browser/vite.config.mts',
     url: 'http://127.0.0.1:4175',
     reuseExistingServer: !process.env.CI,
     timeout: 30_000

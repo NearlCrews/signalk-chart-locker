@@ -28,7 +28,7 @@
   `cargo audit --file Cargo.lock`,
   `TILECACHE_BIN="$PWD/container/target/release/tilecache" npm run test:node-rust-contract`, and
   `npm run licenses:rust:check` pass
-- [ ] Panel changes were checked in a real browser in light, dark, and night-red themes
+- [ ] Panel changes were checked in a real browser in Auto, System, light, dark, and night-red themes
 - [ ] Maintained documentation and App Store screenshots were updated when applicable
 
 ## Chart sources, regions, PMTiles, and container affected

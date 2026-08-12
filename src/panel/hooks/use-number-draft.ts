@@ -77,7 +77,7 @@ export function useNumberDraft (
   const [draft, setDraft] = useState<string | null>(null)
 
   // Drop the draft when the committed value changes externally (e.g. a
-  // Discard action restores the saved snapshot, or the slider moves the same
+  // Discard action restores the requested snapshot, or the slider moves the same
   // value the number box edits). Without this, the input would keep rendering
   // the user's stale typed text. lastCommittedFromHere tracks the value the
   // hook itself last produced, so a self-driven update (handleChange calling

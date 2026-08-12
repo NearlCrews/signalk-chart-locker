@@ -44,6 +44,11 @@ npm run pack:release
 npm run verify:release-tarball
 ```
 
+The release tarball embeds the checked-out commit in `package.json` as
+`gitHead`. Verification rejects a tarball whose `gitHead` does not match the
+release checkout, and the publish workflow checks the same field from npm after
+publication.
+
 Rust container:
 
 ```bash
@@ -73,13 +78,17 @@ where the binary exists.
    the actual Signal K Admin host. `test:integration` executes the real Admin JavaScript in Chrome and
    asserts that the production remote mounts. CI pairs Signal K 2.24.0 with signalk-container 1.20.0,
    then tests the latest releases of both.
-2. Check light, dark, and night-red themes at desktop and narrow widths.
-3. Exercise cache refresh, retention changes, clear confirmation, chart rescan, validation errors,
+2. Check Auto, System, light, dark, and night-red themes at desktop and narrow widths. Auto must
+   follow an explicit host theme and otherwise use Light. System must follow the operating-system
+   color scheme.
+3. Run `npm run screenshots` to regenerate the deterministic Light, Dark, and Night App Store hero
+   assets at 1280 by 800 pixels, then inspect each image.
+4. Exercise cache refresh, retention changes, clear confirmation, chart rescan, validation errors,
    unsaved-change protection, and the Advanced disclosure.
-4. Confirm the panel reports container unavailable, health pending, unconfigured, disk pressure, slow
+5. Confirm the panel reports container unavailable, health pending, unconfigured, disk pressure, slow
    upstream, and ready states clearly.
-5. Confirm the external cache path reports the correct filesystem or an explicit fallback warning.
-6. On a test Signal K installation, verify PMTiles serving, saved-region creation, re-download,
+6. Confirm the external cache path reports the correct filesystem or an explicit fallback warning.
+7. On a test Signal K installation, verify PMTiles serving, saved-region creation, re-download,
    deletion, and recovery after a tile-cache database recreation.
 
 ## 4. Commit and push without publishing
@@ -148,7 +157,7 @@ than moving an already-published version tag.
 Before the first release through this workflow, configure npm trusted publishing for package
 `signalk-chart-locker` with organization or user `NearlCrews`, repository `signalk-chart-locker`,
 workflow `publish.yml`, GitHub environment `npm`, and the `npm publish` allowed action. The publish
-job uses GitHub OIDC on a GitHub-hosted runner with Node 24 and npm 12.0.1. Once the first trusted
+job uses GitHub OIDC on a GitHub-hosted runner with Node 24 and npm 12.0.2. Once the first trusted
 publish succeeds, revoke obsolete npm automation tokens and restrict token-based package publishing.
 Do not add an `NPM_TOKEN` fallback.
 
@@ -168,6 +177,7 @@ Wait for that workflow, then verify:
 ```bash
 npm view signalk-chart-locker version
 npm view signalk-chart-locker dist.tarball
+npm view signalk-chart-locker gitHead
 npm view signalk-chart-locker dist.attestations
 ```
 

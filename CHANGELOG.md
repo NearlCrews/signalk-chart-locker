@@ -6,12 +6,32 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The configuration panel now explains when its required native CSS scope
+  support is unavailable.
+- Documentation, spelling, workflow security, and dead-code checks now run as
+  explicit local and CI quality gates.
+
+### Changed
+
+- The panel targets `signalk-nearlcrews-ui` 0.7.0, adds the System theme,
+  docks save actions to the viewport when needed, and consumes React and
+  React DOM as host-provided Module Federation singletons.
+- Save and discard actions now report that the host request was issued and
+  move focus to the stable completion message.
+- Compatible dependencies and release workflows are refreshed. Release
+  tarballs now verify their source commit through npm `gitHead` metadata.
+- Panel screenshot capture now uses deterministic 1280 by 800 viewports.
+
 ### Fixed
 
 - Persist learned vector-style documents, glyph and sprite templates, and expanded tile sources in
   SQLite. An unchanged catalog now rehydrates up to four styles during configuration, preserving the
   cache namespace of warmed assets so saved regions continue rendering after an offline container
   restart. Changed or removed style sources invalidate their stored metadata.
+- Configuration saves preserve unknown top-level and grouped keys for
+  forward-compatible round trips.
 
 <a id="v081"></a>
 

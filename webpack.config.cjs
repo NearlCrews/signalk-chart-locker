@@ -82,10 +82,16 @@ module.exports = {
         // rather than dead code beside the panel.
         './PluginConfigurationPanel': './src/panel/index.tsx'
       },
-      // The panel uses React hooks only; it never imports react-dom (the admin
-      // UI host owns rendering), so only react is shared.
+      // React and ReactDOM are host-owned singletons. The shared UI package is
+      // intentionally absent from this map so it remains bundled with the
+      // remote while both React packages resolve from Signal K Admin.
       shared: {
         react: {
+          singleton: true,
+          requiredVersion: '>=19.2.0 <20.0.0',
+          import: false
+        },
+        'react-dom': {
           singleton: true,
           requiredVersion: '>=19.2.0 <20.0.0',
           import: false
