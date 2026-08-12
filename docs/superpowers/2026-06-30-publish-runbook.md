@@ -46,8 +46,9 @@ npm run verify:release-tarball
 
 The release tarball embeds the checked-out commit in `package.json` as
 `gitHead`. Verification rejects a tarball whose `gitHead` does not match the
-release checkout, and the publish workflow checks the same field from npm after
-publication.
+release checkout. The publish workflow normalizes npm's scalar and singleton-array
+JSON forms, then checks both `gitHead` and `dist.integrity` against the exact
+checksum-verified tarball after publication.
 
 Rust container:
 
@@ -169,6 +170,16 @@ browser gates, installs that exact tarball into Signal K 2.24.0 and latest, exec
 panel through the real Admin application, and publishes the same checksum-verified bytes through npm
 trusted publishing.
 
+If npm publication succeeds but the final registry check fails, do not rerun
+the publish step and do not replace the version tag. Dispatch `publish.yml` from
+`main` with the required `release_tag` input. A manual dispatch repeats the
+versioned-image, full build, cross-browser, exact-tarball, and Signal K Admin
+gates against that immutable tag. It skips only `npm publish`, then verifies the
+existing registry `gitHead` and `dist.integrity` against the newly rebuilt exact
+tarball. The release checkout is forced through the requested `refs/tags/`
+namespace; a separate checkout pinned to the workflow commit supplies only the
+recovery tooling added after an older tag.
+
 Stable npm versions use the `latest` dist-tag. Prerelease versions use `next`, so a prerelease cannot
 replace the package users receive from an unqualified install.
 
@@ -177,6 +188,7 @@ Wait for that workflow, then verify:
 ```bash
 npm view signalk-chart-locker version
 npm view signalk-chart-locker dist.tarball
+npm view signalk-chart-locker dist.integrity
 npm view signalk-chart-locker gitHead
 npm view signalk-chart-locker dist.attestations
 ```

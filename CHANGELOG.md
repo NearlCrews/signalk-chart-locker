@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Accept npm 12's singleton-array `npm view` output while rejecting ambiguous
+  registry metadata, and verify the published `gitHead` and `dist.integrity`
+  against the exact tested tarball. An explicit manual recovery dispatch now
+  repeats every release gate for an immutable tag, skips npm publication, and
+  verifies the already-published registry artifact.
+
 <a id="v083"></a>
 
 ## [0.8.3] - 2026-08-12

@@ -32,7 +32,17 @@ if (!pluginCi.includes('SignalK/signalk-server/.github/workflows/plugin-ci.yml@'
 }
 
 const publish = await readFile('.github/workflows/publish.yml', 'utf8')
-for (const expected of ['npm@12.0.2', 'pack:release', 'verify:release-tarball', 'Verify registry source commit', 'gitHead']) {
+for (const expected of [
+  'workflow_dispatch:',
+  'release_tag:',
+  'npm@12.0.2',
+  'pack:release',
+  'verify:release-tarball',
+  "if: github.event_name == 'release'",
+  'RELEASE_REF_TYPE: tag',
+  'Verify npm registry contract',
+  '.release-tooling/scripts/verify-npm-registry.mjs'
+]) {
   if (!publish.includes(expected)) failures.push(`publish.yml must retain ${expected}.`)
 }
 

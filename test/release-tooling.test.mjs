@@ -1,12 +1,20 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { selectOrphanedBuildVersions } from '../scripts/cleanup-container-versions.mjs'
 import { buildImagetoolsPromotionArgs } from '../scripts/container-promotion-contract.mjs'
 import { extractContainerManifestDigests } from '../scripts/container-manifest-contract.mjs'
 import { assertPackageFiles, parsePackReport } from '../scripts/package-contract.mjs'
+import {
+  assertNpmRegistryContract,
+  normalizeNpmViewScalar,
+  parseNpmViewScalar,
+  tarballIntegrity
+} from '../scripts/npm-registry-contract.mjs'
 import { deriveReleaseMetadata, selectMonotonicPromotionTags, validateTagPromotion } from '../scripts/release-policy.mjs'
 import {
   assertReleaseDocumentation,
@@ -342,6 +350,80 @@ test('release checksum verification fails closed', () => {
   assert.throws(() => verifyChecksum(contents, '0'.repeat(64)), /does not match/)
   const expected = '133cfccb5b503cf4040c95f3dfad56d07c1574283a1e39066b594f6ee33711ba'
   assert.equal(verifyChecksum(contents, expected), expected)
+})
+
+test('npm view scalars accept npm 11 and npm 12 output without accepting ambiguity', () => {
+  const commit = 'a'.repeat(40)
+  assert.equal(normalizeNpmViewScalar(commit, 'gitHead'), commit)
+  assert.equal(normalizeNpmViewScalar([commit], 'gitHead'), commit)
+  assert.equal(parseNpmViewScalar(JSON.stringify(commit), 'gitHead'), commit)
+  assert.equal(parseNpmViewScalar(JSON.stringify([commit]), 'gitHead'), commit)
+  for (const value of [[], [commit, commit], '', '   ', null, 12, { value: commit }, [[commit]]]) {
+    assert.throws(() => normalizeNpmViewScalar(value, 'gitHead'), /npm view gitHead/)
+  }
+  assert.throws(() => parseNpmViewScalar('not JSON', 'gitHead'), /valid JSON/)
+})
+
+test('npm registry contract binds the release commit and exact tarball bytes', () => {
+  const contents = Buffer.from('exact release tarball')
+  const integrity = tarballIntegrity(contents)
+  const gitHead = 'b'.repeat(40)
+  assert.equal(integrity, 'sha512-OfEghQrddmxtEksgUyBHHJasWGIrU9G+JKrNgjorJ+C7zljmftLUlb79ASCdBWWkphG5Sd86HfE8Pc/S2zJe1A==')
+  assert.doesNotThrow(() => assertNpmRegistryContract({
+    actualGitHead: gitHead,
+    actualIntegrity: integrity,
+    expectedGitHead: gitHead,
+    expectedIntegrity: integrity
+  }))
+  assert.throws(() => assertNpmRegistryContract({
+    actualGitHead: 'c'.repeat(40),
+    actualIntegrity: integrity,
+    expectedGitHead: gitHead,
+    expectedIntegrity: integrity
+  }), /gitHead/)
+  assert.throws(() => assertNpmRegistryContract({
+    actualGitHead: gitHead,
+    actualIntegrity: tarballIntegrity(Buffer.from('different tarball')),
+    expectedGitHead: gitHead,
+    expectedIntegrity: integrity
+  }), /dist\.integrity/)
+})
+
+test('manual publish recovery verifies the exact tag and skips only npm publication', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/publish.yml', import.meta.url), 'utf8')
+  assert.match(workflow, /workflow_dispatch:\n {4}inputs:\n {6}release_tag:[\s\S]*?required: true/)
+  assert.match(workflow, /RELEASE_TAG: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.release_tag/)
+  assert.equal(workflow.match(/ref: refs\/tags\/\$\{\{ env\.RELEASE_TAG \}\}/g)?.length, 4)
+  assert.equal(workflow.match(/RELEASE_REF_TYPE: tag/g)?.length, 4)
+  assert.equal(workflow.match(/node \.release-tooling\/scripts\/release-metadata\.mjs/g)?.length, 4)
+  assert.equal(workflow.match(/name: Check out release tooling/g)?.length, 4)
+  assert.match(workflow, /name: Check out release tooling[\s\S]*?ref: \$\{\{ github\.sha \}\}[\s\S]*?path: \.release-tooling/)
+
+  const publishStep = workflow.indexOf('- name: Publish the tested tarball with trusted publishing')
+  const registryStep = workflow.indexOf('- name: Verify npm registry contract')
+  assert.ok(publishStep >= 0)
+  assert.ok(registryStep > publishStep)
+  assert.match(workflow.slice(publishStep, registryStep), /if: github\.event_name == 'release'/)
+  assert.doesNotMatch(workflow.slice(registryStep), /if: github\.event_name == 'release'/)
+  assert.match(workflow.slice(registryStep), /\.release-tooling\/scripts\/verify-npm-registry\.mjs/)
+})
+
+test('release metadata uses an explicit release ref type over the workflow branch context', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url))
+  const { version } = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'))
+  const output = execFileSync('node', ['scripts/release-metadata.mjs'], {
+    cwd: root,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GITHUB_REF_TYPE: 'branch',
+      GITHUB_REPOSITORY: 'NearlCrews/signalk-chart-locker',
+      RELEASE_CHECKOUT: root,
+      RELEASE_REF_TYPE: 'tag',
+      RELEASE_TAG: `v${version}`
+    }
+  })
+  assert.match(output, new RegExp(`Release metadata verified: v${version}`))
 })
 
 test('bounded downloads reject declared and streamed overflow', async () => {

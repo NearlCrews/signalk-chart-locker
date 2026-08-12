@@ -5,6 +5,15 @@ name: Publish plugin to npm
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to verify without publishing to npm
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
 
 permissions:
   contents: read
@@ -22,7 +31,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ github.event.release.tag_name }}
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+      - name: Check out release tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          path: .release-tooling
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
@@ -31,8 +46,10 @@ jobs:
       - name: Derive and validate release metadata
         id: release
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: node scripts/release-metadata.mjs
+          RELEASE_CHECKOUT: ${{ github.workspace }}
+          RELEASE_REF_TYPE: tag
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        run: node .release-tooling/scripts/release-metadata.mjs
 
       - name: Record the release commit
         id: source
@@ -106,7 +123,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ github.event.release.tag_name }}
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+      - name: Check out release tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          path: .release-tooling
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
@@ -118,8 +141,10 @@ jobs:
       - name: Derive and validate release metadata
         id: release
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: node scripts/release-metadata.mjs
+          RELEASE_CHECKOUT: ${{ github.workspace }}
+          RELEASE_REF_TYPE: tag
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        run: node .release-tooling/scripts/release-metadata.mjs
 
       - name: Require the release commit to belong to main
         run: |
@@ -167,7 +192,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ github.event.release.tag_name }}
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+      - name: Check out release tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          path: .release-tooling
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
@@ -176,8 +207,10 @@ jobs:
       - name: Derive and validate release metadata
         id: release
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: node scripts/release-metadata.mjs
+          RELEASE_CHECKOUT: ${{ github.workspace }}
+          RELEASE_REF_TYPE: tag
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        run: node .release-tooling/scripts/release-metadata.mjs
 
       - run: npm ci
 
@@ -249,7 +282,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ github.event.release.tag_name }}
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+      # Recovery runs still build and verify the immutable release tag above. Obtain only the
+      # release metadata and registry verifier tooling from the exact workflow commit.
+      - name: Check out release tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          path: .release-tooling
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
@@ -259,8 +300,10 @@ jobs:
       - name: Derive and validate release metadata
         id: release
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: node scripts/release-metadata.mjs
+          RELEASE_CHECKOUT: ${{ github.workspace }}
+          RELEASE_REF_TYPE: tag
+          RELEASE_TAG: ${{ env.RELEASE_TAG }}
+        run: node .release-tooling/scripts/release-metadata.mjs
 
       - name: Pin the trusted-publishing npm client
         working-directory: ${{ runner.temp }}
@@ -279,21 +322,14 @@ jobs:
       # npm trusted publishing exchanges the job's GitHub OIDC identity for a short-lived publish
       # credential. No long-lived npm token is available to this workflow.
       - name: Publish the tested tarball with trusted publishing
+        if: github.event_name == 'release'
         env:
           NPM_TAG: ${{ steps.release.outputs.npm_tag }}
         run: npm publish ./package/*.tgz --ignore-scripts --access public --tag "$NPM_TAG"
 
-      - name: Verify registry source commit
-        run: |
-          EXPECTED_GIT_HEAD="$(git rev-parse HEAD)"
-          VERSION="$(node -p "require('./package.json').version")"
-          for attempt in $(seq 1 12); do
-            ACTUAL_GIT_HEAD="$(npm view "signalk-chart-locker@${VERSION}" gitHead --json 2>/dev/null | tr -d '"' || true)"
-            if [ "$ACTUAL_GIT_HEAD" = "$EXPECTED_GIT_HEAD" ]; then
-              exit 0
-            fi
-            echo "Waiting for registry metadata (attempt ${attempt}/12)." >&2
-            sleep 5
-          done
-          echo "Published gitHead ($ACTUAL_GIT_HEAD) does not match release commit ($EXPECTED_GIT_HEAD)." >&2
-          exit 1
+      - name: Verify npm registry contract
+        env:
+          PACKAGE_DIRECTORY: package
+          PACKAGE_NAME: signalk-chart-locker
+          PACKAGE_VERSION: ${{ steps.release.outputs.version }}
+        run: EXPECTED_GIT_HEAD="$(git rev-parse HEAD)" node .release-tooling/scripts/verify-npm-registry.mjs
