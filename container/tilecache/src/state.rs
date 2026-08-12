@@ -174,6 +174,11 @@ pub struct StyleState {
     pub source_maxzoom: HashMap<String, u32>,
     pub fontstacks: Vec<String>,
     pub sprite_base: Option<String>,
+    /// The ephemeral catalog generation that validated this state. It changes on every config push
+    /// and is not used in cache keys.
+    pub config_generation: u64,
+    /// The durable namespace used in glyph, sprite, and tile cache keys. A rehydrated style preserves
+    /// this value so its pinned assets remain addressable after a restart.
     pub generation: u64,
     /// Shared parsed document. Map entries and request handlers clone only this Arc, not the full JSON
     /// tree. The style document route makes one private copy when it must rewrite URLs for the client.

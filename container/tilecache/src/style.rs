@@ -5,8 +5,8 @@
 //! allowed hosts and the client's guarded DNS resolver. Vector tiles, glyphs, and sprites share the
 //! generation-aware cache so the basemap remains coherent across configuration changes.
 
-use crate::cache::{CachedTile, TileKey};
-use crate::source::UpstreamTemplate;
+use crate::cache::{CachedTile, StoredLearnedStyle, TileKey};
+use crate::source::{ChartSource, UpstreamTemplate};
 use crate::state::{now_secs, AppState, StyleState};
 use axum::{
     extract::{Path, State},
@@ -15,6 +15,7 @@ use axum::{
     routing::get,
     Router,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
@@ -33,8 +34,60 @@ pub(crate) const MAX_LEARNED_STYLE_ENTRIES: usize = 4;
 /// A map style is metadata, not a tile. Keep its parsed persistent representation far below the tile
 /// body cap while leaving ample room for the shipped OpenFreeMap style.
 pub(crate) const MAX_STYLE_JSON_BYTES: usize = 1024 * 1024;
+const MAX_PERSISTED_STYLE_BYTES: usize = 2 * MAX_STYLE_JSON_BYTES;
 const MAX_TILEJSON_BYTES: usize = 256 * 1024;
 const MAX_SPRITE_JSON_BYTES: usize = 1024 * 1024;
+const PERSISTED_STYLE_VERSION: u32 = 1;
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PersistedStyleState {
+    version: u32,
+    glyphs: Option<String>,
+    source_tiles: HashMap<String, Vec<String>>,
+    raster_sources: HashSet<String>,
+    source_maxzoom: HashMap<String, u32>,
+    fontstacks: Vec<String>,
+    sprite_base: Option<String>,
+    generation: u64,
+    document: Value,
+    fetched_at: i64,
+    upstream_validator: Option<String>,
+}
+
+impl PersistedStyleState {
+    fn from_live(style: &StyleState) -> Self {
+        Self {
+            version: PERSISTED_STYLE_VERSION,
+            glyphs: style.glyphs.clone(),
+            source_tiles: style.source_tiles.clone(),
+            raster_sources: style.raster_sources.clone(),
+            source_maxzoom: style.source_maxzoom.clone(),
+            fontstacks: style.fontstacks.clone(),
+            sprite_base: style.sprite_base.clone(),
+            generation: style.generation,
+            document: (*style.document).clone(),
+            fetched_at: style.fetched_at,
+            upstream_validator: style.upstream_validator.clone(),
+        }
+    }
+
+    fn into_live(self, config_generation: u64) -> StyleState {
+        StyleState {
+            glyphs: self.glyphs,
+            source_tiles: self.source_tiles,
+            raster_sources: self.raster_sources,
+            source_maxzoom: self.source_maxzoom,
+            fontstacks: self.fontstacks,
+            sprite_base: self.sprite_base,
+            config_generation,
+            generation: self.generation,
+            document: Arc::new(self.document),
+            fetched_at: self.fetched_at,
+            upstream_validator: self.upstream_validator,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StyleAssetKind {
@@ -190,6 +243,218 @@ pub(crate) fn style_url_allowed(url: &str, allowed_hosts: &[String], allow_http:
     })
 }
 
+fn style_source_signature(source: &ChartSource) -> Option<String> {
+    serde_json::to_vec(source)
+        .ok()
+        .map(|encoded| crate::fetcher::strong_etag(&encoded))
+}
+
+fn valid_persisted_style(
+    persisted: &PersistedStyleState,
+    source: &ChartSource,
+    allow_http: bool,
+) -> bool {
+    let UpstreamTemplate::Style { allowed_hosts, .. } = &source.upstream else {
+        return false;
+    };
+    let Some(layers) = persisted.document.get("layers").and_then(Value::as_array) else {
+        return false;
+    };
+    let Some(document_sources) = persisted.document.get("sources").and_then(Value::as_object)
+    else {
+        return false;
+    };
+    if persisted.version != PERSISTED_STYLE_VERSION
+        || !persisted.generation.is_multiple_of(2)
+        || persisted.fetched_at < 0
+        || layers.len() > MAX_STYLE_LAYERS
+        || document_sources.is_empty()
+        || document_sources.len() > MAX_STYLE_SOURCES
+        || persisted.source_tiles.is_empty()
+        || persisted.source_tiles.len() > MAX_STYLE_SOURCES
+        || persisted.fontstacks.len() > MAX_FONTSTACKS
+        || persisted.fontstacks.iter().any(|fontstack| {
+            fontstack.is_empty() || fontstack.len() > 512 || fontstack.chars().any(char::is_control)
+        })
+        || persisted
+            .upstream_validator
+            .as_ref()
+            .is_some_and(|validator| validator.len() > MAX_STYLE_URL_BYTES)
+        || serde_json::to_vec(&persisted.document)
+            .map_or(true, |document| document.len() > MAX_STYLE_JSON_BYTES)
+    {
+        return false;
+    }
+    let document_glyphs = persisted.document.get("glyphs").and_then(Value::as_str);
+    let document_sprite = persisted.document.get("sprite").and_then(Value::as_str);
+    if document_glyphs != persisted.glyphs.as_deref()
+        || document_sprite != persisted.sprite_base.as_deref()
+        || persisted.glyphs.as_ref().is_some_and(|url| {
+            !style_url_allowed(url, allowed_hosts, allow_http)
+                || !url.contains("{fontstack}")
+                || !url.contains("{range}")
+        })
+        || persisted
+            .sprite_base
+            .as_ref()
+            .is_some_and(|url| !style_url_allowed(url, allowed_hosts, allow_http))
+    {
+        return false;
+    }
+    if persisted.source_tiles.iter().any(|(name, templates)| {
+        !valid_style_source_name(name)
+            || !document_sources.contains_key(name)
+            || templates.is_empty()
+            || templates.len() > MAX_TEMPLATES_PER_SOURCE
+            || templates.iter().any(|template| {
+                !style_url_allowed(template, allowed_hosts, allow_http)
+                    || !["{z}", "{x}", "{y}"]
+                        .iter()
+                        .all(|token| template.contains(token))
+            })
+    }) {
+        return false;
+    }
+    if document_sources.iter().any(|(name, value)| {
+        (value.get("tiles").is_some() || value.get("url").is_some())
+            && !persisted.source_tiles.contains_key(name)
+    }) {
+        return false;
+    }
+    let expected_raster_sources: HashSet<String> = persisted
+        .source_tiles
+        .keys()
+        .filter(|name| {
+            matches!(
+                document_sources[*name].get("type").and_then(Value::as_str),
+                Some("raster" | "raster-dem")
+            )
+        })
+        .cloned()
+        .collect();
+    expected_raster_sources == persisted.raster_sources
+        && persisted
+            .source_maxzoom
+            .iter()
+            .all(|(name, zoom)| persisted.source_tiles.contains_key(name) && *zoom <= 24)
+}
+
+async fn persist_style_state(state: &AppState, source: &str, style: &StyleState) {
+    let signature = {
+        let sources = state.sources.read().await;
+        sources.get(source).and_then(style_source_signature)
+    };
+    let Some(signature) = signature else {
+        return;
+    };
+    let encoded = match serde_json::to_vec(&PersistedStyleState::from_live(style)) {
+        Ok(encoded) if encoded.len() <= MAX_PERSISTED_STYLE_BYTES => encoded,
+        _ => {
+            eprintln!("event=learned_style_persist_skipped reason=oversized source={source}");
+            return;
+        }
+    };
+    let cache = state.cache.clone();
+    let source = source.to_string();
+    let fetched_at = style.fetched_at;
+    match tokio::task::spawn_blocking(move || {
+        cache.store_learned_style(&source, &signature, &encoded, fetched_at)
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => state
+            .cache
+            .record_operation_error("learned_style_persist_failed", &error),
+        Err(error) => {
+            state.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
+            eprintln!("event=learned_style_persist_task_failed error={error}");
+        }
+    }
+}
+
+/// Rehydrate learned style state after a coherent catalog push. Exact source signatures invalidate
+/// records whose catalog definition changed, and the pushed style-source bound caps every point read.
+pub(crate) async fn rehydrate_style_state(state: &AppState, config_generation: u64) {
+    let (signatures, sources) = {
+        let sources = state.sources.read().await;
+        let style_sources: HashMap<String, ChartSource> = sources
+            .iter()
+            .filter(|(_, source)| matches!(source.upstream, UpstreamTemplate::Style { .. }))
+            .map(|(id, source)| (id.clone(), source.clone()))
+            .collect();
+        let signatures = style_sources
+            .iter()
+            .filter_map(|(id, source)| {
+                style_source_signature(source).map(|signature| (id.clone(), signature))
+            })
+            .collect();
+        (signatures, style_sources)
+    };
+    let cache = state.cache.clone();
+    let rows = match tokio::task::spawn_blocking(move || {
+        cache.reconcile_learned_styles(&signatures, MAX_PERSISTED_STYLE_BYTES)
+    })
+    .await
+    {
+        Ok(Ok(rows)) => rows,
+        Ok(Err(error)) => {
+            state
+                .cache
+                .record_operation_error("learned_style_reconcile_failed", &error);
+            state.style_state.write().await.clear();
+            return;
+        }
+        Err(error) => {
+            state.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
+            eprintln!("event=learned_style_reconcile_task_failed error={error}");
+            state.style_state.write().await.clear();
+            return;
+        }
+    };
+    let mut restored = HashMap::with_capacity(rows.len());
+    let mut invalid = Vec::new();
+    for StoredLearnedStyle {
+        source, state_json, ..
+    } in rows
+    {
+        let valid = serde_json::from_slice::<PersistedStyleState>(&state_json)
+            .ok()
+            .filter(|persisted| {
+                sources.get(&source).is_some_and(|catalog_source| {
+                    valid_persisted_style(
+                        persisted,
+                        catalog_source,
+                        state.knobs.allow_private_egress,
+                    )
+                })
+            });
+        match valid {
+            Some(persisted) => {
+                restored.insert(source, Arc::new(persisted.into_live(config_generation)));
+            }
+            None => invalid.push(source),
+        }
+    }
+    if !invalid.is_empty() {
+        let cache = state.cache.clone();
+        if let Err(error) = tokio::task::spawn_blocking(move || {
+            for source in invalid {
+                cache.delete_learned_style(&source)?;
+            }
+            Ok::<(), rusqlite::Error>(())
+        })
+        .await
+        .unwrap_or_else(|error| Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error))))
+        {
+            state
+                .cache
+                .record_operation_error("invalid_learned_style_delete_failed", &error);
+        }
+    }
+    *state.style_state.write().await = restored;
+}
+
 async fn fetch_json(
     state: &AppState,
     url: &str,
@@ -232,7 +497,7 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
         return None;
     }
     if let Some(existing) = state.style_state.read().await.get(source).cloned() {
-        if existing.generation == generation
+        if existing.config_generation == generation
             && now_secs() - existing.fetched_at < state.knobs.fresh_secs
         {
             return Some(existing.document.clone());
@@ -242,7 +507,7 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
     let flight = state.inflight_lock(&flight_key).await?;
     let _guard = flight.lock().await;
     if let Some(existing) = state.style_state.read().await.get(source).cloned() {
-        if existing.generation == generation
+        if existing.config_generation == generation
             && now_secs() - existing.fetched_at < state.knobs.fresh_secs
         {
             state.inflight_finish(&flight_key, &flight).await;
@@ -267,12 +532,16 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
         return None;
     }
     let existing = state.style_state.read().await.get(source).cloned();
+    let cache_generation = existing
+        .as_ref()
+        .filter(|entry| entry.config_generation == generation)
+        .map_or(generation, |entry| entry.generation);
     let fetched = fetch_json(
         state,
         &style_url,
         existing
             .as_ref()
-            .filter(|entry| entry.generation == generation)
+            .filter(|entry| entry.config_generation == generation)
             .and_then(|entry| entry.upstream_validator.as_deref()),
         MAX_STYLE_JSON_BYTES,
     )
@@ -280,13 +549,18 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
     let (style, upstream_validator) = match fetched {
         Ok(Some(fetched)) => fetched,
         Ok(None) => {
+            let _config_guard = state.config_update.lock().await;
+            if state.config_generation.load(Ordering::Acquire) != generation {
+                state.inflight_finish(&flight_key, &flight).await;
+                return None;
+            }
             let mut styles = state.style_state.write().await;
             let Some(existing) = styles.get(source).cloned() else {
                 drop(styles);
                 state.inflight_finish(&flight_key, &flight).await;
                 return None;
             };
-            if existing.generation != generation {
+            if existing.config_generation != generation {
                 drop(styles);
                 state.inflight_finish(&flight_key, &flight).await;
                 return None;
@@ -294,16 +568,15 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
             let mut refreshed = (*existing).clone();
             refreshed.fetched_at = now_secs();
             let document = existing.document.clone();
-            styles.insert(source.to_string(), Arc::new(refreshed));
+            let refreshed = Arc::new(refreshed);
+            styles.insert(source.to_string(), refreshed.clone());
             drop(styles);
+            persist_style_state(state, source, &refreshed).await;
             state.inflight_finish(&flight_key, &flight).await;
             return Some(document);
         }
         Err(()) => {
-            let stale = existing.filter(|entry| {
-                entry.generation == generation
-                    && now_secs() - entry.fetched_at < state.knobs.max_stale_secs
-            });
+            let stale = existing.filter(|entry| entry.config_generation == generation);
             state.inflight_finish(&flight_key, &flight).await;
             return stale.map(|entry| entry.document.clone());
         }
@@ -468,7 +741,12 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
         }
         source_tiles.insert(name.clone(), tiles);
     }
-    if source_tiles.is_empty() || state.config_generation.load(Ordering::Acquire) != generation {
+    if source_tiles.is_empty() {
+        state.inflight_finish(&flight_key, &flight).await;
+        return None;
+    }
+    let _config_guard = state.config_update.lock().await;
+    if state.config_generation.load(Ordering::Acquire) != generation {
         state.inflight_finish(&flight_key, &flight).await;
         return None;
     }
@@ -478,22 +756,22 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
         state.inflight_finish(&flight_key, &flight).await;
         return None;
     }
-    styles.insert(
-        source.to_string(),
-        Arc::new(StyleState {
-            glyphs,
-            source_tiles,
-            raster_sources,
-            source_maxzoom,
-            fontstacks,
-            sprite_base,
-            generation,
-            document: style.clone(),
-            fetched_at: now_secs(),
-            upstream_validator,
-        }),
-    );
+    let learned = Arc::new(StyleState {
+        glyphs,
+        source_tiles,
+        raster_sources,
+        source_maxzoom,
+        fontstacks,
+        sprite_base,
+        config_generation: generation,
+        generation: cache_generation,
+        document: style.clone(),
+        fetched_at: now_secs(),
+        upstream_validator,
+    });
+    styles.insert(source.to_string(), learned.clone());
     drop(styles);
+    persist_style_state(state, source, &learned).await;
     state.inflight_finish(&flight_key, &flight).await;
     Some(style)
 }
@@ -509,7 +787,8 @@ pub async fn ensure_style_learned(state: &AppState, source: &str) -> bool {
         .await
         .get(source)
         .is_some_and(|style| {
-            style.generation == generation && now_secs() - style.fetched_at < state.knobs.fresh_secs
+            style.config_generation == generation
+                && now_secs() - style.fetched_at < state.knobs.fresh_secs
         })
     {
         return true;
@@ -1131,7 +1410,7 @@ mod tests {
         }
     }
 
-    async fn spawn_upstream() -> SocketAddr {
+    async fn spawn_upstream_with_handle() -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let a = addr;
@@ -1172,11 +1451,15 @@ mod tests {
                 }),
             )
             .route("/t/{z}/{x}/{y}", get(|| async { ([(header::CONTENT_TYPE, "application/x-protobuf")], vec![8u8, 8, 8, 8]) }));
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             axum::serve(listener, stub).await.unwrap();
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        addr
+        (addr, handle)
+    }
+
+    async fn spawn_upstream() -> SocketAddr {
+        spawn_upstream_with_handle().await.0
     }
 
     async fn spawn_unsafe_asset_upstream() -> SocketAddr {
@@ -1483,7 +1766,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_style_revalidates_conditionally_and_falls_back_offline() {
+    async fn stale_style_revalidates_conditionally_and_falls_back_offline_past_the_bound() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
@@ -1564,7 +1847,7 @@ mod tests {
         {
             let mut styles = state.style_state.write().await;
             Arc::make_mut(styles.get_mut("basemap").unwrap()).fetched_at =
-                crate::state::now_secs() - 2;
+                crate::state::now_secs() - state.knobs.max_stale_secs - 1;
         }
         let stale = router
             .oneshot(Request::get("/style/basemap").body(Body::empty()).unwrap())
@@ -2187,6 +2470,116 @@ mod tests {
                 .is_some(),
             "sprite.json is cached under variant index 0"
         );
+    }
+
+    #[tokio::test]
+    async fn learned_style_and_cached_assets_survive_an_offline_restart() {
+        let (addr, upstream) = spawn_upstream_with_handle().await;
+        let db = NamedTempFile::new().unwrap();
+        let first_state = dev_state(&db);
+        let first_router = crate::routes::app(first_state.clone());
+        let config = config_json(addr, "127.0.0.1");
+        let configured = first_router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(configured.status(), StatusCode::NO_CONTENT);
+        for path in [
+            "/style/basemap",
+            "/style/basemap/glyphs/Noto%20Sans%20Regular/0-255.pbf",
+            "/style/basemap/sprite.json",
+            "/style/basemap/tiles/openmaptiles/1/0/0",
+        ] {
+            let response = first_router
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "warm {path}");
+        }
+        let cache_generation = first_state.style_state.read().await["basemap"].generation;
+
+        drop(first_router);
+        drop(first_state);
+        upstream.abort();
+        let _ = upstream.await;
+
+        let cache = Arc::new(TileCache::open(db.path()).unwrap());
+        let mut restarted_state = AppState::new(
+            cache,
+            Knobs {
+                allow_private_egress: true,
+                ..Default::default()
+            },
+        );
+        restarted_state.control_token = Some(Arc::from(TEST_CONTROL_TOKEN));
+        let restarted_router = crate::routes::app(restarted_state.clone());
+        let configured = restarted_router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(configured.status(), StatusCode::NO_CONTENT);
+        let restored = restarted_state
+            .style_state
+            .read()
+            .await
+            .get("basemap")
+            .cloned()
+            .expect("the learned style is restored during the first config push");
+        assert_eq!(
+            restored.generation, cache_generation,
+            "rehydration preserves the namespace of the warmed assets"
+        );
+        for path in [
+            "/style/basemap",
+            "/style/basemap/glyphs/Noto%20Sans%20Regular/0-255.pbf",
+            "/style/basemap/sprite.json",
+            "/style/basemap/tiles/openmaptiles/1/0/0",
+        ] {
+            let response = restarted_router
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "offline {path}");
+        }
+
+        let changed_config = config.replace(
+            &format!("http://{addr}/style"),
+            &format!("http://{addr}/replacement-style"),
+        );
+        let changed = restarted_router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(changed_config))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(changed.status(), StatusCode::NO_CONTENT);
+        assert!(
+            restarted_state.style_state.read().await.is_empty(),
+            "a changed catalog definition invalidates the learned style"
+        );
+        let unavailable = restarted_router
+            .oneshot(Request::get("/style/basemap").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(unavailable.status(), StatusCode::BAD_GATEWAY);
     }
 
     #[tokio::test]

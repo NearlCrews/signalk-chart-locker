@@ -129,6 +129,15 @@ pub struct SourceStats {
     pub scroll_rows: i64,
 }
 
+/// A learned vector-style record read from SQLite. The cache layer keeps the payload opaque so
+/// style parsing and validation stay in `style.rs`.
+pub struct StoredLearnedStyle {
+    pub source: String,
+    pub source_signature: String,
+    pub state_json: Vec<u8>,
+    pub fetched_at: i64,
+}
+
 struct Inner {
     conn: Connection,
     total_bytes: i64,
@@ -289,6 +298,7 @@ impl TileCache {
     fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version != SCHEMA_VERSION {
+            conn.execute_batch("DROP TABLE IF EXISTS learned_styles;")?;
             conn.execute_batch("DROP TABLE IF EXISTS region_tiles;")?;
             conn.execute_batch("DROP TABLE IF EXISTS tiles;")?;
             conn.execute_batch(
@@ -331,6 +341,95 @@ impl TileCache {
         // Created on every open so an existing cache gains it, with no schema-version wipe.
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_region_tiles_key ON region_tiles(source, z, x, y);",
+        )?;
+        // Learned style metadata is durable state rather than disposable tile payload. Add it without
+        // a schema-version bump so upgrading does not wipe pinned regions that need this metadata.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS learned_styles (
+                source           TEXT PRIMARY KEY,
+                source_signature TEXT NOT NULL,
+                state_json       BLOB NOT NULL,
+                fetched_at       INTEGER NOT NULL
+            );",
+        )?;
+        Ok(())
+    }
+
+    /// Store one validated learned style. The caller enforces the document and entry-count bounds.
+    pub fn store_learned_style(
+        &self,
+        source: &str,
+        source_signature: &str,
+        state_json: &[u8],
+        fetched_at: i64,
+    ) -> rusqlite::Result<()> {
+        let inner = self.lock();
+        inner.conn.execute(
+            "INSERT INTO learned_styles (source, source_signature, state_json, fetched_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(source) DO UPDATE SET
+                source_signature = excluded.source_signature,
+                state_json = excluded.state_json,
+                fetched_at = excluded.fetched_at",
+            params![source, source_signature, state_json, fetched_at],
+        )?;
+        Ok(())
+    }
+
+    /// Keep and return only records whose exact source signature is present in the pushed catalog.
+    /// Point lookups over the caller's bounded map avoid deserializing an unbounded or oversized table,
+    /// and replacing the table with those matches removes deleted, changed, and malformed entries.
+    pub fn reconcile_learned_styles(
+        &self,
+        source_signatures: &HashMap<String, String>,
+        max_state_bytes: usize,
+    ) -> rusqlite::Result<Vec<StoredLearnedStyle>> {
+        let mut inner = self.lock();
+        let transaction = inner.conn.transaction()?;
+        let mut retained = Vec::with_capacity(source_signatures.len());
+        for (source, signature) in source_signatures {
+            let row = transaction
+                .query_row(
+                    "SELECT source, source_signature, state_json, fetched_at
+                     FROM learned_styles
+                     WHERE source = ?1 AND source_signature = ?2 AND length(state_json) <= ?3",
+                    params![source, signature, max_state_bytes as i64],
+                    |record| {
+                        Ok(StoredLearnedStyle {
+                            source: record.get(0)?,
+                            source_signature: record.get(1)?,
+                            state_json: record.get(2)?,
+                            fetched_at: record.get(3)?,
+                        })
+                    },
+                )
+                .optional()?;
+            if let Some(row) = row {
+                retained.push(row);
+            }
+        }
+        transaction.execute("DELETE FROM learned_styles", [])?;
+        for row in &retained {
+            transaction.execute(
+                "INSERT INTO learned_styles (source, source_signature, state_json, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    row.source,
+                    row.source_signature,
+                    row.state_json,
+                    row.fetched_at
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(retained)
+    }
+
+    pub fn delete_learned_style(&self, source: &str) -> rusqlite::Result<()> {
+        let inner = self.lock();
+        inner.conn.execute(
+            "DELETE FROM learned_styles WHERE source = ?1",
+            params![source],
         )?;
         Ok(())
     }
@@ -1388,6 +1487,90 @@ mod tests {
         )
         .unwrap();
         c.probe().expect("a populated database is healthy");
+    }
+
+    #[test]
+    fn learned_style_table_is_added_without_wiping_a_current_cache() {
+        let f = NamedTempFile::new().unwrap();
+        {
+            let c = TileCache::open(f.path()).unwrap();
+            c.put(
+                TileKey::new("saved", 0, 0, 0),
+                &tile(3, 200, Some(vec![1, 2, 3])),
+                true,
+                1,
+            )
+            .unwrap();
+        }
+        {
+            let conn = Connection::open(f.path()).unwrap();
+            conn.execute("DROP TABLE learned_styles", []).unwrap();
+            assert_eq!(
+                conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                SCHEMA_VERSION,
+            );
+        }
+
+        let reopened = TileCache::open(f.path()).unwrap();
+        assert!(
+            reopened
+                .get(TileKey::new("saved", 0, 0, 0))
+                .unwrap()
+                .is_some(),
+            "adding durable style metadata preserves existing tile and region tables"
+        );
+        reopened
+            .store_learned_style("basemap", "signature", br#"{"version":1}"#, 1)
+            .unwrap();
+        let signatures = HashMap::from([("basemap".to_string(), "signature".to_string())]);
+        assert_eq!(
+            reopened
+                .reconcile_learned_styles(&signatures, 1024)
+                .unwrap()
+                .len(),
+            1,
+        );
+    }
+
+    #[test]
+    fn learned_style_reconciliation_invalidates_changes_and_stays_catalog_bounded() {
+        let (_f, cache) = open();
+        for name in ["a", "b", "c", "d", "extra"] {
+            cache
+                .store_learned_style(name, &format!("signature-{name}"), b"{}", 1)
+                .unwrap();
+        }
+        let signatures = HashMap::from([
+            ("a".to_string(), "signature-a".to_string()),
+            ("b".to_string(), "changed-b".to_string()),
+            ("c".to_string(), "signature-c".to_string()),
+            ("d".to_string(), "signature-d".to_string()),
+        ]);
+        let mut restored: Vec<String> = cache
+            .reconcile_learned_styles(&signatures, 1024)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.source)
+            .collect();
+        restored.sort();
+        assert_eq!(restored, ["a", "c", "d"]);
+
+        let all_signatures = HashMap::from([
+            ("a".to_string(), "signature-a".to_string()),
+            ("b".to_string(), "signature-b".to_string()),
+            ("c".to_string(), "signature-c".to_string()),
+            ("d".to_string(), "signature-d".to_string()),
+            ("extra".to_string(), "signature-extra".to_string()),
+        ]);
+        assert_eq!(
+            cache
+                .reconcile_learned_styles(&all_signatures, 1024)
+                .unwrap()
+                .len(),
+            3,
+            "changed and out-of-catalog records were deleted, not merely skipped"
+        );
     }
 
     // The running pinned total must never drift from the pinned rows themselves. delete_region clears
