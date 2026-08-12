@@ -19,6 +19,11 @@ updates:
         update-types:
           - minor
           - patch
+    # Keep type definitions aligned with the oldest supported Node runtime.
+    ignore:
+      - dependency-name: "@types/node"
+        update-types:
+          - version-update:semver-major
     labels:
       - dependencies
       - npm

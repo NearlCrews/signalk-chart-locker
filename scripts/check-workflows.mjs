@@ -54,6 +54,13 @@ const cooldownCount = dependabot.match(/default-days:\s+7/g)?.length ?? 0
 if (ecosystemCount !== cooldownCount) {
   failures.push('dependabot.yml must retain a seven-day cooldown for every package ecosystem.')
 }
+if (
+  !dependabot.includes(
+    'dependency-name: "@types/node"\n        update-types:\n          - version-update:semver-major'
+  )
+) {
+  failures.push('dependabot.yml must keep @types/node on the oldest supported Node major.')
+}
 
 const workflowSecurity = await readFile('.github/workflows/workflow-security.yml', 'utf8')
 for (const expected of ['actionlint@v1.7.12', 'zizmor-action@']) {
