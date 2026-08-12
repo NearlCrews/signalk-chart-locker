@@ -113,6 +113,8 @@ jobs:
         env:
           SIGNALK_CONTAINER_VERSION: ${{ matrix.signalk_container }}
           SIGNALK_SERVER_VERSION: ${{ matrix.signalk_server }}
+        # zizmor: ignore[adhoc-packages] This job must install the exact matrix versions and the
+        # locally built tarball because those artifacts are what the integration test validates.
         run: |
           mkdir -p /tmp/sk-test
           cd /tmp/sk-test

@@ -36,6 +36,25 @@ for (const expected of ['npm@12.0.2', 'pack:release', 'verify:release-tarball', 
   if (!publish.includes(expected)) failures.push(`publish.yml must retain ${expected}.`)
 }
 
+const containerImage = await readFile('.github/workflows/container-image.yml', 'utf8')
+for (const [path, workflow] of [
+  ['container-image.yml', containerImage],
+  ['publish.yml', publish],
+]) {
+  const setupNodeCount = workflow.match(/uses:\s+actions\/setup-node@/g)?.length ?? 0
+  const disabledCacheCount = workflow.match(/package-manager-cache:\s+false/g)?.length ?? 0
+  if (setupNodeCount !== disabledCacheCount) {
+    failures.push(`${path} must disable setup-node package-manager caching in every job.`)
+  }
+}
+
+const dependabot = await readFile('.github/dependabot.yml', 'utf8')
+const ecosystemCount = dependabot.match(/package-ecosystem:/g)?.length ?? 0
+const cooldownCount = dependabot.match(/default-days:\s+7/g)?.length ?? 0
+if (ecosystemCount !== cooldownCount) {
+  failures.push('dependabot.yml must retain a seven-day cooldown for every package ecosystem.')
+}
+
 const workflowSecurity = await readFile('.github/workflows/workflow-security.yml', 'utf8')
 for (const expected of ['actionlint@v1.7.12', 'zizmor-action@']) {
   if (!workflowSecurity.includes(expected)) failures.push(`workflow-security.yml must include ${expected}.`)
