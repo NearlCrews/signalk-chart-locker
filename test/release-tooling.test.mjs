@@ -391,7 +391,7 @@ test('npm registry contract binds the release commit and exact tarball bytes', (
 
 test('manual publish recovery verifies the exact tag and skips only npm publication', () => {
   const workflow = readFileSync(new URL('../.github/workflows/publish.yml', import.meta.url), 'utf8')
-  assert.match(workflow, /workflow_dispatch:\n {4}inputs:\n {6}release_tag:[\s\S]*?required: true/)
+  assert.match(workflow, /workflow_dispatch:\r?\n {4}inputs:\r?\n {6}release_tag:[\s\S]*?required: true/)
   assert.match(workflow, /RELEASE_TAG: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.release_tag/)
   assert.equal(workflow.match(/ref: refs\/tags\/\$\{\{ env\.RELEASE_TAG \}\}/g)?.length, 4)
   assert.equal(workflow.match(/RELEASE_REF_TYPE: tag/g)?.length, 4)
