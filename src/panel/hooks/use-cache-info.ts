@@ -54,7 +54,7 @@ export function useCacheInfo (): UseCacheInfoResult {
       } catch (cause) {
         // Non-fatal: leave the values null so the panel keeps the static default, but explain why
         // filesystem-specific guidance is unavailable.
-        if (!fetcher.canceled()) setError(cause instanceof Error ? cause.message : String(cause))
+        if (!fetcher.abandoned(cause)) setError(cause instanceof Error ? cause.message : String(cause))
       }
     }
 

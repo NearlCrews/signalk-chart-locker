@@ -150,7 +150,7 @@ export function useCacheOperations (): {
           setError(null)
         }
       } catch (cause) {
-        if (!fetcher.canceled()) setError(cause instanceof Error ? cause.message : String(cause))
+        if (!fetcher.abandoned(cause)) setError(cause instanceof Error ? cause.message : String(cause))
       }
     })()
     refreshPromise.current = request

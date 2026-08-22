@@ -103,7 +103,7 @@ export function useStatus (): UseStatusResult {
           setError(null)
         }
       } catch (e) {
-        if (!fetcher.canceled()) {
+        if (!fetcher.abandoned(e)) {
           setError(e instanceof Error ? e.message : String(e))
         }
       } finally {

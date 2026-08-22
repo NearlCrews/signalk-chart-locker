@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { configReducer } from '../src/panel/config-reducer.js'
 import { saveButtonDisabled } from '../src/panel/footer-bar-state.js'
+import { isTeardownAbort } from '../src/panel/hooks/use-abortable-fetch.js'
 import { relativeTime } from '../src/panel/relative-time.js'
 import type { ChartLockerConfig } from '../src/panel/config-types.js'
 import { validatePanelConfig } from '../src/panel/validate-config.js'
@@ -51,6 +52,19 @@ test('saveButtonDisabled: disabled only when clean and already configured', () =
   assert.equal(saveButtonDisabled(true, false), false, 'dirty: enabled')
   assert.equal(saveButtonDisabled(false, true), false, 'unconfigured: enabled')
   assert.equal(saveButtonDisabled(true, true), false, 'dirty and unconfigured: enabled')
+})
+
+test('a teardown abort is distinguished from a request that ran out of time', () => {
+  const controller = new AbortController()
+  controller.abort()
+  assert.equal(isTeardownAbort(controller.signal.reason), true, 'an unmount abort must stay silent')
+  assert.equal(
+    isTeardownAbort(new DOMException('timed out', 'TimeoutError')),
+    false,
+    'a timeout is a failure the operator needs to see'
+  )
+  assert.equal(isTeardownAbort(new Error('HTTP 503')), false)
+  assert.equal(isTeardownAbort(null), false)
 })
 
 test('relativeTime steps up to the coarser unit at the rounding boundary', () => {

@@ -58,13 +58,11 @@ export function parseChartDiscovery (raw: unknown): ChartDiscoveryState {
 export function useChartDiscovery (): {
   discovery: ChartDiscoveryState | null
   error: string | null
-  busy: boolean
   rescan: () => Promise<void>
 } {
   const fetcher = useAbortableFetch()
   const [discovery, setDiscovery] = useState<ChartDiscoveryState | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -73,21 +71,18 @@ export function useChartDiscovery (): {
       setDiscovery(next)
       setError(null)
     } catch (cause) {
-      if (!fetcher.canceled()) setError(cause instanceof Error ? cause.message : String(cause))
+      if (!fetcher.abandoned(cause)) setError(cause instanceof Error ? cause.message : String(cause))
     }
   }, [fetcher])
 
   useEffect(() => { load().catch(() => {}) }, [load])
 
+  // No busy flag: the panel drives the rescan button's loading and disabled state from its own
+  // pendingAction, so a second copy here would only re-render the panel twice per rescan.
   const rescan = useCallback(async (): Promise<void> => {
-    setBusy(true)
-    try {
-      await fetcher.request(`${URL}/rescan`, { method: 'POST' })
-      await load()
-    } finally {
-      if (!fetcher.canceled()) setBusy(false)
-    }
+    await fetcher.request(`${URL}/rescan`, { method: 'POST' })
+    await load()
   }, [fetcher, load])
 
-  return { discovery, error, busy, rescan }
+  return { discovery, error, rescan }
 }
