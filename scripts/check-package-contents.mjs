@@ -6,8 +6,22 @@ const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.me
 if (packageJson.dependencies?.['signalk-nearlcrews-ui'] !== undefined) {
   throw new Error('signalk-nearlcrews-ui must be a bundled development dependency')
 }
-if (packageJson.devDependencies?.['signalk-nearlcrews-ui'] !== '0.8.2') {
-  throw new Error('signalk-nearlcrews-ui must be pinned to exact version 0.8.2')
+// Two assertions, because either one alone has a hole. The shape rule is never hand-edited, so a
+// range npm wrote for itself, say the ^0.9.0 an `npm install ...@latest` leaves behind, cannot be
+// repaired by pasting the received value into the literal below, which would satisfy an equality
+// check while stamping a range into every downstream consumer. The literal is the deliberate-bump
+// tripwire that the shape rule on its own would let through.
+const EXPECTED_SHARED_UI_VERSION = '0.8.2'
+const pinnedSharedUi = packageJson.devDependencies?.['signalk-nearlcrews-ui']
+if (typeof pinnedSharedUi !== 'string' || !/^\d+\.\d+\.\d+$/.test(pinnedSharedUi)) {
+  throw new Error(
+    `signalk-nearlcrews-ui must be pinned to a bare exact version, found ${String(pinnedSharedUi)}`
+  )
+}
+if (pinnedSharedUi !== EXPECTED_SHARED_UI_VERSION) {
+  throw new Error(
+    `signalk-nearlcrews-ui must be pinned to ${EXPECTED_SHARED_UI_VERSION}, found ${pinnedSharedUi}`
+  )
 }
 
 const output = execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
