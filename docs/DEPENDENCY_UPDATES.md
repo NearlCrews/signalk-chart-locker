@@ -18,6 +18,12 @@ the peer ranges declared by neostandard and eslint-plugin-react. Keep ESLint on 
 release while either peer range excludes 10.x, and re-evaluate the major upgrade when both packages
 support it.
 
+Every dependency, development ones included, must install on the lowest Node.js release
+`engines.node` advertises. Audit the tree after a dependency refresh and raise the floor rather than
+advertise a release the toolchain cannot use: `signalk-nearlcrews-ui` 0.8.0 requires 22.22.2, and
+the Babel 8 and cspell 10 trees require 22.18.0, so the floor is 22.22.2. `@types/node` tracks that
+same floor so nothing newer than the lowest supported runtime can typecheck.
+
 ## Automated updates
 
 For every Dependabot pull request:

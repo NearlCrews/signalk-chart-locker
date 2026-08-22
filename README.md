@@ -4,7 +4,7 @@
 [![npm downloads](https://img.shields.io/npm/dm/signalk-chart-locker.svg)](https://www.npmjs.com/package/signalk-chart-locker)
 [![CI](https://github.com/NearlCrews/signalk-chart-locker/actions/workflows/ci.yml/badge.svg)](https://github.com/NearlCrews/signalk-chart-locker/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue.svg)](#license)
-[![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
+[![node](https://img.shields.io/badge/node-%3E%3D22.22.2-brightgreen.svg)](https://nodejs.org)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://www.buymeacoffee.com/nearlcrews)
 
 A Signal K plugin that runs a Rust container alongside the server to host a shared tile cache
@@ -83,7 +83,7 @@ tiles. A standalone install of Binnacle is unaffected.
 
 - Signal K server >= 2.24.0, which provides the React 19.2 Admin host required by the configuration
   panel.
-- Node.js >= 22.
+- Node.js >= 22.22.2.
 - A Signal K Admin browser or embedded WebView with native CSS `@scope`: Chromium or Edge 118,
   Firefox 146, or Safari 17.4 and newer.
 - [signalk-container](https://www.npmjs.com/package/signalk-container) >= 1.20.0 and a container
@@ -216,7 +216,7 @@ routes and validation limits.
 
 ## Development
 
-This project targets Node.js 22 or newer. The Rust container is a Cargo workspace under
+This project targets Node.js 22.22.2 or newer. The Rust container is a Cargo workspace under
 `container/` and uses the pinned Rust 1.97.1 toolchain. TypeScript compilation uses the 7.0 native
 compiler, while ESLint's type-aware parser uses the TypeScript 6 compiler API compatibility package.
 ESLint remains on the latest 9.x release until neostandard and eslint-plugin-react support ESLint 10.

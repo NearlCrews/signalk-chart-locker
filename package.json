@@ -77,7 +77,7 @@
     "signalk-container": ">=1.20.0"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.22.2"
   },
   "author": "Nearl Crews <NearlCrews@users.noreply.github.com>",
   "license": "MIT",
