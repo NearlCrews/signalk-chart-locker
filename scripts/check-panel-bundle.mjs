@@ -105,9 +105,11 @@ for (const packageName of [...expectedBundledPackages, 'webpack']) {
   }
 }
 
-// React Aria (bundled for the nearlcrews-ui composite widgets) raised the measured bundle to
-// ~33.5 KiB; the ceiling keeps a small margin above that.
-const PANEL_GZIP_LIMIT_BYTES = 36 * 1024
+// React Aria (bundled for the nearlcrews-ui composite widgets) and the shared UI package dominate
+// the measured bundle, which nearlcrews-ui 0.8.0 raised to ~36.8 KiB. The ceiling keeps a small
+// margin above that. Importing signalk-nearlcrews-ui/data-grid would breach it by a wide margin:
+// that entry point adds react-aria-components and react-stately, measured at 103 KiB.
+const PANEL_GZIP_LIMIT_BYTES = 40 * 1024
 const panelGzipBytes = bundles.reduce((total, { source }) => total + gzipSync(source, { level: 9 }).length, 0)
 if (panelGzipBytes > PANEL_GZIP_LIMIT_BYTES) {
   throw new Error(`panel bundle is ${panelGzipBytes} gzip bytes; limit is ${PANEL_GZIP_LIMIT_BYTES}`)

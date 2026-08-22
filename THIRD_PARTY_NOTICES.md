@@ -7,7 +7,7 @@ The published configuration-panel bundle contains code from the following packag
 - `css-loader` 7.1.4, MIT License, Copyright JS Foundation and other contributors
 - `style-loader` 4.0.0, MIT License, Copyright JS Foundation and other contributors
 - `webpack` 5.109.2, MIT License, Copyright JS Foundation and other contributors
-- `signalk-nearlcrews-ui` 0.7.1, Apache License 2.0, Copyright 2026 Nearl Crews
+- `signalk-nearlcrews-ui` 0.8.0, Apache License 2.0, Copyright 2026 Nearl Crews
 - `react-aria` 3.51.0, Apache License 2.0, Copyright 2020 Adobe. Bundled by `signalk-nearlcrews-ui`
   for its composite widgets.
 
