@@ -1,6 +1,10 @@
 import * as React from 'react'
 import * as ReactDOM from 'react-dom'
 import { createRoot } from 'react-dom/client'
+// Framework-neutral token sheet. Importing it executes no JavaScript and styles nothing on its own:
+// only an element carrying the snui-tokens class picks the variables up, which the screenshot run
+// below is the sole caller to do.
+import 'signalk-nearlcrews-ui/tokens.css'
 
 declare const __REMOTE_URL__: string
 
@@ -32,6 +36,45 @@ interface ShareScopeEntry<T> {
 
 const parameters = new URLSearchParams(window.location.search)
 const ACTION_DELAY_MS = 500
+
+/**
+ * Under ?screenshots only, dress the host page in the shared tokens and mirror the panel's theme onto
+ * it, so a dark or night capture does not show the panel floating on a permanently light page.
+ *
+ * The tests deliberately keep the neutral light host: the panel has to look right inside arbitrary
+ * Signal K Admin chrome, and asserting against a sympathetic background would hide contrast bugs. The
+ * App Store screenshots have the opposite job, showing the theme the operator actually chose. Tokens
+ * resolve on the element carrying both the class and the attribute, so both go on <body>.
+ */
+function mirrorPanelThemeOntoHost (): void {
+  document.body.classList.add('snui-tokens')
+  document.body.style.background = 'var(--snui-color-background)'
+  document.body.style.color = 'var(--snui-color-text)'
+
+  const attach = (root: Element): void => {
+    const apply = (): void => {
+      const theme = root.getAttribute('data-snui-theme')
+      if (theme === null) document.body.removeAttribute('data-snui-theme')
+      else document.body.setAttribute('data-snui-theme', theme)
+    }
+    apply()
+    new MutationObserver(apply).observe(root, { attributeFilter: ['data-snui-theme'] })
+  }
+
+  // React commits asynchronously, so the panel root is usually not in the DOM yet at this point.
+  const mounted = document.querySelector('[data-snui-root]')
+  if (mounted !== null) {
+    attach(mounted)
+    return
+  }
+  const waiting = new MutationObserver(() => {
+    const root = document.querySelector('[data-snui-root]')
+    if (root === null) return
+    waiting.disconnect()
+    attach(root)
+  })
+  waiting.observe(document.body, { childList: true, subtree: true })
+}
 if (parameters.has('unsupported-css-scope')) {
   Object.defineProperty(window, 'CSSScopeRule', {
     configurable: true,
@@ -240,6 +283,7 @@ try {
       <Panel configuration={initialConfiguration} save={save} />
     </React.StrictMode>
   )
+  if (parameters.has('screenshots')) mirrorPanelThemeOntoHost()
   document.body.dataset.fixtureReady = 'true'
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error)
