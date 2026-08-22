@@ -4,6 +4,7 @@ import { configReducer } from '../src/panel/config-reducer.js'
 import { saveButtonDisabled } from '../src/panel/footer-bar-state.js'
 import { formatBytes, splitBytes } from '../src/panel/format-bytes.js'
 import { isTeardownAbort } from '../src/panel/hooks/use-abortable-fetch.js'
+import { ageMsSince } from '../src/panel/relative-age.js'
 import type { ChartLockerConfig } from '../src/panel/config-types.js'
 import { validatePanelConfig } from '../src/panel/validate-config.js'
 import { parseCacheStats } from '../src/panel/hooks/use-cache-operations.js'
@@ -52,6 +53,14 @@ test('saveButtonDisabled: disabled only when clean and already configured', () =
   assert.equal(saveButtonDisabled(true, false), false, 'dirty: enabled')
   assert.equal(saveButtonDisabled(false, true), false, 'unconfigured: enabled')
   assert.equal(saveButtonDisabled(true, true), false, 'dirty and unconfigured: enabled')
+})
+
+test('ageMsSince clamps a host clock that stepped backwards', () => {
+  assert.equal(ageMsSince(1_000, 6_000), 5_000, 'an ordinary age is the plain difference')
+  assert.equal(ageMsSince(6_000, 6_000), 0, 'a reading taken this instant is zero, not negative')
+  // formatRelativeAge returns its fallback for a negative age, so an unclamped skew would turn a live
+  // readout into "unknown" until the clock caught up.
+  assert.equal(ageMsSince(9_000, 6_000), 0, 'a future timestamp clamps to zero rather than going negative')
 })
 
 test('a teardown abort is distinguished from a request that ran out of time', () => {

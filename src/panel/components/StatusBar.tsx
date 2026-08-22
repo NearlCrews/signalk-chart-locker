@@ -14,6 +14,7 @@ import type * as React from 'react'
 import { memo, useEffect, useState } from 'react'
 import { formatRelativeAge, Section, StatusIndicator, type FormatRelativeAgeOptions } from 'signalk-nearlcrews-ui'
 import type { PluginRuntimeStatus } from '../hooks/use-status.js'
+import { ageMsSince } from '../relative-age.js'
 import styles from '../PluginConfigurationPanel.module.css'
 
 /**
@@ -54,9 +55,7 @@ export default memo(function StatusBar ({ status, lastUpdatedMs }: Props): React
     <Section
       title='Plugin status'
       actions={lastUpdatedMs !== null
-        // Clamp at the boundary: formatRelativeAge takes a nonnegative age, and a host clock that
-        // steps backwards between the poll and the render would otherwise read as unknown.
-        ? <span className={styles.secondaryText}>Checked {formatRelativeAge(Math.max(0, Date.now() - lastUpdatedMs), AGE_FORMAT)}</span>
+        ? <span className={styles.secondaryText}>Checked {formatRelativeAge(ageMsSince(lastUpdatedMs, Date.now()), AGE_FORMAT)}</span>
         : undefined}
     >
       {status === null

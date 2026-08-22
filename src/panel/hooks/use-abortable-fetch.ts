@@ -56,12 +56,24 @@ export function useAbortableFetch (): AbortableFetch {
     apiRef.current = {
       async request (url: string, init: RequestInit = {}): Promise<Response> {
         // A fresh timeout per call: a single hook-lifetime timeout would abort every later poll.
+        const unmountSignal = unmountRef.current?.signal
         const signals = [AbortSignal.timeout(PANEL_REQUEST_TIMEOUT_MS)]
-        if (unmountRef.current !== null) signals.push(unmountRef.current.signal)
+        if (unmountSignal !== undefined) signals.push(unmountSignal)
         if (init.signal !== undefined && init.signal !== null) signals.push(init.signal)
-        const response = await fetch(url, { ...init, credentials: 'same-origin', signal: AbortSignal.any(signals) })
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
-        return response
+        try {
+          const response = await fetch(url, { ...init, credentials: 'same-origin', signal: AbortSignal.any(signals) })
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          return response
+        } catch (cause) {
+          // Both our teardown and a caller's own controller abort with AbortError, so without this the
+          // caller's deliberate cancellation would be swallowed as if the panel had unmounted. Only the
+          // teardown signal being aborted proves the abort was ours. No caller passes a signal today;
+          // this keeps the first one that does from silently losing its failures.
+          if (isTeardownAbort(cause) && unmountSignal?.aborted !== true) {
+            throw new DOMException('The panel request was aborted by its caller.', 'CallerAbortError')
+          }
+          throw cause
+        }
       },
       async fetchJson (url: string, init: RequestInit = {}): Promise<unknown> {
         const response = await apiRef.current!.request(url, init)

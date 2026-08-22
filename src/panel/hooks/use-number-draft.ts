@@ -83,6 +83,13 @@ export function useNumberDraft (
   // hook itself last produced, so a self-driven update (handleChange calling
   // onChange) is recognized as ours and leaves the draft alone; any other
   // transition is treated as external and clears the draft.
+  //
+  // Keep every consumer of this hook out of a CollapsibleSection. The default retain strategy wraps
+  // children in React Activity, which runs effect cleanups on collapse and re-runs the effects on
+  // reopen while component state survives, so this one would fire with an unchanged value and throw
+  // away whatever the user had half typed. Today the number and range fields all sit inside plain
+  // Section elements, which are not collapsible. Moving one needs an epoch ref that ignores a re-run
+  // with no actual change, plus a collapse-and-reopen browser test.
   const lastCommittedFromHere = useRef<number | null>(null)
   useEffect(() => {
     if (lastCommittedFromHere.current === value) {

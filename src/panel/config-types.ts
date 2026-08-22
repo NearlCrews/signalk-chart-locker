@@ -26,7 +26,7 @@ export interface ChartsConfig {
 
 /** The advanced group: settings most installs never change. */
 export interface AdvancedConfig {
-  /** Whether place-name lookup may contact the configured geocoding provider. */
+  /** Whether reverse geocoding may contact the configured provider to name a saved region. */
   geocodingEnabled: boolean
   /** The container image tag to run. Blank keeps the tag pinned to the plugin version. */
   imageTag: string
