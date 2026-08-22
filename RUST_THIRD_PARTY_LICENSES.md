@@ -437,7 +437,7 @@ OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 
 **Used by:**
-- `ipnet` 2.12.0
+- `ipnet` 2.12.1
 
                                          Apache License
                            Version 2.0, January 2004
@@ -852,11 +852,11 @@ OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 
 **Used by:**
-- `futures-channel` 0.3.33
-- `futures-core` 0.3.33
-- `futures-sink` 0.3.33
-- `futures-task` 0.3.33
-- `futures-util` 0.3.33
+- `futures-channel` 0.3.34
+- `futures-core` 0.3.34
+- `futures-sink` 0.3.34
+- `futures-task` 0.3.34
+- `futures-util` 0.3.34
 
                                       Apache License
                         Version 2.0, January 2004
@@ -2121,7 +2121,7 @@ limitations under the License.
 - `socket2` 0.6.5
 - `stable_deref_trait` 1.2.1
 - `url` 2.5.8
-- `uuid` 1.24.0
+- `uuid` 1.24.1
 
                                       Apache License
                         Version 2.0, January 2004
@@ -3156,7 +3156,7 @@ limitations under the License.
 
 
 **Used by:**
-- `aws-lc-sys` 0.43.0
+- `aws-lc-sys` 0.44.0
 - `itoa` 1.0.18
 - `libc` 0.2.189
 - `miniz_oxide` 0.8.9
@@ -3340,7 +3340,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 **Used by:**
 - `alloc-stdlib` 0.2.4
-- `aws-lc-sys` 0.43.0
+- `aws-lc-sys` 0.44.0
 
         Copyright (c) <year> <owner>.
 
@@ -3375,7 +3375,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 
 
 **Used by:**
-- `rustls-webpki` 0.103.13
+- `rustls-webpki` 0.103.15
 
         Except as otherwise noted, this project is licensed under the following
 (ISC-style) terms:
@@ -3399,8 +3399,8 @@ third-party/chromium/LICENSE.
 
 
 **Used by:**
-- `aws-lc-rs` 1.17.3
-- `aws-lc-sys` 0.43.0
+- `aws-lc-rs` 1.18.0
+- `aws-lc-sys` 0.44.0
 
         ISC License:
 
@@ -3462,8 +3462,8 @@ THE SOFTWARE.
 
 
 **Used by:**
-- `libsqlite3-sys` 0.38.1
-- `rusqlite` 0.40.1
+- `libsqlite3-sys` 0.38.2
+- `rusqlite` 0.40.2
 
         Copyright (c) 2014 The rusqlite developers
 
@@ -3745,7 +3745,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 **Used by:**
-- `http-body-util` 0.1.4
+- `http-body-util` 0.1.5
 - `http-body` 1.1.0
 
         Copyright (c) 2019-2026 Sean McArthur & Hyper Contributors
@@ -4003,7 +4003,7 @@ THE SOFTWARE.
 
 
 **Used by:**
-- `aws-lc-sys` 0.43.0
+- `aws-lc-sys` 0.44.0
 
         The MIT License (MIT)
 
@@ -4075,24 +4075,24 @@ authorization of the copyright holder.
 
 
 **Used by:**
-- `icu_collections` 2.2.0
-- `icu_locale_core` 2.2.0
-- `icu_normalizer` 2.2.0
-- `icu_normalizer_data` 2.2.0
-- `icu_properties` 2.2.0
-- `icu_properties_data` 2.2.0
-- `icu_provider` 2.2.0
-- `litemap` 0.8.2
-- `potential_utf` 0.1.5
-- `tinystr` 0.8.3
-- `writeable` 0.6.3
+- `icu_collections` 2.3.0
+- `icu_locale_core` 2.3.0
+- `icu_normalizer` 2.3.0
+- `icu_normalizer_data` 2.3.0
+- `icu_properties` 2.3.0
+- `icu_properties_data` 2.3.0
+- `icu_provider` 2.3.1
+- `litemap` 0.8.3
+- `potential_utf` 0.1.6
+- `tinystr` 0.8.4
+- `writeable` 0.6.4
 - `yoke-derive` 0.8.2
 - `yoke` 0.8.3
 - `zerofrom-derive` 0.1.7
 - `zerofrom` 0.1.8
-- `zerotrie` 0.2.4
-- `zerovec-derive` 0.11.3
-- `zerovec` 0.11.6
+- `zerotrie` 0.2.5
+- `zerovec-derive` 0.11.6
+- `zerovec` 0.11.8
 
         UNICODE LICENSE V3
 
