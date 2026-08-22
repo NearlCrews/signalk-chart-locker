@@ -12,10 +12,17 @@
 
 import type * as React from 'react'
 import { memo, useEffect, useState } from 'react'
-import { Section, StatusIndicator } from 'signalk-nearlcrews-ui'
+import { formatRelativeAge, Section, StatusIndicator, type FormatRelativeAgeOptions } from 'signalk-nearlcrews-ui'
 import type { PluginRuntimeStatus } from '../hooks/use-status.js'
-import { relativeTime } from '../relative-time.js'
 import styles from '../PluginConfigurationPanel.module.css'
+
+/**
+ * Wording for the freshness note. The library defaults are narrow and always
+ * numeric, which reads as "0 sec. ago" the instant a poll lands; spelled-out
+ * units and automatic numerals keep the note a sentence ("Checked now",
+ * "Checked 5 minutes ago").
+ */
+const AGE_FORMAT: FormatRelativeAgeOptions = { numeric: 'auto', style: 'long' }
 
 interface Props {
   /** The latest plugin status, or null until the first poll resolves. */
@@ -36,7 +43,7 @@ interface Props {
  */
 export default memo(function StatusBar ({ status, lastUpdatedMs }: Props): React.ReactElement {
   // Re-render on a slow tick so the "checked N ago" note keeps advancing during an outage, when no new
-  // poll changes the props. relativeTime steps in minutes, so a 30 s cadence keeps it honest cheaply.
+  // poll changes the props. The age steps in minutes, so a 30 s cadence keeps it honest cheaply.
   const [, setTick] = useState(0)
   useEffect(() => {
     if (lastUpdatedMs === null) return
@@ -47,7 +54,9 @@ export default memo(function StatusBar ({ status, lastUpdatedMs }: Props): React
     <Section
       title='Plugin status'
       actions={lastUpdatedMs !== null
-        ? <span className={styles.secondaryText}>Checked {relativeTime(lastUpdatedMs)}</span>
+        // Clamp at the boundary: formatRelativeAge takes a nonnegative age, and a host clock that
+        // steps backwards between the poll and the render would otherwise read as unknown.
+        ? <span className={styles.secondaryText}>Checked {formatRelativeAge(Math.max(0, Date.now() - lastUpdatedMs), AGE_FORMAT)}</span>
         : undefined}
     >
       {status === null

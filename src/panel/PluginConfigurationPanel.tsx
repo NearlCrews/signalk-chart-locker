@@ -29,6 +29,7 @@ import RangeField from './components/RangeField.js'
 import NumberField from './components/NumberField.js'
 import TextField from './components/TextField.js'
 import FooterBar from './components/FooterBar.js'
+import { formatBytes, splitBytes } from './format-bytes.js'
 import { useConfig } from './hooks/use-config.js'
 import { useStatus } from './hooks/use-status.js'
 import { useCacheInfo } from './hooks/use-cache-info.js'
@@ -50,19 +51,6 @@ import styles from './PluginConfigurationPanel.module.css'
 const SAVE_REQUEST_NOTICE_MS = 2500
 
 type PanelAction = 'retention' | 'clear-scroll' | 'refresh-cache' | 'rescan-charts'
-
-/** Split a byte count into a value and its unit, for the Metric unit suffix slot. */
-function splitBytes (bytes: number | null): { value: string, unit?: string } {
-  if (bytes === null) return { value: 'Unknown' }
-  if (bytes < 1024 ** 2) return { value: `${Math.round(bytes / 1024)}`, unit: 'KiB' }
-  if (bytes < 1024 ** 3) return { value: (bytes / 1024 ** 2).toFixed(1), unit: 'MiB' }
-  return { value: (bytes / 1024 ** 3).toFixed(1), unit: 'GiB' }
-}
-
-function formatBytes (bytes: number | null): string {
-  const { value, unit } = splitBytes(bytes)
-  return unit === undefined ? value : `${value} ${unit}`
-}
 
 interface Props {
   /** The plugin configuration supplied by the admin UI. Untyped at the federation boundary. */

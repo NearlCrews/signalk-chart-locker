@@ -2,8 +2,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { configReducer } from '../src/panel/config-reducer.js'
 import { saveButtonDisabled } from '../src/panel/footer-bar-state.js'
+import { formatBytes, splitBytes } from '../src/panel/format-bytes.js'
 import { isTeardownAbort } from '../src/panel/hooks/use-abortable-fetch.js'
-import { relativeTime } from '../src/panel/relative-time.js'
 import type { ChartLockerConfig } from '../src/panel/config-types.js'
 import { validatePanelConfig } from '../src/panel/validate-config.js'
 import { parseCacheStats } from '../src/panel/hooks/use-cache-operations.js'
@@ -67,11 +67,15 @@ test('a teardown abort is distinguished from a request that ran out of time', ()
   assert.equal(isTeardownAbort(null), false)
 })
 
-test('relativeTime steps up to the coarser unit at the rounding boundary', () => {
-  // 3599 seconds rounds to one hour, not 60 minutes.
-  assert.match(relativeTime(Date.now() - 3599 * 1000), /hour/)
-  // A few seconds stays in seconds.
-  assert.match(relativeTime(Date.now() - 5 * 1000), /second/)
+test('byte formatting picks binary units and reports an unknown count', () => {
+  assert.deepEqual(splitBytes(null), { value: 'Unknown' })
+  assert.deepEqual(splitBytes(2048), { value: '2', unit: 'KiB' })
+  assert.deepEqual(splitBytes(700 * 1024 ** 2), { value: '700.0', unit: 'MiB' })
+  assert.deepEqual(splitBytes(8 * 1024 ** 3), { value: '8.0', unit: 'GiB' })
+  // The last KiB before the MiB threshold stays in KiB rather than rounding into it.
+  assert.deepEqual(splitBytes(1024 ** 2 - 1), { value: '1024', unit: 'KiB' })
+  assert.equal(formatBytes(700 * 1024 ** 2), '700.0 MiB')
+  assert.equal(formatBytes(null), 'Unknown')
 })
 
 test('panel validation matches the runtime path text bounds', () => {
