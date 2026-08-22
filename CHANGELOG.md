@@ -6,8 +6,51 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+<a id="v084"></a>
+
+## [0.8.4] - 2026-08-22
+
+This patch release refreshes the shared configuration panel, corrects the
+declared Node.js floor, and replaces the hand-maintained bundled-dependency
+attribution with a generated, gate-checked one. No configuration migration is
+required.
+
+### Added
+
+- Third-party notices for the configuration panel are now generated from the
+  packages webpack actually bundles, embed each license text, and are verified
+  by the package gate, so an attribution gap fails the build instead of going
+  unnoticed.
+- A CodeQL analysis workflow covers the TypeScript plugin and panel sources.
+
+### Changed
+
+- The panel targets `signalk-nearlcrews-ui` 0.8.1, which bounds the docked
+  action bar's settling work and defers its focus scrolling while a pointer is
+  pressed, so a control overlapping the bar no longer swallows its first click.
+- React and React DOM are now shared with the host at a strict version, so an
+  incompatible Signal K Admin fails at mount rather than warning and continuing.
+- The plugin CI workflow declares its test command and Node versions instead of
+  inheriting them, and disables the armv7 lane, whose Node 20 runtime cannot
+  install a package that requires Node 22.
+- The mobile browser project runs the whole panel suite rather than only the
+  coarse-pointer test.
+- App Store screenshots were regenerated, and the dark and night captures now
+  render against a matching page instead of a light one.
+
 ### Fixed
 
+- `engines.node` returns to `>=22.0.0`. The 0.8.3 line advertised a floor its
+  own runtime dependencies never required, which told operators on Node 22.0
+  through 22.21 that the plugin was unsupported when it runs there. Build-time
+  tooling requirements now live in `devEngines` instead.
+- The panel's advanced settings name reverse geocoding, matching the plugin
+  schema and the documentation, rather than describing a place-name search that
+  runs in the opposite direction.
+- A request abandoned by a caller's own abort signal is no longer reported as
+  though the panel had been torn down.
+- Cache usage per chart source shows thousands separators and sets source
+  identifiers and rejected file names in a monospace face.
 - Accept npm 12's singleton-array `npm view` output while rejecting ambiguous
   registry metadata, and verify the published `gitHead` and `dist.integrity`
   against the exact tested tarball. An explicit manual recovery dispatch now
@@ -705,5 +748,6 @@ All tile-cache compute lives in the container.
   recreating rather than crash-looping; and the egress SSRF guard also rejects the IPv6 6to4 and
   NAT64 transition ranges.
 
-[Unreleased]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.1...v0.8.3

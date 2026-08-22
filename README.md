@@ -4,7 +4,7 @@
 [![npm downloads](https://img.shields.io/npm/dm/signalk-chart-locker.svg)](https://www.npmjs.com/package/signalk-chart-locker)
 [![CI](https://github.com/NearlCrews/signalk-chart-locker/actions/workflows/ci.yml/badge.svg)](https://github.com/NearlCrews/signalk-chart-locker/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue.svg)](#license)
-[![node](https://img.shields.io/badge/node-%3E%3D22.22.2-brightgreen.svg)](https://nodejs.org)
+[![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://www.buymeacoffee.com/nearlcrews)
 
 A Signal K plugin that runs a Rust container alongside the server to host a shared tile cache
@@ -14,15 +14,18 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.8.3
+## What's new in 0.8.4
 
-Version 0.8.3 persists learned vector-style documents, expanded sources, glyph templates, and
-sprite templates in SQLite. An unchanged catalog restores up to four styles after an offline
-container restart, so previously warmed basemap assets remain routable. The configuration panel
-also moves to `signalk-nearlcrews-ui` 0.7.1 with the System theme, viewport-aware save actions,
-forward-compatible configuration saves, and stronger package and federation checks.
+Version 0.8.4 restores the supported Node.js floor to 22.0.0. The previous release advertised a
+higher floor that only build tooling ever needed, which told operators on earlier Node 22 releases
+the plugin was unsupported when it runs there; build-time requirements now live in `devEngines`.
+The configuration panel moves to `signalk-nearlcrews-ui` 0.8.1, so a control overlapping the docked
+save bar no longer swallows its first click, and React is shared with the host at a strict version
+so an incompatible Signal K Admin fails at mount instead of continuing. Attribution for the packages
+bundled into the panel is now generated from the bundle itself, embeds each license text, and is
+checked by the package gate.
 
-See the [0.8.3 changelog](https://github.com/NearlCrews/signalk-chart-locker/blob/main/CHANGELOG.md#v083)
+See the [0.8.4 changelog](https://github.com/NearlCrews/signalk-chart-locker/blob/main/CHANGELOG.md#v084)
 for the full list.
 
 ## What it does
@@ -83,7 +86,7 @@ tiles. A standalone install of Binnacle is unaffected.
 
 - Signal K server >= 2.24.0, which provides the React 19.2 Admin host required by the configuration
   panel.
-- Node.js >= 22.22.2.
+- Node.js >= 22.
 - A Signal K Admin browser or embedded WebView with native CSS `@scope`: Chromium or Edge 118,
   Firefox 146, or Safari 17.4 and newer.
 - [signalk-container](https://www.npmjs.com/package/signalk-container) >= 1.20.0 and a container
@@ -212,11 +215,11 @@ routes and validation limits.
 
 | Light | Dark | Night red |
 | ----- | ---- | --------- |
-| ![Light configuration panel](https://raw.githubusercontent.com/NearlCrews/signalk-chart-locker/main/assets/screenshots/config-panel.png) | ![Dark configuration panel](https://raw.githubusercontent.com/NearlCrews/signalk-chart-locker/main/assets/screenshots/config-panel-dark.png) | ![Night-red configuration panel](https://raw.githubusercontent.com/NearlCrews/signalk-chart-locker/main/assets/screenshots/config-panel-night.png) |
+| ![Light configuration panel](assets/screenshots/config-panel.png) | ![Dark configuration panel](assets/screenshots/config-panel-dark.png) | ![Night-red configuration panel](assets/screenshots/config-panel-night.png) |
 
 ## Development
 
-This project targets Node.js 22.22.2 or newer. The Rust container is a Cargo workspace under
+This project targets Node.js 22 or newer. The Rust container is a Cargo workspace under
 `container/` and uses the pinned Rust 1.97.1 toolchain. TypeScript compilation uses the 7.0 native
 compiler, while ESLint's type-aware parser uses the TypeScript 6 compiler API compatibility package.
 ESLint remains on the latest 9.x release until neostandard and eslint-plugin-react support ESLint 10.
