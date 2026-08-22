@@ -22,6 +22,8 @@ export default defineConfig({
     { name: 'chromium', grepInvert: /@coarse/, use: { ...devices['Desktop Chrome'] } },
     { name: 'firefox', grepInvert: /@coarse/, use: { ...devices['Desktop Firefox'] } },
     { name: 'webkit', grepInvert: /@coarse/, use: { ...devices['Desktop Safari'] } },
-    { name: 'mobile-chromium', grep: /@coarse/, use: { ...devices['Pixel 5'] } }
+    // No grep: the Pixel 5 project runs the whole spec, so real mobile rendering is covered rather
+    // than the single coarse-pointer test. The other three projects skip @coarse instead.
+    { name: 'mobile-chromium', use: { ...devices['Pixel 5'] } }
   ]
 })
