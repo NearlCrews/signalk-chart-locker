@@ -54,21 +54,10 @@ export function haversineMeters (a: Position, b: Position): number {
   return 2 * EARTH_RADIUS_M * Math.asin(Math.min(1, Math.sqrt(h)))
 }
 
-/** A small bbox of `radiusMeters` around the position. Longitude degrees shrink with latitude. */
-export function bboxAround (pos: Position, radiusMeters: number): LngLatBbox {
-  const dLat = radiusMeters / 111_320
-  const dLng = radiusMeters / (111_320 * Math.max(0.01, Math.cos((pos.latitude * Math.PI) / 180)))
-  return [
-    Math.max(-180, pos.longitude - dLng),
-    Math.max(-90, pos.latitude - dLat),
-    Math.min(180, pos.longitude + dLng),
-    Math.min(90, pos.latitude + dLat)
-  ]
-}
-
 /**
- * One or two world-bounded boxes around a position. A radius crossing the antimeridian is split so the
- * tile enumerator warms both sides of the date line without interpreting it as an almost-global box.
+ * One or two world-bounded boxes of `radiusMeters` around a position. Longitude degrees shrink with
+ * latitude. A radius crossing the antimeridian is split so the tile enumerator warms both sides of
+ * the date line without interpreting it as an almost-global box.
  */
 export function bboxesAround (pos: Position, radiusMeters: number): LngLatBbox[] {
   const dLat = radiusMeters / 111_320

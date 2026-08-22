@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { LngLatBbox } from 'signalk-chart-sources'
-import { insideBox, haversineMeters, bboxAround, bboxesAround, shouldWarm, insideAnyRegion, type WarmTrigger } from '../src/runtime/position-warm.js'
+import { insideBox, haversineMeters, bboxesAround, shouldWarm, insideAnyRegion, type WarmTrigger } from '../src/runtime/position-warm.js'
 import { DEFAULT_REGIONS_STORE } from '../src/runtime/regions-store.js'
 import type { SavedRegion } from '../src/runtime/regions-store.js'
 
@@ -31,9 +31,11 @@ test('haversine is roughly a nautical mile for a minute of latitude', () => {
   assert.ok(Math.abs(d - 1852) < 5)
 })
 
-test('bboxAround brackets the position', () => {
+test('bboxesAround brackets a position clear of the antimeridian in one box', () => {
   const radiusMeters = 1852
-  const [minLng, minLat, maxLng, maxLat] = bboxAround(here, radiusMeters)
+  const boxes = bboxesAround(here, radiusMeters)
+  assert.equal(boxes.length, 1)
+  const [minLng, minLat, maxLng, maxLat] = boxes[0]!
   assert.ok(minLng < here.longitude && maxLng > here.longitude)
   assert.ok(minLat < here.latitude && maxLat > here.latitude)
   assert.ok(haversineMeters(here, { latitude: minLat, longitude: here.longitude }) >= radiusMeters * 0.95)
