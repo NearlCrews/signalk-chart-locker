@@ -39,11 +39,13 @@
     "screenshots": "npm run build:panel && node scripts/capture-panel-screenshots.mjs",
     "licenses:rust:update": "node scripts/rust-license-report.mjs --write",
     "licenses:rust:check": "node scripts/rust-license-report.mjs",
-    "check:package": "npm run build && node scripts/check-package-contents.mjs",
-    "verify:publish": "npm run licenses:rust:check && npm run typecheck && npm run lint && npm run ci:workflows && npm run deadcode && npm run test:coverage && npm run test:browser:cross && npm audit --omit=dev && npm run check:package",
+    "check:package": "npm run build && npm run licenses:check && node scripts/check-package-contents.mjs",
+    "verify:publish": "npm run licenses:rust:check && npm run licenses:check && npm run typecheck && npm run lint && npm run ci:workflows && npm run deadcode && npm run test:coverage && npm run test:browser:cross && npm audit --omit=dev && npm run check:package",
     "pack:release": "node scripts/create-release-tarball.mjs",
     "verify:release-tarball": "node scripts/verify-release-tarball.mjs",
-    "prepublishOnly": "npm run verify:publish"
+    "prepublishOnly": "npm run verify:publish",
+    "licenses": "node scripts/generate-third-party-notices.mjs",
+    "licenses:check": "node scripts/generate-third-party-notices.mjs --check"
   },
   "keywords": [
     "signalk-node-server-plugin",
@@ -77,7 +79,14 @@
     "signalk-container": ">=1.20.0"
   },
   "engines": {
-    "node": ">=22.22.2"
+    "node": ">=22.0.0"
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "^22.22.2 || ^24.15.0 || ^26.0.0",
+      "onFail": "error"
+    }
   },
   "author": "Nearl Crews <NearlCrews@users.noreply.github.com>",
   "license": "MIT",
@@ -111,7 +120,7 @@
     "neostandard": "^0.13.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "signalk-nearlcrews-ui": "0.8.0",
+    "signalk-nearlcrews-ui": "0.8.1",
     "style-loader": "^4.0.0",
     "tsx": "^4.23.12",
     "typescript": "npm:@typescript/typescript6@^6.0.2",

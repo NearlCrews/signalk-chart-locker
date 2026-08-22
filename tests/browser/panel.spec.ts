@@ -1,11 +1,22 @@
 import AxeBuilder from '@axe-core/playwright'
 import { expect, test, type Locator, type Page } from '@playwright/test'
+import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-// The bundled UI package version, asserted against the served root so a dependency bump that does
-// not reach the bundle fails here instead of shipping a stale runtime. Read from the file because
-// the package's exports map does not expose its package.json for import.
+// The expected UI package version comes from the manifest, not a literal, so a bump edits one place
+// and this assertion still proves the bundle carries what the manifest pins. The installed version is
+// read from the file because the package's exports map does not expose its package.json for import.
+function readManifestPin (): string {
+  const manifest: unknown = JSON.parse(readFileSync(resolve('package.json'), 'utf8'))
+  const pinned = (manifest as { devDependencies?: Record<string, string> })
+    .devDependencies?.['signalk-nearlcrews-ui']
+  if (pinned === undefined) throw new Error('package.json does not pin signalk-nearlcrews-ui')
+  if (!/^\d+\.\d+\.\d+$/.test(pinned)) {
+    throw new Error(`signalk-nearlcrews-ui must be pinned to an exact version, found ${pinned}`)
+  }
+  return pinned
+}
 const snuiPackage: unknown = JSON.parse(
   readFileSync(resolve('node_modules/signalk-nearlcrews-ui/package.json'), 'utf8')
 )
@@ -14,18 +25,22 @@ if (typeof snuiPackage !== 'object' || snuiPackage === null ||
   throw new Error('signalk-nearlcrews-ui package.json carries no version string')
 }
 const snuiVersion = snuiPackage.version
-if (snuiVersion !== '0.8.0') {
-  throw new Error(`expected signalk-nearlcrews-ui 0.8.0, found ${snuiVersion}`)
+const expectedSnuiVersion = readManifestPin()
+if (snuiVersion !== expectedSnuiVersion) {
+  throw new Error(`expected signalk-nearlcrews-ui ${expectedSnuiVersion}, found ${snuiVersion}`)
 }
 
-// The theme storage key, read from the package source because the exports map exposes only the ESM
-// root, which the CommonJS-transformed spec cannot require. Keeps the persistence assertion on the
-// library's published key rather than a restated literal.
+// The theme storage key, taken from the package's public entry rather than a deep dist path, so a
+// dist reshuffle in a future release cannot break this suite for a non-behavioral reason. The spec is
+// transformed to CommonJS and the package is ESM only, so the value is read through a child process
+// that imports the public entry point.
 function readThemeStorageKey (): string {
-  const key = /THEME_STORAGE_KEY = "([^"]+)"/.exec(
-    readFileSync(resolve('node_modules/signalk-nearlcrews-ui/dist/theme/contract.js'), 'utf8')
-  )?.[1]
-  if (key === undefined) throw new Error('THEME_STORAGE_KEY not found in the signalk-nearlcrews-ui theme contract')
+  const key = execFileSync(
+    process.execPath,
+    ['--input-type=module', '-e', "import { THEME_STORAGE_KEY } from 'signalk-nearlcrews-ui'; process.stdout.write(THEME_STORAGE_KEY)"],
+    { cwd: resolve('.'), encoding: 'utf8' }
+  ).trim()
+  if (key === '') throw new Error('THEME_STORAGE_KEY resolved empty from the signalk-nearlcrews-ui entry point')
   return key
 }
 const themeStorageKey = readThemeStorageKey()

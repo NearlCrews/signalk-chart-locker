@@ -13,16 +13,29 @@ JavaScript tools. Keep `@typescript/native` as the `tsc` provider and the `types
 aliased to the maintained TypeScript 6 compiler API package until those tools support the native
 API. Run every configured TypeScript project with `npm run typecheck` after changing either package.
 
+The two packages coexist because they claim different binaries: `@typescript/native` owns `tsc`, so
+`npm run typecheck` compiles with 7.x, while `@typescript/typescript6` ships `tsc6` and occupies
+`node_modules/typescript`, which is what satisfies the `typescript` peer that typescript-eslint
+resolves for type-aware linting. Sibling plugins declare a plain `typescript` dependency instead;
+this repository is deliberately different, and the split is the reason. Verify after any change to
+either package that `npx tsc --version` still reports 7.x and that `npm run lint:code` still runs.
+
 ESLint 10 requires Node.js 20.19 or newer and flat configuration, but compatibility also depends on
 the peer ranges declared by neostandard and eslint-plugin-react. Keep ESLint on the latest 9.x
 release while either peer range excludes 10.x, and re-evaluate the major upgrade when both packages
 support it.
 
-Every dependency, development ones included, must install on the lowest Node.js release
-`engines.node` advertises. Audit the tree after a dependency refresh and raise the floor rather than
-advertise a release the toolchain cannot use: `signalk-nearlcrews-ui` 0.8.0 requires 22.22.2, and
-the Babel 8 and cspell 10 trees require 22.18.0, so the floor is 22.22.2. `@types/node` tracks that
-same floor so nothing newer than the lowest supported runtime can typecheck.
+`engines.node` states the runtime floor and nothing else. Derive it from the runtime-facing closure,
+meaning `dependencies` plus `peerDependencies` walked transitively: today that is 73 packages topping
+out at `>=22` from `signalk-chart-sources` and `signalk-container`, so the floor is `>=22.0.0`.
+
+A development-only package never raises that floor, however high its own `engines` reaches. Babel and
+cspell run at build time and constrain the lowest workflow Node instead. `signalk-nearlcrews-ui`
+constrains neither: webpack parses it and inlines it into the panel bundle, so Node never executes it.
+The toolchain floor belongs in `devEngines`, which is why that field carries the newer range.
+
+`@types/node` tracks the `engines.node` major so nothing newer than the lowest supported runtime can
+typecheck.
 
 ## Automated updates
 

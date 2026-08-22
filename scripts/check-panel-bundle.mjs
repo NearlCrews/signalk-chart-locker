@@ -94,21 +94,24 @@ if (normalizedModulePaths.some((modulePath) => modulePath.includes('/node_module
   throw new Error('panel bundled react-dom instead of leaving rendering to the Signal K Admin host')
 }
 
+// The notices file is generated from webpack's own module list and its license texts are verified by
+// scripts/generate-third-party-notices.mjs --check. What that check cannot see is this script's
+// independently maintained inventory, so cross-check the two: every package the panel is allowed to
+// bundle must have a section in the notices, which catches an inventory widened without regenerating.
 const notices = readFileSync(new URL('../THIRD_PARTY_NOTICES.md', import.meta.url), 'utf8')
+const noticedPackages = new Set(
+  [...notices.matchAll(/^## (\S+)$/gm)].map((match) => match[1])
+)
 for (const packageName of [...expectedBundledPackages, 'webpack']) {
-  const packageMetadata = JSON.parse(readFileSync(
-    new URL(`../node_modules/${packageName}/package.json`, import.meta.url),
-    'utf8'
-  ))
-  if (!notices.includes(`\`${packageName}\` ${packageMetadata.version},`)) {
-    throw new Error(`THIRD_PARTY_NOTICES.md does not identify bundled ${packageName} ${packageMetadata.version}`)
+  if (!noticedPackages.has(packageName)) {
+    throw new Error(`THIRD_PARTY_NOTICES.md has no section for bundled ${packageName}; run npm run licenses`)
   }
 }
 
-// React Aria (bundled for the nearlcrews-ui composite widgets) and the shared UI package dominate
-// the measured bundle, which nearlcrews-ui 0.8.0 raised to ~36.8 KiB. The ceiling keeps a small
-// margin above that. Importing signalk-nearlcrews-ui/data-grid would breach it by a wide margin:
-// that entry point adds react-aria-components and react-stately, measured at 103 KiB.
+// The shared UI package and the React Aria it pulls in through PanelRoot's portal provider dominate
+// the measured bundle, which nearlcrews-ui 0.8.1 puts at ~37.2 KiB. The ceiling keeps a small margin
+// above that. Importing signalk-nearlcrews-ui/data-grid would breach it by a wide margin: that entry
+// point adds react-aria-components and react-stately, measured at 103 KiB.
 const PANEL_GZIP_LIMIT_BYTES = 40 * 1024
 const panelGzipBytes = bundles.reduce((total, { source }) => total + gzipSync(source, { level: 9 }).length, 0)
 if (panelGzipBytes > PANEL_GZIP_LIMIT_BYTES) {
