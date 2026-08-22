@@ -133,6 +133,17 @@ test('loads the production remote and completes save and discard flows', async (
   await expect(page.locator('body')).toHaveAttribute('data-save-count', '1')
 })
 
+test('breaks cache usage down per chart source', async ({ page }) => {
+  const usage = page.getByRole('region', { name: 'Cache usage by chart source' })
+  await expect(usage.getByRole('columnheader')).toHaveText(['Source', 'Usage', 'Tiles', 'Upstream'])
+
+  const openstreetmap = usage.getByRole('row', { name: /openstreetmap/ })
+  await expect(openstreetmap).toContainText('300.0 MiB')
+  await expect(openstreetmap).toContainText('1,800')
+  await expect(openstreetmap).toContainText('Normal')
+  await expect(usage.getByRole('row', { name: /noaa/ })).toContainText('100.0 MiB')
+})
+
 test('opens Advanced when a stored setting is invalid', async ({ page }) => {
   await page.goto('/?invalid-advanced')
   await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
@@ -150,12 +161,12 @@ test('opens Advanced when a stored setting is invalid', async ({ page }) => {
   await expect(advanced).toHaveAttribute('aria-expanded', 'true')
 })
 
-test('saves the optional place-name lookup preference', async ({ page }) => {
+test('saves the optional reverse geocoding preference', async ({ page }) => {
   const advanced = page.getByRole('button', { name: 'Advanced', exact: true })
   await advanced.click()
   await expect(advanced).toHaveAttribute('aria-expanded', 'true')
 
-  const geocoding = page.getByRole('checkbox', { name: 'Enable place-name lookup' })
+  const geocoding = page.getByRole('checkbox', { name: 'Enable reverse geocoding' })
   await expect(geocoding).toBeChecked()
   await geocoding.uncheck()
   await page.getByRole('button', { name: 'Save', exact: true }).click()

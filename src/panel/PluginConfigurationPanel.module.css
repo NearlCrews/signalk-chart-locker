@@ -5,6 +5,16 @@
   overflow-wrap: anywhere;
 }
 
+/*
+ * Machine-readable text the operator may need to match character for character:
+ * chart source identifiers and PMTiles file names. The shared mono family keeps
+ * the digits and the letters that confuse for one another distinguishable.
+ */
+.identifier {
+  font-family: var(--snui-font-family-mono);
+  overflow-wrap: anywhere;
+}
+
 .tableRegion {
   max-width: 100%;
   overflow-x: auto;
