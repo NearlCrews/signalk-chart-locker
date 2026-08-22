@@ -217,9 +217,9 @@ test('uses an inline confirmation for destructive cache clearing', async ({ page
 
 // Also given its own budget, for the same reason as the sweep below. This drives four held actions
 // end to end, each one waiting on a busy state, a focus move, and a released response, and WebKit has
-// measured 15 to 30 seconds of the default 30. It has timed out on that budget while passing three
-// consecutive repeats minutes later, which is the signature of a budget set too close rather than a
-// defect.
+// measured 15 to 30 seconds. It timed out on the 30 seconds this project allowed before, then passed
+// three consecutive repeats minutes later, which is the signature of a budget set too close rather
+// than a defect.
 test('runs cache and chart actions with stable focus, loading state, and repeat suppression', async ({ page }) => {
   test.setTimeout(120_000)
 
@@ -491,9 +491,8 @@ const INTERACTIVE_SELECTOR = [
  */
 // Heavy by design, and given its own budget for that reason. The sweep enumerates every interactive
 // control and pays a scroll, a settle, and a hit test for each one, so its cost grows with the panel
-// rather than staying flat. WebKit has measured 27 seconds of the default 30 on an otherwise quiet
-// host, which would fail on timing alone under any additional load. The project default stays where
-// it is: this is the one test that legitimately needs more.
+// rather than staying flat. WebKit has measured 27 seconds of it on an otherwise quiet host, which
+// leaves too little of even the raised project budget to absorb a loaded one.
 test('every interactive control meets its pointer target floor and is reachable', async ({ page }) => {
   test.setTimeout(120_000)
 

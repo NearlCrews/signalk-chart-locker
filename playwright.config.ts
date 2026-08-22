@@ -2,6 +2,10 @@ import { defineConfig, devices } from '@playwright/test'
 
 export default defineConfig({
   testDir: './tests/browser',
+  // Above Playwright's 30 second default because this spec sits close to it on reference hardware:
+  // eight tests have measured over 18 seconds, the slowest at 30.6, so the default fails them on
+  // timing rather than on behaviour. The two tests that need more than this say so individually.
+  timeout: 60_000,
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,
