@@ -19,11 +19,12 @@ export default defineConfig({
     timeout: 30_000
   },
   projects: [
-    { name: 'chromium', grepInvert: /@coarse/, use: { ...devices['Desktop Chrome'] } },
-    { name: 'firefox', grepInvert: /@coarse/, use: { ...devices['Desktop Firefox'] } },
-    { name: 'webkit', grepInvert: /@coarse/, use: { ...devices['Desktop Safari'] } },
-    // No grep: the Pixel 5 project runs the whole spec, so real mobile rendering is covered rather
-    // than the single coarse-pointer test. The other three projects skip @coarse instead.
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
+    { name: 'webkit', use: { ...devices['Desktop Safari'] } },
+    // Every project runs the whole spec. The target-size test reads the pointer media query and
+    // asserts the floor that applies, 44 pixels on this coarse project and 40 on the desktop three,
+    // so no project needs to skip it.
     { name: 'mobile-chromium', use: { ...devices['Pixel 5'] } }
   ]
 })

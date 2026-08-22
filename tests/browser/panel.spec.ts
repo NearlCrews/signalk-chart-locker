@@ -457,15 +457,108 @@ test('responds to a 320-pixel embedded panel inside a wide host', async ({ page 
   expect(page.viewportSize()).toMatchObject({ width: 1280 })
 })
 
-test('provides coarse-pointer controls with 44-pixel targets @coarse', async ({ page }) => {
-  for (const control of [
-    page.getByRole('radio', { name: 'Auto' }),
-    page.getByRole('button', { name: 'Clear scroll cache', exact: true }).first(),
-    page.getByRole('button', { name: 'Save', exact: true })
-  ]) {
-    const box = await control.boundingBox()
-    expect(box?.height).toBeGreaterThanOrEqual(44)
-  }
+/** Everything a finger or cursor can activate. */
+const INTERACTIVE_SELECTOR = [
+  'button',
+  '[role="button"]',
+  'input:not([type="hidden"])',
+  'select',
+  'textarea',
+  'a[href]',
+  '[role="radio"]',
+  '[role="checkbox"]',
+  '[role="switch"]',
+  'summary',
+  '[tabindex="0"]'
+].join(', ')
+
+/**
+ * Every control has to be big enough to hit and actually on top at the point you would hit it.
+ * Measuring size alone is unsound in both directions. A control nested inside its own label is
+ * activated by the whole label, so measuring the control under-reports the target and can raise a
+ * false alarm: the geocoding checkbox input is 20 pixels inside a label the library sizes to the
+ * floor. Measuring without scrolling can also report a control that is present but covered by the
+ * docked action bar at that scroll position, which is inherent to a viewport-bottom bar rather than
+ * a defect. So each control is scrolled to the viewport centre first, the way a user's own scrolling
+ * would put it, then both halves are asserted.
+ */
+test('every interactive control meets its pointer target floor and is reachable', async ({ page }) => {
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click()
+  await page.getByRole('button', { name: 'Clear scroll cache', exact: true }).first().click()
+  await page.getByRole('region', { name: 'Clear scroll cache?' }).waitFor()
+
+  const coarse = await page.evaluate(() => window.matchMedia('(pointer: coarse)').matches)
+  const floor = coarse ? 44 : 40
+
+  const controls = await page.evaluate(async (selector) => {
+    const settle = async (): Promise<void> => {
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+      })
+    }
+    const targetOf = (element: Element): Element => element.closest('label') ?? element
+    const describe = (element: Element): string => {
+      const aria = element.getAttribute('aria-label')
+      const text = (element.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, 40)
+      const kind = `${element.tagName.toLowerCase()}${element.getAttribute('type') === null ? '' : `[${element.getAttribute('type')}]`}`
+      return `${kind} ${aria !== null && aria !== '' ? aria : text}`.trim()
+    }
+
+    // Drop focus first. A viewport-bottom action bar deliberately keeps the focused control clear of
+    // itself, so with the inline confirmation focused near the page bottom the bar scrolls back
+    // against any attempt to move far away from it, and a control at the other end of the document
+    // never reaches the viewport. That clearance is the feature working; it just has nothing to do
+    // with target geometry, so the sweep measures with nothing focused.
+    ;(document.activeElement as HTMLElement | null)?.blur()
+    await settle()
+
+    // Scroll by explicit window position rather than scrollIntoView. WebKit honours the latter only
+    // partially here, leaving a control hundreds of pixels above the viewport, which would report as
+    // unreachable and look exactly like a real defect.
+    const centre = async (element: Element): Promise<void> => {
+      const rect = element.getBoundingClientRect()
+      const wanted = rect.top + window.scrollY + rect.height / 2 - window.innerHeight / 2
+      window.scrollTo(0, Math.max(0, wanted))
+      await settle()
+    }
+
+    const measured: Array<{
+      name: string, height: number, width: number, reachable: boolean, onScreen: boolean
+    }> = []
+    for (const element of [...document.querySelectorAll(selector)]) {
+      await centre(element)
+      const target = targetOf(element)
+      const box = target.getBoundingClientRect()
+      const x = box.x + box.width / 2
+      const y = box.y + box.height / 2
+      const topmost = document.elementFromPoint(x, y)
+      measured.push({
+        name: describe(element),
+        height: box.height,
+        width: box.width,
+        onScreen: x >= 0 && x <= window.innerWidth && y >= 0 && y <= window.innerHeight,
+        reachable: topmost !== null &&
+          (topmost === element || element.contains(topmost) || target.contains(topmost))
+      })
+    }
+    return measured
+  }, INTERACTIVE_SELECTOR)
+
+  // Guard the probe itself: a selector that silently matched nothing would pass every assertion.
+  expect(controls.length, 'the panel should expose its full control set').toBeGreaterThanOrEqual(20)
+
+  const undersized = controls
+    .filter((control) => control.height + 0.05 < floor || control.width + 0.05 < floor)
+    .map((control) => `${control.name}: ${Math.round(control.height)}x${Math.round(control.width)}`)
+  expect(undersized, `controls below the ${floor} pixel floor`).toEqual([])
+
+  // A control that cannot be brought on screen would make the reachability result meaningless, so it
+  // is reported as its own failure rather than being folded in as a coverage problem.
+  const offScreen = controls.filter((control) => !control.onScreen).map((control) => control.name)
+  expect(offScreen, 'controls that could not be scrolled into view').toEqual([])
+
+  const unreachable = controls.filter((control) => !control.reachable).map((control) => control.name)
+  expect(unreachable, 'controls covered by something else at their own centre').toEqual([])
 })
 
 test('shows a compatibility message when native CSS scope is unavailable', async ({ page }) => {

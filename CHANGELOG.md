@@ -35,6 +35,10 @@ required.
   install a package that requires Node 22.
 - The mobile browser project runs the whole panel suite rather than only the
   coarse-pointer test.
+- Touch and pointer target checking now covers every interactive control on
+  every browser project, asserting the floor that applies to the pointer type
+  and that each control is actually the topmost element where it would be
+  pressed, rather than checking the height of three controls.
 - App Store screenshots were regenerated, and the dark and night captures now
   render against a matching page instead of a light one.
 
