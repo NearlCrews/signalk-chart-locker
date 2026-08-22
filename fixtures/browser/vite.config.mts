@@ -36,9 +36,14 @@ export default defineConfig({
   define: {
     __REMOTE_URL__: JSON.stringify('/panel-assets/remoteEntry.js')
   },
+  // This port belongs to this repository alone. The sibling Signal K panels each hold their own,
+  // because a shared one is not a bind conflict in practice: Playwright accepts whatever already
+  // answers on the URL, so one repository's suite runs against another repository's panel and every
+  // test fails for a reason nothing in either repository explains. strictPort keeps a genuine
+  // conflict loud rather than sliding the server to the next free port.
   server: {
     host: '127.0.0.1',
-    port: 4175,
+    port: 4178,
     strictPort: true
   }
 })

@@ -7,15 +7,19 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [['html', { open: 'never' }], ['list']] : 'list',
   use: {
-    baseURL: 'http://127.0.0.1:4175',
+    baseURL: 'http://127.0.0.1:4178',
     locale: 'en-US',
     timezoneId: 'America/Detroit',
     trace: 'retain-on-failure'
   },
   webServer: {
     command: 'vite --config fixtures/browser/vite.config.mts',
-    url: 'http://127.0.0.1:4175',
-    reuseExistingServer: !process.env.CI,
+    url: 'http://127.0.0.1:4178',
+    // Never adopt a server this run did not start. Reuse treats anything answering on the URL as
+    // this fixture, so a neighbouring repository's panel served on the same port reads as a healthy
+    // start and the whole suite then asserts against the wrong application. With reuse off and
+    // strictPort set in the fixture config, a port already held fails here instead.
+    reuseExistingServer: false,
     timeout: 30_000
   },
   projects: [

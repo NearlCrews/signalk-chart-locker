@@ -77,6 +77,12 @@ npm run licenses:rust:check
 npm audit
 ```
 
+Run only one browser suite at a time in a checkout. `pretest:browser:cross` rebuilds the panel, and
+the clean step removes `public/` while a suite already running is still serving it, which fails that
+run at fixture load with an error naming neither cause. The fixture port is this repository's alone
+and the suite never reuses a server it did not start, so a second run fails on the port instead of
+quietly testing another repository's panel.
+
 Run the Rust gates from `container/`:
 
 ```bash
