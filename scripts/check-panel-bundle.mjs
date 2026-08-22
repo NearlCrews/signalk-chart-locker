@@ -109,7 +109,7 @@ for (const packageName of [...expectedBundledPackages, 'webpack']) {
 }
 
 // The shared UI package and the React Aria it pulls in through PanelRoot's portal provider dominate
-// the measured bundle, which nearlcrews-ui 0.8.1 puts at ~37.2 KiB. The ceiling keeps a small margin
+// the measured bundle, which nearlcrews-ui 0.8.2 puts at ~37.3 KiB. The ceiling keeps a small margin
 // above that. Importing signalk-nearlcrews-ui/data-grid would breach it by a wide margin: that entry
 // point adds react-aria-components and react-stately, measured at 103 KiB.
 const PANEL_GZIP_LIMIT_BYTES = 40 * 1024

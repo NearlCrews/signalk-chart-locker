@@ -25,9 +25,13 @@ required.
 
 ### Changed
 
-- The panel targets `signalk-nearlcrews-ui` 0.8.1, which bounds the docked
-  action bar's settling work and defers its focus scrolling while a pointer is
-  pressed, so a control overlapping the bar no longer swallows its first click.
+- The panel targets `signalk-nearlcrews-ui` 0.8.2, which settles the docked
+  action bar within the frame that scheduled it, holds its docking decision
+  through a hysteresis band, and no longer scrolls a control clear when a
+  pointer press moves focus to it, so a control the bar overlaps takes its first
+  click and stays under the pointer. Compact and icon-only buttons also meet the
+  pointer target floor in width, and a revealed section re-reads the shared
+  theme.
 - React and React DOM are now shared with the host at a strict version, so an
   incompatible Signal K Admin fails at mount rather than warning and continuing.
 - The plugin CI workflow declares its test command and Node versions instead of

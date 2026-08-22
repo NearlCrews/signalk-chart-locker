@@ -19,9 +19,10 @@ and local PMTiles chart serving.
 Version 0.8.4 restores the supported Node.js floor to 22.0.0. The previous release advertised a
 higher floor that only build tooling ever needed, which told operators on earlier Node 22 releases
 the plugin was unsupported when it runs there; build-time requirements now live in `devEngines`.
-The configuration panel moves to `signalk-nearlcrews-ui` 0.8.1, so a control overlapping the docked
-save bar no longer swallows its first click, and React is shared with the host at a strict version
-so an incompatible Signal K Admin fails at mount instead of continuing. Attribution for the packages
+The configuration panel moves to `signalk-nearlcrews-ui` 0.8.2, so a control overlapping the docked
+save bar takes its first click and stays under the pointer while the bar settles, and React is
+shared with the host at a strict version so an incompatible Signal K Admin fails at mount instead
+of continuing. Attribution for the packages
 bundled into the panel is now generated from the bundle itself, embeds each license text, and is
 checked by the package gate.
 

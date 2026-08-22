@@ -120,7 +120,7 @@
     "neostandard": "^0.13.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "signalk-nearlcrews-ui": "0.8.1",
+    "signalk-nearlcrews-ui": "0.8.2",
     "style-loader": "^4.0.0",
     "tsx": "^4.23.12",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
