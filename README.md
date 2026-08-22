@@ -285,4 +285,4 @@ Find this project useful? You can support its continued development by
 
 - [Report a bug](https://github.com/NearlCrews/signalk-chart-locker/issues/new?template=bug_report.yml)
 - [Request a feature](https://github.com/NearlCrews/signalk-chart-locker/issues/new?template=feature_request.yml)
-- [Security issues](.github/SECURITY.md)
+- [Security issues](https://github.com/NearlCrews/signalk-chart-locker/blob/main/.github/SECURITY.md)
