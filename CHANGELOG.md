@@ -32,8 +32,6 @@ required.
   click and stays under the pointer. Compact and icon-only buttons also meet the
   pointer target floor in width, and a revealed section re-reads the shared
   theme.
-- React and React DOM are now shared with the host at a strict version, so an
-  incompatible Signal K Admin fails at mount rather than warning and continuing.
 - The plugin CI workflow declares its test command and Node versions instead of
   inheriting them, and disables the armv7 lane, whose Node 20 runtime cannot
   install a package that requires Node 22.

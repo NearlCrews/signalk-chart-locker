@@ -20,11 +20,9 @@ Version 0.8.4 restores the supported Node.js floor to 22.0.0. The previous relea
 higher floor that only build tooling ever needed, which told operators on earlier Node 22 releases
 the plugin was unsupported when it runs there; build-time requirements now live in `devEngines`.
 The configuration panel moves to `signalk-nearlcrews-ui` 0.8.2, so a control overlapping the docked
-save bar takes its first click and stays under the pointer while the bar settles, and React is
-shared with the host at a strict version so an incompatible Signal K Admin fails at mount instead
-of continuing. Attribution for the packages
-bundled into the panel is now generated from the bundle itself, embeds each license text, and is
-checked by the package gate.
+save bar takes its first click and stays under the pointer while the bar settles. Attribution for
+the packages bundled into the panel is now generated from the bundle itself, embeds each license
+text, and is checked by the package gate.
 
 See the [0.8.4 changelog](https://github.com/NearlCrews/signalk-chart-locker/blob/main/CHANGELOG.md#v084)
 for the full list.
