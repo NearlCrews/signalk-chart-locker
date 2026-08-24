@@ -45,6 +45,8 @@ required.
   pressed, rather than checking the height of three controls.
 - App Store screenshots were regenerated, and the dark and night captures now
   render against a matching page instead of a light one.
+- Compatible Rust container dependencies are refreshed, and the generated Rust
+  license report matches the updated lock file.
 
 ### Fixed
 
@@ -56,7 +58,9 @@ required.
   schema and the documentation, rather than describing a place-name search that
   runs in the opposite direction.
 - A request abandoned by a caller's own abort signal is no longer reported as
-  though the panel had been torn down.
+  though the panel had been torn down, and a request cut short by the panel's
+  own teardown is no longer surfaced as a live failure, which could leave a
+  stale status banner standing after an immediate remount.
 - Cache usage per chart source shows thousands separators and sets source
   identifiers and rejected file names in a monospace face.
 - Accept npm 12's singleton-array `npm view` output while rejecting ambiguous
