@@ -57,8 +57,10 @@ leaves the saved regions without a readable file. No configuration migration is 
   repository's own bundle check keeps only what it alone knows: its dependency inventory, its React
   module allowlist, the production JSX runtime, the bundled attribution, and the render check.
 - Night theme colors, the focus ring, heading sizes, and font weights follow the library's values,
-  and the three App Store screenshots were recaptured against them. The panel remote's recorded size
-  baseline rises to 54,070 gzip bytes from 42,621, which is the code the shared library added.
+  and the three App Store screenshots were recaptured against them. The panel remote measures 54,070
+  gzip bytes, which the build now records as the baseline it checks growth against, in place of the
+  fixed 40 KiB ceiling the previous release enforced over a bundle of about 37 KiB. The difference
+  is the code the shared library added.
 - The browser suite reads the version stamp and the theme storage key from the library's public
   entry point, which a CommonJS spec can now load directly, instead of re-reading both manifests and
   shelling out to a child process for the key.
