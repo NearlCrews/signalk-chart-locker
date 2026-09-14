@@ -111,6 +111,11 @@ leaves the saved regions without a readable file. No configuration migration is 
 - The document linters and the spell checker read every maintained guide under `docs/`, not only the
   top level, and the reusable Signal K plugin CI workflow and the Rust toolchain action move to
   their current pins.
+- The container builds on Rust 1.98.0. The pinned builder image, `container/rust-toolchain.toml`,
+  and the toolchain inputs in the CI, container image, and publish workflows advance together, so
+  one version describes both the compiler that produces the shipped binary and the one that formats,
+  lints, tests, and audits it. The locked Rust dependency graph takes uuid 1.26.0, and the
+  third-party license report was regenerated from it.
 
 ### Fixed
 

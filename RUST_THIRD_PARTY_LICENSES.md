@@ -2121,7 +2121,7 @@ limitations under the License.
 - `socket2` 0.6.5
 - `stable_deref_trait` 1.2.1
 - `url` 2.5.8
-- `uuid` 1.24.1
+- `uuid` 1.26.0
 
                                       Apache License
                         Version 2.0, January 2004
