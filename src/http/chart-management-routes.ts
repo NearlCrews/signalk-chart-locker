@@ -82,7 +82,10 @@ export function registerChartManagementRoutes (
       // Return the merged stored override, not just the posted patch, so the caller sees the effective value.
       res.json({ identifier: req.params.id, override: overrides.get(req.params.id) ?? {} })
     } catch (error) {
-      res.status(500).json({ error: error instanceof Error ? error.message : String(error) })
+      // Rescan failures come from node:fs and carry absolute host paths. The caller gets the fixed
+      // message every neighbouring route uses; the detail goes to the server log.
+      app.debug('Chart rescan after an override write failed:', error)
+      res.status(500).json({ error: 'unable to rescan the charts directory' })
     }
   })
   router.post('/api/charts/rescan', async (_req, res) => {
@@ -94,7 +97,8 @@ export function registerChartManagementRoutes (
       await onRescan()
       res.json({ discovery: registry.discoveryStatus() })
     } catch (error) {
-      res.status(500).json({ error: error instanceof Error ? error.message : String(error) })
+      app.debug('Chart rescan failed:', error)
+      res.status(500).json({ error: 'unable to rescan the charts directory' })
     }
   })
   return true

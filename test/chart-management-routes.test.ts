@@ -217,7 +217,31 @@ test('an override reports a rescan failure instead of returning stale success', 
     const res = new FakeRes()
     await post['/api/charts/:id/override']!({ params: { id: 'sf-pmtiles' }, body: { name: 'Renamed' } }, res)
     assert.equal(res.statusCode, 500)
-    assert.deepEqual(res.body, { error: 'scan failed' })
+    // The caller gets a fixed message: rescan failures come from node:fs and carry absolute host paths.
+    assert.deepEqual(res.body, { error: 'unable to rescan the charts directory' })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a rescan failure never returns the underlying filesystem error to the caller', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'mgmt-'))
+  try {
+    const post: Record<string, (req: ManagementRequest, res: FakeRes) => void | Promise<void>> = {}
+    const registry = new ChartRegistry()
+    registry.set(record())
+    const overrides = new OverrideStore(join(dir, 'overrides.json'))
+    overrides.load()
+    registerChartManagementRoutes(
+      { get () {}, post (path, handler) { post[path] = handler } },
+      securedApp(), registry, overrides,
+      async () => { throw new Error("EACCES: permission denied, scandir '/home/pi/.signalk/charts/pmtiles'") }
+    )
+    const res = new FakeRes()
+    await post['/api/charts/rescan']!({ params: {}, body: undefined }, res)
+    assert.equal(res.statusCode, 500)
+    assert.deepEqual(res.body, { error: 'unable to rescan the charts directory' })
+    assert.doesNotMatch(JSON.stringify(res.body), /\.signalk|EACCES/)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
