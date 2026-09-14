@@ -6,6 +6,35 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The chart self-heal poll rescans when the charts directory changes identity or its containment
+  verdict flips, and on every tick where no native watcher covers the directory. A rejected
+  directory no longer pays a full safety check and a registry rebuild every five seconds to
+  reproduce the error it already reported, and a repaired one still starts serving without a plugin
+  restart.
+- Durable state writes no longer list the whole Signal K data directory before staging their
+  replacement. The temporaries that sweep reaps can only be left behind by a process killed
+  mid-write, so it runs once per state file per process rather than on every saved-region edit.
+- The plugin hands the server a status line only when it changes, rather than recomposing an
+  identical line on each 30 second health probe.
+- The configuration panel commits a new status timestamp only when the status itself changed or the
+  freshness note beside it could have moved, so an idle panel no longer re-renders every five
+  seconds.
+- The container image tag field in the generated settings form carries the same length bound the
+  plugin validates against, so it cannot accept a tag the plugin then rejects.
+- A maintenance action that outlives its request budget reports the same words as the button that
+  started it, so "Refreshing cache statistics" is still refreshing when the panel loses the answer.
+- The tile-cache container reports the last of its prose log lines as `event=` key value pairs, and
+  the operations guide lists them.
+
+### Fixed
+
+- A PMTiles provider update that fails while the plugin is running keeps its diagnosis in the status
+  an operator reads. It was written straight to the shared status slot, so the next health probe
+  replaced it with a healthy-looking line while the chart provider was still out of step with
+  `signalk-pmtiles-plugin`.
+
 <a id="v085"></a>
 
 ## [0.8.5] - 2026-09-14

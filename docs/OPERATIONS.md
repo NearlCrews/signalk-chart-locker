@@ -148,8 +148,11 @@ job. This prevents the tile enumerator from treating the request as an almost-gl
 
 Chart discovery combines native directory events with a five-second file-identity poll on Linux, so
 deleting and recreating the directory cannot strand a watcher on its old inode. Other platforms use
-the five-second poll without a native watcher. Discovery serializes every scan, including change
-detection, manual rescans, and override reapplication. The panel reports:
+the five-second poll without a native watcher. A tick rescans when the directory identity or its
+containment verdict has changed, and on every tick where no watcher covers the directory, so a host
+without a native watcher still notices a new archive while a watched directory is left to its own
+events. Discovery serializes every scan, including change detection, manual rescans, and override
+reapplication. The panel reports:
 
 - Valid chart count
 - Invalid file count and validation errors
