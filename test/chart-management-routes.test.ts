@@ -10,6 +10,7 @@ import { ChartRegistry, type ChartRecord } from '../src/charts/chart-registry.js
 import { OverrideStore } from '../src/charts/overrides.js'
 import {
   registerChartManagementRoutes,
+  RESCAN_FAILED_MESSAGE,
   type ManagementRequest,
   type ManagementResponse
 } from '../src/http/chart-management-routes.js'
@@ -218,7 +219,7 @@ test('an override reports a rescan failure instead of returning stale success', 
     await post['/api/charts/:id/override']!({ params: { id: 'sf-pmtiles' }, body: { name: 'Renamed' } }, res)
     assert.equal(res.statusCode, 500)
     // The caller gets a fixed message: rescan failures come from node:fs and carry absolute host paths.
-    assert.deepEqual(res.body, { error: 'unable to rescan the charts directory' })
+    assert.deepEqual(res.body, { error: RESCAN_FAILED_MESSAGE })
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -242,7 +243,7 @@ test('a rescan failure never returns the underlying filesystem error to the call
     const res = new FakeRes()
     await post['/api/charts/rescan']!({ params: {}, body: undefined }, res)
     assert.equal(res.statusCode, 500)
-    assert.deepEqual(res.body, { error: 'unable to rescan the charts directory' })
+    assert.deepEqual(res.body, { error: RESCAN_FAILED_MESSAGE })
     assert.doesNotMatch(JSON.stringify(res.body), /\.signalk|EACCES/)
   } finally {
     await rm(dir, { recursive: true, force: true })

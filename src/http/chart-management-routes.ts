@@ -7,6 +7,17 @@ import { type ChartRegistry, chartResource } from '../charts/chart-registry.js'
 import { readChartOverride, type ChartOverride, type OverrideStore } from '../charts/overrides.js'
 import { ensureApiAdminGate } from '../shared/admin-gate.js'
 
+/**
+ * The fixed body a rescan failure answers with. Rescan failures come from node:fs and carry absolute
+ * host paths, so no route here may relay `error.message`. Naming the body once is what keeps the next
+ * route added here from quietly going back to it, and lets the tests assert this value rather than a
+ * retyped copy of it.
+ */
+export const RESCAN_FAILED_MESSAGE = 'unable to rescan the charts directory'
+
+/** The body every route here answers with while the third-party PMTiles provider owns the charts. */
+const PROVIDER_CONFLICT_MESSAGE = 'PMTiles management is disabled while pmtiles-chart-provider is enabled'
+
 export interface ManagementRequest {
   params: Record<string, string>
   body: unknown
@@ -40,7 +51,7 @@ export function registerChartManagementRoutes (
   if (!ensureApiAdminGate(app)) return false
   router.get('/api/charts', (_req, res) => {
     if (!isEnabled()) {
-      res.status(409).json({ error: 'PMTiles management is disabled while pmtiles-chart-provider is enabled' })
+      res.status(409).json({ error: PROVIDER_CONFLICT_MESSAGE })
       return
     }
     res.json({
@@ -56,7 +67,7 @@ export function registerChartManagementRoutes (
 
   router.post('/api/charts/:id/override', async (req, res) => {
     if (!isEnabled()) {
-      res.status(409).json({ error: 'PMTiles management is disabled while pmtiles-chart-provider is enabled' })
+      res.status(409).json({ error: PROVIDER_CONFLICT_MESSAGE })
       return
     }
     if (!registry.has(req.params.id)) {
@@ -85,12 +96,12 @@ export function registerChartManagementRoutes (
       // Rescan failures come from node:fs and carry absolute host paths. The caller gets the fixed
       // message every neighbouring route uses; the detail goes to the server log.
       app.debug('Chart rescan after an override write failed:', error)
-      res.status(500).json({ error: 'unable to rescan the charts directory' })
+      res.status(500).json({ error: RESCAN_FAILED_MESSAGE })
     }
   })
   router.post('/api/charts/rescan', async (_req, res) => {
     if (!isEnabled()) {
-      res.status(409).json({ error: 'PMTiles management is disabled while pmtiles-chart-provider is enabled' })
+      res.status(409).json({ error: PROVIDER_CONFLICT_MESSAGE })
       return
     }
     try {
@@ -98,7 +109,7 @@ export function registerChartManagementRoutes (
       res.json({ discovery: registry.discoveryStatus() })
     } catch (error) {
       app.debug('Chart rescan failed:', error)
-      res.status(500).json({ error: 'unable to rescan the charts directory' })
+      res.status(500).json({ error: RESCAN_FAILED_MESSAGE })
     }
   })
   return true
