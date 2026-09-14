@@ -17,6 +17,9 @@ if (address === null || address === undefined || typeof address === 'string') {
 }
 const fixtureOrigin = `http://127.0.0.1:${address.port}`
 
+/** The frame every App Store screenshot is captured at. */
+const VIEWPORT = { width: 1280, height: 800 }
+
 let browser
 try {
   browser = await chromium.launch()
@@ -25,7 +28,7 @@ try {
     deviceScaleFactor: 1,
     locale: 'en-US',
     timezoneId: 'America/Detroit',
-    viewport: { width: 1280, height: 800 }
+    viewport: VIEWPORT
   })
   await page.goto(`${fixtureOrigin}/?screenshots`)
   await page.locator('body[data-fixture-ready="true"]').waitFor()
@@ -44,7 +47,16 @@ try {
       theme.toLowerCase()
     )
     await page.mouse.move(0, 0)
-    await page.screenshot({ animations: 'disabled', path })
+    // The theme selector sits at the foot of the panel, so choosing a theme leaves the page scrolled
+    // there and the focused radio pulls it back whenever the scroll is reset. Capturing the whole
+    // page and clipping the first viewport frames the plugin status and the cache figures the App
+    // Store listing is meant to show, whatever the live scroll position is.
+    await page.screenshot({
+      animations: 'disabled',
+      fullPage: true,
+      clip: { x: 0, y: 0, width: VIEWPORT.width, height: VIEWPORT.height },
+      path
+    })
   }
 } finally {
   await browser?.close()
