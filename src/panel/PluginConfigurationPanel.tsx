@@ -60,7 +60,8 @@ import {
   SCROLL_CACHE_TTL_MIN_DAYS
 } from './config-types.js'
 import { type PanelValidation, validatePanelConfig } from './validate-config.js'
-import { MAX_CONFIG_PATH_LENGTH } from '../shared/config-path.js'
+import { DEFAULT_CHARTS_SUBPATH, MAX_CONFIG_PATH_LENGTH } from '../shared/config-path.js'
+import { MAX_IMAGE_TAG_LENGTH } from '../shared/image-tag.js'
 
 /** How long, in milliseconds, the save-request confirmation stays visible. */
 const SAVE_REQUEST_NOTICE_MS = 2500
@@ -348,7 +349,7 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
   const chartsDirectoryEmpty = charts.discovery !== null &&
     charts.discovery.valid === 0 &&
     invalidChartCount === 0
-  const chartsDirectory = state.charts.path === '' ? 'charts/pmtiles' : state.charts.path
+  const chartsDirectory = state.charts.path === '' ? DEFAULT_CHARTS_SUBPATH : state.charts.path
 
   // One button, rendered either as the empty state's own next step or below the chart summary, so
   // the empty state can carry an action without putting a second identical button beside it.
@@ -634,12 +635,12 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
             description={
               <>
                 Directory holding .pmtiles charts, relative to the Signal K config path. Leave blank
-                for the default charts/pmtiles.
+                for the default {DEFAULT_CHARTS_SUBPATH}.
               </>
             }
           >
             <TextInput
-              placeholder='charts/pmtiles'
+              placeholder={DEFAULT_CHARTS_SUBPATH}
               maxLength={MAX_CONFIG_PATH_LENGTH}
               value={state.charts.path}
               onChange={(event) => dispatch({ type: 'setChartsPath', path: event.target.value })}
@@ -737,7 +738,7 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
           >
             <TextInput
               placeholder='Pinned to the plugin version'
-              maxLength={128}
+              maxLength={MAX_IMAGE_TAG_LENGTH}
               value={state.advanced.imageTag}
               onChange={(event) => dispatch({ type: 'setImageTag', tag: event.target.value })}
             />

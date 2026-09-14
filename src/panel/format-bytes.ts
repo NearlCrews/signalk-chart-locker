@@ -11,8 +11,10 @@
 // The operator's locale decides the grouping separator and the decimal mark, the same way the
 // per-source tile counts beside these figures already do. A hand-rolled toFixed would print a
 // period next to a comma-decimal tile count in the same table row.
-const WHOLE = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 })
-const ONE_DECIMAL = new Intl.NumberFormat(undefined, {
+/** Grouped whole numbers, for the KiB readout. Exported so its unit test measures this formatter. */
+export const WHOLE = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 })
+/** Grouped one-decimal numbers, for the MiB and GiB readouts. Exported for the same reason. */
+export const ONE_DECIMAL = new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 1,
   maximumFractionDigits: 1
 })

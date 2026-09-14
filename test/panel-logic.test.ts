@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { configReducer } from '../src/panel/config-reducer.js'
-import { formatBytes, splitBytes } from '../src/panel/format-bytes.js'
+import { formatBytes, ONE_DECIMAL, splitBytes, WHOLE } from '../src/panel/format-bytes.js'
 import { isRequestTimeout, isTeardownAbort } from '../src/panel/hooks/use-abortable-fetch.js'
 import type { ChartLockerConfig } from '../src/panel/config-types.js'
 import { validatePanelConfig } from '../src/panel/validate-config.js'
@@ -78,21 +78,16 @@ test('an expired request budget is distinguished from a route failure', () => {
 
 test('byte formatting picks binary units and reports an unknown count', () => {
   // Byte figures follow the operator's locale, the way the per-source tile counts beside them
-  // already do, so the expectations are built with an independent formatter rather than pinned to
-  // one locale's separators.
-  const whole = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 })
-  const oneDecimal = new Intl.NumberFormat(undefined, {
-    minimumFractionDigits: 1,
-    maximumFractionDigits: 1
-  })
+  // already do, so the expectations are built from the formatters the readout itself uses rather
+  // than pinned to one locale's separators or retyped from their options.
   assert.deepEqual(splitBytes(null), { value: 'Unknown' })
-  assert.deepEqual(splitBytes(2048), { value: whole.format(2), unit: 'KiB' })
-  assert.deepEqual(splitBytes(700 * 1024 ** 2), { value: oneDecimal.format(700), unit: 'MiB' })
-  assert.deepEqual(splitBytes(8 * 1024 ** 3), { value: oneDecimal.format(8), unit: 'GiB' })
+  assert.deepEqual(splitBytes(2048), { value: WHOLE.format(2), unit: 'KiB' })
+  assert.deepEqual(splitBytes(700 * 1024 ** 2), { value: ONE_DECIMAL.format(700), unit: 'MiB' })
+  assert.deepEqual(splitBytes(8 * 1024 ** 3), { value: ONE_DECIMAL.format(8), unit: 'GiB' })
   // The last KiB before the MiB threshold stays in KiB rather than rounding into it, and a
   // four-digit count is grouped rather than run together.
-  assert.deepEqual(splitBytes(1024 ** 2 - 1), { value: whole.format(1024), unit: 'KiB' })
-  assert.equal(formatBytes(700 * 1024 ** 2), `${oneDecimal.format(700)} MiB`)
+  assert.deepEqual(splitBytes(1024 ** 2 - 1), { value: WHOLE.format(1024), unit: 'KiB' })
+  assert.equal(formatBytes(700 * 1024 ** 2), `${ONE_DECIMAL.format(700)} MiB`)
   assert.equal(formatBytes(null), 'Unknown')
 })
 

@@ -25,7 +25,8 @@ import { isValidPosition } from '../runtime/position-warm.js'
 import { getOrCreateControlToken } from '../runtime/control-token.js'
 import { migrateLegacyTilecacheTag } from '../shared/tilecache-tag.js'
 import { createHostHealthMonitor, type HostHealthMonitor, type HostHealthState } from '../runtime/host-health-monitor.js'
-import { configPathIssue, MAX_CONFIG_PATH_LENGTH } from '../shared/config-path.js'
+import { configPathIssue, DEFAULT_CHARTS_SUBPATH, MAX_CONFIG_PATH_LENGTH } from '../shared/config-path.js'
+import { isValidImageTag, MAX_IMAGE_TAG_LENGTH } from '../shared/image-tag.js'
 import { isRecord } from '../shared/record.js'
 
 interface ChartLockerConfig {
@@ -242,7 +243,7 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
 
   function chartsDirFor (config: ChartLockerConfig): string {
     const override = readConfigPath('charts.path', config.charts?.path)
-    return override ? resolve(configPath, override) : join(configPath, 'charts', 'pmtiles')
+    return override ? resolve(configPath, override) : join(configPath, DEFAULT_CHARTS_SUBPATH)
   }
 
   function validateConfig (config: ChartLockerConfig): void {
@@ -267,7 +268,7 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
     const rawTag = config.advanced?.imageTag
     if (rawTag !== undefined && typeof rawTag !== 'string') throw new Error('imageTag must be a string')
     const tag = rawTag?.trim() ?? ''
-    if (tag !== '' && !/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(tag)) throw new Error('imageTag is not a valid OCI tag')
+    if (tag !== '' && !isValidImageTag(tag)) throw new Error('imageTag is not a valid OCI tag')
     if (config.advanced?.geocodingEnabled !== undefined && typeof config.advanced.geocodingEnabled !== 'boolean') {
       throw new Error('geocodingEnabled must be a boolean')
     }
@@ -925,7 +926,7 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
                 type: 'string',
                 maxLength: MAX_CONFIG_PATH_LENGTH,
                 title: 'PMTiles charts directory',
-                description: 'Directory holding .pmtiles charts, relative to the Signal K config path. Leave blank for the default charts/pmtiles.',
+                description: `Directory holding .pmtiles charts, relative to the Signal K config path. Leave blank for the default ${DEFAULT_CHARTS_SUBPATH}.`,
                 default: ''
               }
             }
@@ -937,6 +938,7 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
             properties: {
               imageTag: {
                 type: 'string',
+                maxLength: MAX_IMAGE_TAG_LENGTH,
                 title: 'Tile cache container image tag',
                 description: 'The image tag to run for the tile cache and proxy container. Pinned to the plugin version, so change it only to test a specific build.',
                 default: ''

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { PLUGIN_ID } from '../../shared/plugin-id.js'
 import { isRecord } from '../../shared/record.js'
 import { hasControlCharacter } from '../../shared/text.js'
+import { SCROLL_CACHE_TTL_MAX_DAYS } from '../config-types.js'
 import { PANEL_MUTATION_TIMEOUT_MS } from '../request-timeout.js'
 import { useAbortableFetch } from './use-abortable-fetch.js'
 
@@ -97,7 +98,9 @@ export function parseCacheStats (raw: unknown): CacheStats {
     ? null
     : nonnegativeInteger(body.availableBytes, 'availableBytes')
   const ttlDays = nonnegativeInteger(body.ttlDays, 'ttlDays')
-  if (ttlDays > 365) throw new TypeError('cache statistics ttlDays must not exceed 365')
+  if (ttlDays > SCROLL_CACHE_TTL_MAX_DAYS) {
+    throw new TypeError(`cache statistics ttlDays must not exceed ${String(SCROLL_CACHE_TTL_MAX_DAYS)}`)
+  }
   if ((body.diskPressure !== null && typeof body.diskPressure !== 'boolean') || typeof body.configured !== 'boolean') {
     throw new TypeError('cache statistics state flags must be booleans, except diskPressure may be null')
   }

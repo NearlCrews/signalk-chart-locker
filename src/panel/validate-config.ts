@@ -1,5 +1,6 @@
 import type { ChartLockerConfig } from './config-types.js'
 import { configPathIssue, MAX_CONFIG_PATH_LENGTH } from '../shared/config-path.js'
+import { isValidImageTag } from '../shared/image-tag.js'
 
 export interface PanelValidation {
   regionsBudget: string | null
@@ -34,7 +35,7 @@ export function validatePanelConfig (state: ChartLockerConfig): PanelValidation 
         ? 'The external cache drive must be an absolute host path.'
         : null
     ),
-    imageTag: state.advanced.imageTag !== '' && !/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(state.advanced.imageTag)
+    imageTag: state.advanced.imageTag !== '' && !isValidImageTag(state.advanced.imageTag)
       ? 'The container image tag is not a valid OCI tag.'
       : null
   }
