@@ -14,17 +14,23 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.8.4
+## What's new in 0.8.5
 
-Version 0.8.4 restores the supported Node.js floor to 22.0.0. The previous release advertised a
-higher floor that only build tooling ever needed, which told operators on earlier Node 22 releases
-the plugin was unsupported when it runs there; build-time requirements now live in `devEngines`.
-The configuration panel moves to `signalk-nearlcrews-ui` 0.8.2, so a control overlapping the docked
-save bar takes its first click and stays under the pointer while the bar settles. Attribution for
-the packages bundled into the panel is now generated from the bundle itself, embeds each license
-text, and is checked by the package gate.
+Version 0.8.5 rebuilds the configuration panel on `signalk-nearlcrews-ui` 0.11.1. A render failure
+inside the panel now offers "Try again" and "Reload page" in place, instead of the Signal K Admin
+host replacing the whole panel with its generic unavailable notice. A save blocked by an invalid
+field refuses in place and names the field to fix, rather than leaving a keyboard operator standing
+on a control that vanished. Fields show their unit beside the input and read it with the value, and
+the theme selector labels its group and its two automatic choices.
 
-See the [0.8.4 changelog](https://github.com/NearlCrews/signalk-chart-locker/blob/main/CHANGELOG.md#v084)
+The plugin keeps an actionable startup problem, a missing `signalk-container` or an unmounted
+external cache path, in the status line instead of overwriting it with the generic line that says
+tile caching is disabled, and it says so when a server leaves the management API unmounted. A charts
+directory that was rejected at start is polled like any other, so repairing it serves the archives
+in it without a plugin restart. `signalk-container` is no longer a peer dependency, so installing
+this plugin no longer installs a second plugin under it.
+
+See the [0.8.5 changelog](https://github.com/NearlCrews/signalk-chart-locker/blob/main/CHANGELOG.md#v085)
 for the full list.
 
 ## What it does

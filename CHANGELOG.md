@@ -6,6 +6,113 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+<a id="v085"></a>
+
+## [0.8.5] - 2026-09-14
+
+This patch release rebuilds the configuration panel on `signalk-nearlcrews-ui` 0.11.1 and corrects
+several reporting and durability faults in the plugin. The panel takes its frame, save bar, fields,
+table, and text from the shared library rather than from the local components it carried, recovers
+in place when a render fails, and reads each field's unit with the value instead of out of the
+label. The plugin keeps an actionable startup error in the status an operator reads, keeps watching
+a charts directory that was rejected at start so a repaired one serves without a restart, and never
+leaves the saved regions without a readable file. No configuration migration is required.
+
+### Added
+
+- A render failure inside the panel now offers "Try again" and "Reload page" in place, so a
+  transient failure is recoverable without the Signal K Admin host replacing the whole panel with
+  its generic unavailable notice.
+- The panel build ends with the shared UI package's own `snui-check-consumer`, which asserts the
+  exact pin against the installed version, the version stamp in the built remote, the absence of a
+  bundled React runtime, the published host share map, and gzip growth against the baseline recorded
+  in `scripts/panel-size-baseline.json`.
+
+### Changed
+
+- The configuration panel targets `signalk-nearlcrews-ui` 0.11.1 and assembles its frame, save bar,
+  number fields, text fields, freshness note, secondary text, and per-source usage table from the
+  library's `PanelShell`, `SaveActionBar`, `NumberField`, `LabeledField`, `RelativeAge`, `Text`,
+  `Code`, and `Table` primitives in place of the local components and wrappers it carried. The cache
+  size cap row asks for its control widths under the renamed `controlWidth` prop, and the panel's
+  own live regions carry a marker of their own, because the panel frame now mounts an announcer
+  beside them.
+- A save blocked by an invalid field refuses in place rather than going dark. Save keeps its place
+  in the tab order, stays focusable, and names the field to fix on the status line beside it, so a
+  keyboard or screen-reader operator is never left standing on a control that vanished.
+- The save bar confirms a save with "Save sent to the server", and every field error leads with its
+  tone word, read aloud and hidden on screen, so an error does not depend on color alone.
+- The theme selector shows its "Panel theme" group label, names its two automatic choices "Match
+  Admin" and "Match device", and says what Match Admin follows.
+- The freshness notes beside the plugin status and the chart scan count in numbers from a day up, so
+  an older reading is "1 day ago" rather than "yesterday".
+- The scroll-cache retention, cache size cap, and saved-regions budget fields show their unit beside
+  the input and read it with the value rather than carrying it in the label. The cache cap's slider
+  and its exact-value box are both described by the GiB they measure.
+- The cache-statistics loading line and the failure that can replace it share one live status
+  region, now with a warning tone, so the failure is announced as an update to a region the reader
+  already knows rather than as a new one.
+- The panel's Module Federation share map is read from `signalk-nearlcrews-ui/federation` instead of
+  being written out here, so the remote is built with the map the library was verified against. The
+  repository's own bundle check keeps only what it alone knows: its dependency inventory, its React
+  module allowlist, the production JSX runtime, the bundled attribution, and the render check.
+- Night theme colors, the focus ring, heading sizes, and font weights follow the library's values,
+  and the three App Store screenshots were recaptured against them. The panel remote's recorded size
+  baseline rises to 54,070 gzip bytes from 42,621, which is the code the shared library added.
+- The browser suite reads the version stamp and the theme storage key from the library's public
+  entry point, which a CommonJS spec can now load directly, instead of re-reading both manifests and
+  shelling out to a child process for the key.
+- `signalk-container` is no longer declared as a peer dependency, so installing this plugin no
+  longer installs a second plugin under it. The App Store still lists it as required, through the
+  `signalk.requires` field it reads, and the manager contract the plugin uses is typed against the
+  1.20.0 shape it has always assumed.
+- A failed saved-region delete is logged as `event=cache_region_delete_failed` with the region
+  identifier, so the region whose tiles stayed pinned can be identified from the container log.
+- Dependabot proposes `signalk-nearlcrews-ui` updates in their own pull request, because the library
+  ships breaking changes in 0.x minor releases and each one is reviewed against its migration guide.
+- Development dependencies move to their latest releases: Playwright 1.63, webpack 5.110.3,
+  webpack-cli 7.2.3, knip 6.35.1, cspell 10.3.0, tsx 4.23.13, Vite 8.3, the Vite React plugin 6.1.1,
+  React and its types 19.3, and the Signal K server API types 2.32, with the `minimatch` override
+  raised to 10.2.6 and `smol-toml` held at 1.8.0. No major version changed: ESLint stays on 9.x
+  because eslint-plugin-react has not released ESLint 10 support and stable neostandard still
+  declares an ESLint 9 peer, and `@types/node` stays on 22 to match the runtime floor, both as the
+  repository's dependency update guide prescribes.
+- The document linters and the spell checker read every maintained guide under `docs/`, not only the
+  top level, and the reusable Signal K plugin CI workflow and the Rust toolchain action move to
+  their current pins.
+
+### Fixed
+
+- A startup problem that names its remedy, a missing `signalk-container` or an external cache path
+  that is not mounted, stays in the plugin status instead of being overwritten by the generic line
+  that says tile caching is disabled. Signal K keeps one status slot per plugin, so the message is
+  held and re-stated until the container is addressable.
+- A server that exposes no admin middleware leaves the management API unmounted. The plugin now says
+  so in its status instead of reporting a ready tile cache while every configuration panel request
+  answers 404.
+- A status written before chart discovery has answered no longer tells the operator to disable
+  `signalk-pmtiles-plugin` on an install that never had it.
+- A charts directory that was rejected at start is polled like any other, so replacing a symlinked
+  path with a real directory starts serving the archives in it without a plugin restart. Previously
+  that install kept no watcher and no poll, and served nothing until someone restarted the plugin.
+- A tile-cache container adopted from the previous session is now owned by the plugin, so it is
+  stopped at teardown rather than left running under its restart policy with nothing managing it,
+  and an outstanding container transition is waited for rather than replaced, which could let an
+  older cleanup stop the container a newer start had just launched.
+- A chart startup that fails before the first container await, an unreadable overrides file for
+  example, is reported instead of escaping as a process-level unhandled rejection.
+- A failed chart rescan answers with a fixed message rather than the filesystem error, which carried
+  absolute host paths to every caller. The detail goes to the plugin's debug log.
+- A semantically corrupt saved-regions file is copied aside rather than moved, so a replacement that
+  fails on a full or over-quota filesystem can no longer leave no regions file at all, which made
+  the next start run on zero regions while their tiles stayed pinned in the container. Durable
+  writes also reap the temporary files a hard kill leaves behind.
+
+### Removed
+
+- The panel's CSS module and, with it, `css-loader` and `style-loader` from the panel toolchain and
+  the bundled third-party notices.
+
 <a id="v084"></a>
 
 ## [0.8.4] - 2026-08-22
@@ -758,6 +865,7 @@ All tile-cache compute lives in the container.
   recreating rather than crash-looping; and the egress SSRF guard also rejects the IPv6 6to4 and
   NAT64 transition ranges.
 
-[Unreleased]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.4...HEAD
+[Unreleased]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.5...HEAD
+[0.8.5]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.1...v0.8.3
