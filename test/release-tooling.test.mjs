@@ -448,19 +448,50 @@ test('manual publish recovery freezes the release revision and isolates publishe
 test('release metadata uses an explicit release ref type over the workflow branch context', () => {
   const root = fileURLToPath(new URL('..', import.meta.url))
   const { version } = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'))
-  const output = execFileSync('node', ['scripts/release-metadata.mjs'], {
-    cwd: root,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      GITHUB_REF_TYPE: 'branch',
-      GITHUB_REPOSITORY: 'NearlCrews/signalk-chart-locker',
-      RELEASE_CHECKOUT: root,
-      RELEASE_REF_TYPE: 'tag',
-      RELEASE_TAG: `v${version}`
-    }
-  })
-  assert.match(output, new RegExp(`Release metadata verified: v${version}`))
+  // release-metadata.mjs appends its step outputs to whatever GITHUB_OUTPUT names. Inheriting the
+  // ambient value would make the child write into the caller's step outputs, which injects fake
+  // values into an unrelated job and fails outright wherever that file is on a read-only mount, so
+  // the child gets an output file this test owns and then asserts what landed in it.
+  const outputDirectory = mkdtempSync(join(tmpdir(), 'chart-locker-release-metadata-'))
+  const outputFile = join(outputDirectory, 'github-output')
+  writeFileSync(outputFile, '')
+  try {
+    const output = execFileSync('node', ['scripts/release-metadata.mjs'], {
+      cwd: root,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GITHUB_OUTPUT: outputFile,
+        GITHUB_REF_TYPE: 'branch',
+        GITHUB_REPOSITORY: 'NearlCrews/signalk-chart-locker',
+        PUBLISH_LATEST: 'false',
+        RELEASE_CHECKOUT: root,
+        RELEASE_REF_TYPE: 'tag',
+        RELEASE_TAG: `v${version}`
+      }
+    })
+    assert.match(output, new RegExp(`Release metadata verified: v${version}`))
+
+    const expected = deriveReleaseMetadata({
+      packageName: 'signalk-chart-locker',
+      publishLatest: false,
+      refType: 'tag',
+      releaseTag: `v${version}`,
+      repository: 'NearlCrews/signalk-chart-locker',
+      version
+    })
+    const emitted = readFileSync(outputFile, 'utf8').split('\n')
+    assert.ok(emitted.includes(`version=${version}`))
+    assert.ok(emitted.includes(`tag=v${version}`))
+    assert.ok(emitted.includes(`image=${expected.image}`))
+    assert.ok(emitted.includes(`npm_tag=${expected.npmTag}`))
+    assert.ok(emitted.includes(`stable=${expected.stable}`))
+    const heredocStart = emitted.indexOf('tags<<RELEASE_TAGS')
+    assert.ok(heredocStart >= 0)
+    assert.deepEqual(emitted.slice(heredocStart + 1, emitted.indexOf('RELEASE_TAGS', heredocStart + 1)), expected.tags)
+  } finally {
+    rmSync(outputDirectory, { force: true, recursive: true })
+  }
 })
 
 test('bounded downloads reject declared and streamed overflow', async () => {

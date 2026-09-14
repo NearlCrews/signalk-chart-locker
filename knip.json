@@ -4,10 +4,17 @@
     "src/panel/index.tsx",
     "fixtures/browser/main.tsx",
     "fixtures/browser/vite.config.mts",
-    "scripts/*.mjs",
     "test/*.test.ts",
-    "tests/browser/*.spec.ts"
+    "test/*.test.mjs",
+    "tests/browser/*.spec.ts",
+    // Every other scripts/*.mjs is discovered through an npm script, a workflow step, or an import,
+    // so listing the directory wholesale would make knip structurally unable to report an orphaned
+    // script. This one is invoked as an interpolated absolute path (node "$GITHUB_WORKSPACE/..."),
+    // which the workflow parser cannot resolve, so it is named here.
+    "scripts/link-signalk-admin.mjs"
   ],
+  // Resolved at runtime by link-signalk-admin.mjs from the Signal K host the workflow installs, not
+  // from this package's own tree.
   "ignoreDependencies": [
     "signalk-server",
     "@signalk/server-admin-ui"
@@ -17,7 +24,7 @@
     "src/**/*.{ts,tsx}",
     "fixtures/**/*.{ts,tsx}",
     "scripts/*.mjs",
-    "test/**/*.ts",
+    "test/**/*.{ts,mjs}",
     "tests/**/*.ts"
   ]
 }
