@@ -341,6 +341,34 @@ test('a rejected charts root self-heals once the operator repairs it, with no pl
   }
 })
 
+test('a rejected charts root is not rescanned again until something about it changes', { skip: process.platform === 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'charts-allowed-'))
+  const outside = await mkdtemp(join(tmpdir(), 'charts-outside-'))
+  const linked = join(root, 'charts')
+  await symlink(outside, linked, 'dir')
+  const registry = new ChartRegistry()
+  let publications = 0
+  const publish = registry.replace.bind(registry)
+  registry.replace = (records, errors, at) => {
+    publications += 1
+    publish(records, errors, at)
+  }
+  const handle = await startDiscovery({ chartsDir: linked, allowedRoot: root, registry, pollIntervalMs: 5 })
+  try {
+    const afterStart = publications
+    assert.equal(registry.errors()[0]?.fileName, '<charts-directory>')
+
+    // A scan over a root that is still rejected can only clear and rebuild the registry into the
+    // same escape error it already holds, so the ticks in this window must find nothing to do.
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.equal(publications, afterStart)
+  } finally {
+    await handle.stop()
+    await rm(root, { recursive: true, force: true })
+    await rm(outside, { recursive: true, force: true })
+  }
+})
+
 test('startDiscovery does not create through an intermediate symlink outside its allowed root', { skip: process.platform === 'win32' }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'charts-allowed-'))
   const outside = await mkdtemp(join(tmpdir(), 'charts-outside-'))

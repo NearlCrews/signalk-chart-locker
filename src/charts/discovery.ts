@@ -364,17 +364,33 @@ export async function startDiscovery (deps: DiscoveryDeps): Promise<DiscoveryHan
       watchedIdentity = undefined
     }
   }
+  // What the last scan reflects, so a tick can tell whether anything it could act on has moved.
+  let scannedIdentity = await (deps.directoryIdentity ?? directoryIdentity)(deps.chartsDir)
+  let scannedRootSafe = rootAccepted
   const poll = async (): Promise<void> => {
     if (stopped) return
     const identity = await (deps.directoryIdentity ?? directoryIdentity)(deps.chartsDir)
     if (stopped) return
+    const rootSafe = await chartsRootIsSafe(deps)
+    if (stopped) return
+    const watchedBefore = watcher !== undefined
     if (identity !== watchedIdentity) {
       watcher?.close()
       watcher = undefined
       watchedIdentity = undefined
-      if (identity !== undefined && process.platform === 'linux' && await chartsRootIsSafe(deps) && !stopped) installWatcher(identity)
+      if (identity !== undefined && process.platform === 'linux' && rootSafe && !stopped) installWatcher(identity)
     }
-    runRescan()
+    const changed = identity !== scannedIdentity || rootSafe !== scannedRootSafe
+    scannedIdentity = identity
+    scannedRootSafe = rootSafe
+    // A watcher that was already reporting on this directory covers every in-place edit, so a tick
+    // that finds the same directory and the same verdict has nothing to add. Everything else
+    // rescans: no watcher at all (another platform, or a watch that could not be installed), a
+    // watcher installed only on this tick, a directory that changed identity, or a verdict that
+    // flipped. A root that is still rejected is the exception, because a scan over it can only
+    // republish the escape error it already published.
+    const covered = watchedBefore && watcher !== undefined && !changed
+    if (!covered && (rootSafe || changed)) runRescan()
   }
   const requestPoll = (): void => {
     if (stopped || pollInFlight !== null) return
@@ -388,16 +404,13 @@ export async function startDiscovery (deps: DiscoveryDeps): Promise<DiscoveryHan
   // Linux uses native events for low latency, plus a slow identity poll so deleting and recreating the
   // directory cannot strand the watcher on the old inode. Other platforms use only the poll because
   // macOS events can be dropped, and Node 24's Windows watcher can assert during directory teardown.
-  if (rootAccepted && process.platform === 'linux') {
-    const identity = await (deps.directoryIdentity ?? directoryIdentity)(deps.chartsDir)
-    if (identity !== undefined) installWatcher(identity)
-  }
+  if (rootAccepted && process.platform === 'linux' && scannedIdentity !== undefined) installWatcher(scannedIdentity)
   // The poll runs even when the configured root was rejected, because rejection is a configuration
   // state the operator can fix while the plugin runs: replacing a symlinked path component with a
-  // real directory, for example. poll() re-checks chartsRootIsSafe before it installs the watcher and
-  // rescans on every tick, so a repaired directory starts serving without a plugin restart. Gating
-  // the interval on rootAccepted left a chartplotter with valid charts on disk serving none, with no
-  // watcher and no poll, until someone restarted the plugin.
+  // real directory, for example. poll() re-reads both the directory identity and the safety verdict
+  // on every tick and rescans as soon as either moves, so a repaired directory starts serving
+  // without a plugin restart. Gating the interval on rootAccepted left a chartplotter with valid
+  // charts on disk serving none, with no watcher and no poll, until someone restarted the plugin.
   const pollTimer = setInterval(requestPoll, deps.pollIntervalMs ?? 5000)
   pollTimer.unref()
   return {
