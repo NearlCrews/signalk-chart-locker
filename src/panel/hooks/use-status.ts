@@ -15,6 +15,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { PLUGIN_ID } from '../../shared/plugin-id.js'
+import { PANEL_AGE_TICK_MS } from '../age-tick.js'
 import { useAbortableFetch } from './use-abortable-fetch.js'
 
 /** The admin plugin-list route. Same-origin, gated by the admin session. */
@@ -72,6 +73,10 @@ export function useStatus (): UseStatusResult {
   // poll is detected without re-rendering: the status object keeps stable
   // identity across unchanged polls.
   const lastStatusJson = useRef<string | null>(null)
+  // The timestamp last committed to state, so an unchanged poll can skip that
+  // commit too. Without it the dedupe above buys nothing: a fresh timestamp on
+  // every poll re-renders the whole panel regardless.
+  const lastCommittedMs = useRef<number | null>(null)
   const fetcher = useAbortableFetch()
 
   useEffect(() => {
@@ -95,11 +100,23 @@ export function useStatus (): UseStatusResult {
           // last one committed, so the panel does not re-render once per
           // 5 s for no user-visible change.
           const json = JSON.stringify(next)
-          if (lastStatusJson.current !== json) {
+          const changed = lastStatusJson.current !== json
+          if (changed) {
             lastStatusJson.current = json
             setStatus(next)
           }
-          setLastUpdatedMs(Date.now())
+          // The freshness note re-reads the clock on the shared panel tick and
+          // is spelled in whole units, so a timestamp committed more often than
+          // that changes nothing on screen while re-rendering the whole panel.
+          // Commit on a real status change, and otherwise only once the note
+          // itself could have moved, which leaves the age it shows no staler
+          // than the note's own resolution and never fresher than the truth.
+          const now = Date.now()
+          const committed = lastCommittedMs.current
+          if (changed || committed === null || now - committed >= PANEL_AGE_TICK_MS) {
+            lastCommittedMs.current = now
+            setLastUpdatedMs(now)
+          }
           setError(null)
         }
       } catch (e) {

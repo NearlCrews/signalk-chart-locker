@@ -6,10 +6,10 @@
  */
 
 import { useEffect, useRef } from 'react'
-import { PANEL_REQUEST_TIMEOUT_MS } from '../request-timeout.js'
+import { PANEL_MUTATION_TIMEOUT_MS, PANEL_REQUEST_TIMEOUT_MS } from '../request-timeout.js'
 
 export interface AbortableFetch {
-  /** Issue the request, optionally on a budget other than the default read timeout. */
+  /** Issue the request, optionally on a budget other than the one its method implies. */
   request: (url: string, init?: RequestInit, timeoutMs?: number) => Promise<Response>
   /** Fetch the URL with same-origin credentials, a fresh per-call timeout, and unmount abort. Rejects
    *  with Error 'HTTP <status>' on a non-2xx, and rejects on a transport error or an abort. */
@@ -49,6 +49,19 @@ export function isRequestTimeout (cause: unknown): boolean {
   return cause instanceof DOMException && cause.name === 'TimeoutError'
 }
 
+/**
+ * The budget a request gets when its caller names none.
+ *
+ * A read is bounded by the poll interval it runs on. A write has already reached the route and is
+ * still running there, so it gets the operator's maintenance budget instead. Deriving that from the
+ * request rather than restating it at each call site is what keeps a mutating route added later from
+ * silently inheriting the poller's four seconds and reporting work that is still running as failed.
+ */
+function defaultTimeoutMs (method: string | undefined): number {
+  const verb = method?.toUpperCase() ?? 'GET'
+  return verb === 'GET' || verb === 'HEAD' ? PANEL_REQUEST_TIMEOUT_MS : PANEL_MUTATION_TIMEOUT_MS
+}
+
 export function useAbortableFetch (): AbortableFetch {
   const unmountRef = useRef<AbortController | null>(null)
   const canceledRef = useRef(false)
@@ -70,11 +83,11 @@ export function useAbortableFetch (): AbortableFetch {
       async request (
         url: string,
         init: RequestInit = {},
-        timeoutMs: number = PANEL_REQUEST_TIMEOUT_MS
+        timeoutMs?: number
       ): Promise<Response> {
         // A fresh timeout per call: a single hook-lifetime timeout would abort every later poll.
         const unmountSignal = unmountRef.current?.signal
-        const signals = [AbortSignal.timeout(timeoutMs)]
+        const signals = [AbortSignal.timeout(timeoutMs ?? defaultTimeoutMs(init.method))]
         if (unmountSignal !== undefined) signals.push(unmountSignal)
         if (init.signal !== undefined && init.signal !== null) signals.push(init.signal)
         try {

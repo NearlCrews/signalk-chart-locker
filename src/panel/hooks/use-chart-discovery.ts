@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from 'react'
 import { PLUGIN_ID } from '../../shared/plugin-id.js'
 import { isRecord } from '../../shared/record.js'
 import { hasControlCharacter } from '../../shared/text.js'
-import { PANEL_MUTATION_TIMEOUT_MS } from '../request-timeout.js'
 import { useAbortableFetch } from './use-abortable-fetch.js'
 
 const URL = `/plugins/${PLUGIN_ID}/api/charts`
@@ -85,9 +84,7 @@ export function useChartDiscovery (): {
   // No busy flag: the panel drives the rescan button's loading and disabled state from its own
   // pendingAction, so a second copy here would only re-render the panel twice per rescan.
   const rescan = useCallback(async (): Promise<ChartDiscoveryState | null> => {
-    // A rescan reads and validates every PMTiles header in the charts directory, so it gets the
-    // maintenance budget rather than the poller's.
-    await fetcher.request(`${URL}/rescan`, { method: 'POST' }, PANEL_MUTATION_TIMEOUT_MS)
+    await fetcher.request(`${URL}/rescan`, { method: 'POST' })
     return load()
   }, [fetcher, load])
 
