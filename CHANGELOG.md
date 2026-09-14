@@ -6,46 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-### Changed
+<a id="v090"></a>
 
-- The chart self-heal poll rescans when the charts directory changes identity or its containment
-  verdict flips, and on every tick where no native watcher covers the directory. A rejected
-  directory no longer pays a full safety check and a registry rebuild every five seconds to
-  reproduce the error it already reported, and a repaired one still starts serving without a plugin
-  restart.
-- Durable state writes no longer list the whole Signal K data directory before staging their
-  replacement. The temporaries that sweep reaps can only be left behind by a process killed
-  mid-write, so it runs once per state file per process rather than on every saved-region edit.
-- The plugin hands the server a status line only when it changes, rather than recomposing an
-  identical line on each 30 second health probe.
-- The configuration panel commits a new status timestamp only when the status itself changed or the
-  freshness note beside it could have moved, so an idle panel no longer re-renders every five
-  seconds.
-- The container image tag field in the generated settings form carries the same length bound the
-  plugin validates against, so it cannot accept a tag the plugin then rejects.
-- A maintenance action that outlives its request budget reports the same words as the button that
-  started it, so "Refreshing cache statistics" is still refreshing when the panel loses the answer.
-- The tile-cache container reports the last of its prose log lines as `event=` key value pairs, and
-  the operations guide lists them.
+## [0.9.0] - 2026-09-14
 
-### Fixed
-
-- A PMTiles provider update that fails while the plugin is running keeps its diagnosis in the status
-  an operator reads. It was written straight to the shared status slot, so the next health probe
-  replaced it with a healthy-looking line while the chart provider was still out of step with
-  `signalk-pmtiles-plugin`.
-
-<a id="v085"></a>
-
-## [0.8.5] - 2026-09-14
-
-This patch release rebuilds the configuration panel on `signalk-nearlcrews-ui` 0.11.1 and corrects
-several reporting and durability faults in the plugin. The panel takes its frame, save bar, fields,
-table, and text from the shared library rather than from the local components it carried, recovers
-in place when a render fails, and reads each field's unit with the value instead of out of the
-label. The plugin keeps an actionable startup error in the status an operator reads, keeps watching
-a charts directory that was rejected at start so a repaired one serves without a restart, and never
-leaves the saved regions without a readable file. No configuration migration is required.
+This release rebuilds the configuration panel on `signalk-nearlcrews-ui` 0.11.1, relabels several
+of its controls, and corrects reporting and durability faults in the plugin. The panel takes its
+frame, save bar, fields, table, and text from the shared library rather than from the local
+components it carried, recovers in place when a render fails, and reads each field's unit with the
+value instead of out of the label. The plugin keeps an actionable startup error in the status an
+operator reads, keeps watching a charts directory that was rejected at start so a repaired one
+serves without a restart, rescans only when that directory has actually changed, and never leaves
+the saved regions without a readable file. No configuration migration is required.
 
 ### Added
 
@@ -101,13 +73,13 @@ leaves the saved regions without a readable file. No configuration migration is 
   identifier, so the region whose tiles stayed pinned can be identified from the container log.
 - Dependabot proposes `signalk-nearlcrews-ui` updates in their own pull request, because the library
   ships breaking changes in 0.x minor releases and each one is reviewed against its migration guide.
-- Development dependencies move to their latest releases: Playwright 1.63, webpack 5.110.3,
-  webpack-cli 7.2.3, knip 6.35.1, cspell 10.3.0, tsx 4.23.13, Vite 8.3, the Vite React plugin 6.1.1,
-  React and its types 19.3, and the Signal K server API types 2.32, with the `minimatch` override
-  raised to 10.2.6 and `smol-toml` held at 1.8.0. No major version changed: ESLint stays on 9.x
-  because eslint-plugin-react has not released ESLint 10 support and stable neostandard still
-  declares an ESLint 9 peer, and `@types/node` stays on 22 to match the runtime floor, both as the
-  repository's dependency update guide prescribes.
+- Development dependencies move to their latest releases: Playwright 1.63, webpack 5.111.0,
+  webpack-cli 7.2.3, knip 6.35.1, cspell 10.3.1, Babel 8.0.5, tsx 4.23.13, Vite 8.3, the Vite React
+  plugin 6.1.1, React and its types 19.3, and the Signal K server API types 2.32, with the
+  `minimatch` override raised to 10.2.6 and `smol-toml` held at 1.8.0. No major version changed:
+  ESLint stays on 9.x because eslint-plugin-react has not released ESLint 10 support and stable
+  neostandard still declares an ESLint 9 peer, and `@types/node` stays on 22 to match the runtime
+  floor, both as the repository's dependency update guide prescribes.
 - The document linters and the spell checker read every maintained guide under `docs/`, not only the
   top level, and the reusable Signal K plugin CI workflow and the Rust toolchain action move to
   their current pins.
@@ -116,6 +88,25 @@ leaves the saved regions without a readable file. No configuration migration is 
   one version describes both the compiler that produces the shipped binary and the one that formats,
   lints, tests, and audits it. The locked Rust dependency graph takes uuid 1.26.0, and the
   third-party license report was regenerated from it.
+- The chart self-heal poll rescans when the charts directory changes identity or its containment
+  verdict flips, and on every tick where no native watcher covers the directory. A rejected
+  directory no longer pays a full safety check and a registry rebuild every five seconds to
+  reproduce the error it already reported, and a repaired one still starts serving without a plugin
+  restart.
+- Durable state writes no longer list the whole Signal K data directory before staging their
+  replacement. The temporaries that sweep reaps can only be left behind by a process killed
+  mid-write, so it runs once per state file per process rather than on every saved-region edit.
+- The plugin hands the server a status line only when it changes, rather than recomposing an
+  identical line on each 30 second health probe.
+- The configuration panel commits a new status timestamp only when the status itself changed or the
+  freshness note beside it could have moved, so an idle panel no longer re-renders every five
+  seconds.
+- The container image tag field in the generated settings form carries the same length bound the
+  plugin validates against, so it cannot accept a tag the plugin then rejects.
+- A maintenance action that outlives its request budget reports the same words as the button that
+  started it, so "Refreshing cache statistics" is still refreshing when the panel loses the answer.
+- The tile-cache container reports the last of its prose log lines as `event=` key value pairs, and
+  the operations guide lists them.
 
 ### Fixed
 
@@ -143,6 +134,10 @@ leaves the saved regions without a readable file. No configuration migration is 
   fails on a full or over-quota filesystem can no longer leave no regions file at all, which made
   the next start run on zero regions while their tiles stayed pinned in the container. Durable
   writes also reap the temporary files a hard kill leaves behind.
+- A PMTiles provider update that fails while the plugin is running keeps its diagnosis in the status
+  an operator reads. It was written straight to the shared status slot, so the next health probe
+  replaced it with a healthy-looking line while the chart provider was still out of step with
+  `signalk-pmtiles-plugin`.
 
 ### Removed
 
@@ -901,7 +896,7 @@ All tile-cache compute lives in the container.
   recreating rather than crash-looping; and the egress SSRF guard also rejects the IPv6 6to4 and
   NAT64 transition ranges.
 
-[Unreleased]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.5...HEAD
-[0.8.5]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.4...v0.8.5
+[Unreleased]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.1...v0.8.3
