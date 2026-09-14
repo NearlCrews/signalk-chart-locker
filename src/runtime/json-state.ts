@@ -5,15 +5,19 @@
 
 import {
   closeSync,
+  constants,
+  copyFileSync,
   fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync
 } from 'node:fs'
-import { dirname } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 export interface ReadJsonStateOptions<T> {
   /** Validate the parsed root before it is trusted as T. */
@@ -28,12 +32,53 @@ function errorCode (error: unknown): string | undefined {
     : undefined
 }
 
-export function preserveInvalidJsonState (path: string): void {
+export interface PreserveInvalidJsonStateOptions {
+  /**
+   * Copy the file aside instead of moving it, leaving the original in place. Use this when a
+   * normalized replacement is written afterwards: moving first means a failed write (ENOSPC, EDQUOT)
+   * leaves no file under the expected name at all, and the next load reads the fallback and reports
+   * nothing, which silently discards state the caller could still have recovered.
+   */
+  keepOriginal?: boolean
+}
+
+export function preserveInvalidJsonState (path: string, options: PreserveInvalidJsonStateOptions = {}): void {
   const backup = `${path}.corrupt-${Date.now()}-${Math.random().toString(16).slice(2)}`
   try {
-    renameSync(path, backup)
+    if (options.keepOriginal === true) copyFileSync(path, backup, constants.COPYFILE_EXCL)
+    else renameSync(path, backup)
   } catch (error) {
     throw new Error(`cannot preserve invalid JSON state at ${path}`, { cause: error })
+  }
+}
+
+/** How long a `.tmp-` sibling must be untouched before it is treated as abandoned. */
+const STALE_TEMPORARY_MS = 10 * 60_000
+
+/**
+ * Remove `<path>.tmp-*` siblings left by a process killed between openSync and renameSync. The state
+ * files here have a single writer, and no write survives the age threshold, so an older temporary
+ * cannot belong to a live writer. Best effort throughout: a sweep failure must never fail a write.
+ */
+export function sweepStaleJsonStateTemporaries (path: string, maxAgeMs: number = STALE_TEMPORARY_MS): void {
+  const parent = dirname(path)
+  const prefix = `${basename(path)}.tmp-`
+  const cutoff = Date.now() - maxAgeMs
+  let entries: string[]
+  try {
+    entries = readdirSync(parent)
+  } catch {
+    return
+  }
+  for (const entry of entries) {
+    if (!entry.startsWith(prefix)) continue
+    const candidate = join(parent, entry)
+    try {
+      if (statSync(candidate).mtimeMs > cutoff) continue
+      unlinkSync(candidate)
+    } catch {
+      // A concurrent writer, a permission problem, or a racing sweep. Leave it for the next pass.
+    }
   }
 }
 
@@ -79,6 +124,7 @@ export function readJsonState<T> (path: string, fallback: T, options: ReadJsonSt
 export function writeJsonState (path: string, value: unknown): void {
   const parent = dirname(path)
   mkdirSync(parent, { recursive: true })
+  sweepStaleJsonStateTemporaries(path)
   const temporary = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
   let fd: number | undefined
   try {

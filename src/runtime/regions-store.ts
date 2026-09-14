@@ -231,7 +231,12 @@ export function loadRegionsStore (dataDir: string): RegionsStore {
   const file = join(dataDir, STORE_FILE)
   const parsed = readJsonState<Record<string, unknown>>(file, {}, { validate: isRecord })
   const semanticCorruption = hasSemanticCorruption(parsed)
-  if (semanticCorruption) preserveInvalidJsonState(file)
+  // Copy rather than move. The normalized replacement is written below, and a write that fails after
+  // a move would leave no regions.json at all: the next load would read the fallback, find nothing
+  // semantically corrupt about it, and run on zero regions forever while their tiles stayed pinned in
+  // the container. Copying keeps the only readable copy under the expected name until the atomic
+  // rename in writeJsonState replaces it.
+  if (semanticCorruption) preserveInvalidJsonState(file, { keepOriginal: true })
   if ('bbox' in parsed || 'sources' in parsed) {
     return migrateV2(parsed, dataDir)
   }

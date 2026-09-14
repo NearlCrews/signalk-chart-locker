@@ -18,6 +18,7 @@ import {
   writeFileSync
 } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
+import { sweepStaleJsonStateTemporaries } from './json-state.js'
 
 const TOKEN_FILE = 'tilecache-control-token'
 const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/
@@ -81,6 +82,9 @@ function readExistingToken (path: string): string | null {
 
 function createToken (path: string): string {
   const token = randomBytes(32).toString('base64url')
+  // Reap any temporary a hard kill left between openSync and linkSync, the same way abandoned
+  // recovery-owner sidecars are reaped below.
+  sweepStaleJsonStateTemporaries(path)
   const temporary = `${path}.tmp-${process.pid}-${Date.now()}-${randomBytes(12).toString('hex')}`
   let fd: number | undefined
   try {
