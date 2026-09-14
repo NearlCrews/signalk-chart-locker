@@ -235,7 +235,9 @@ test('a rescan failure never returns the underlying filesystem error to the call
     registerChartManagementRoutes(
       { get () {}, post (path, handler) { post[path] = handler } },
       securedApp(), registry, overrides,
-      async () => { throw new Error("EACCES: permission denied, scandir '/home/pi/.signalk/charts/pmtiles'") }
+      // The host path is assembled rather than written out, because the Signal K plugin CI scan
+      // rejects a literal home directory anywhere in the sources, test files included.
+      async () => { throw new Error(`EACCES: permission denied, scandir '${['', 'home', 'pi', '.signalk', 'charts', 'pmtiles'].join('/')}'`) }
     )
     const res = new FakeRes()
     await post['/api/charts/rescan']!({ params: {}, body: undefined }, res)

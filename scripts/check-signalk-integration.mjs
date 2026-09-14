@@ -45,7 +45,9 @@ try {
   const page = await browser.newPage()
   const adminUrl = new URL(`/admin/#/serverConfiguration/plugins/${encodeURIComponent(pkg.name)}`, baseUrl)
   await page.goto(adminUrl.href, { waitUntil: 'domcontentloaded', timeout: 30_000 })
-  await page.getByRole('slider', { name: 'Cache size cap (GiB)', exact: true })
+  // The field reads its unit with the value rather than carrying it in the label, so the slider's
+  // accessible name is the label alone. The browser suite queries the same name.
+  await page.getByRole('slider', { name: 'Cache size cap', exact: true })
     .waitFor({ state: 'visible', timeout: 30_000 })
 
   assert.equal(await page.locator('[data-snui-version]').count() > 0, true, 'the mounted panel did not render signalk-nearlcrews-ui')
