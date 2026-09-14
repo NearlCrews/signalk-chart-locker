@@ -118,13 +118,34 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
   // The tilecache container is non-fatal: the PMTiles chart provider and the plugin serve routes
   // work even if the tilecache container fails to start; only the tile cache and proxy are disabled.
   // Its address is held for the proxy routes.
-  let tilecacheLaunched = false
+  // True once this start knows a container named TILECACHE_CONTAINER_NAME is running, whether the
+  // launch path created it or warm adoption found the previous session's. Ownership is what doStop
+  // acts on: the container runs under restart: unless-stopped, so a container this plugin knows
+  // about but does not stop keeps its port, its memory limit, and its cache volume across a plugin
+  // disable and a host reboot with nothing managing it. Serving state is cleared independently.
+  let tilecacheOwned = false
   let tilecacheManager: ReturnType<typeof getContainerManager> = null
   let tilecacheAddress: string | null = null
   let configuredCachePath: string | null = null
   let tilecacheHealthy = false
   let tilecacheConfigured = false
   let tilecacheHealthDetail: string | null = null
+  // setPluginStatus and setPluginError write the same slot on the Signal K server, so the last
+  // writer is the message the operator sees. An actionable startup diagnosis therefore has to be
+  // re-stated by every later status update, or the generic "tile caching is disabled" line erases
+  // the one message that says what to do about it. Held until the next start clears it.
+  let tilecacheError: string | null = null
+  function reportTilecacheError (message: string): void {
+    tilecacheError = message
+    app.setPluginError(message)
+  }
+  // The container-manager helpers own the wording of their own diagnoses; routing their error sink
+  // through reportTilecacheError keeps those messages sticky without restating them here.
+  const tilecacheErrorSink = { setPluginError: reportTilecacheError }
+  // False once a registrar reported that it could not admin-gate the /api subtree, which unmounts
+  // the whole management API. Without this the plugin can report a ready tilecache while every
+  // panel request 404s.
+  let managementApiAvailable = true
 
   // The one reset for the tilecache serving state. Every path that stops serving (teardown, an
   // unavailable required volume, a rolled-back warm adoption, and the doStart entry) clears the
@@ -156,8 +177,13 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
     : MANAGER_OPERATION_TIMEOUT_MS
 
   function trackManagerTransition (operation: Promise<unknown>, failureMessage: string): void {
-    const tracked = operation
-      .then(() => {}, (error: unknown) => { app.debug(failureMessage, error) })
+    const prior = pendingManagerTransition
+    const settled = operation.then(() => {}, (error: unknown) => { app.debug(failureMessage, error) })
+    // Absorb any transition still outstanding rather than replacing it. Replacing would clear the
+    // slot as soon as the newer operation settled, and the next start would launch a container while
+    // an older cleanup could still complete and stop the fixed name out from under it. Neither
+    // promise rejects, so the join cannot reject either.
+    const tracked = (prior === null ? settled : Promise.all([prior, settled]).then(() => {}))
       .finally(() => {
         if (pendingManagerTransition === tracked) pendingManagerTransition = null
       })
@@ -205,7 +231,11 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
   let discovery: DiscoveryHandle | undefined
   let mutualExclusionWatcher: MutualExclusionWatcher | undefined
   let chartLifecycle: Promise<void> = Promise.resolve()
-  let pmtilesEnabled = false
+  // Tri-state on purpose. undefined means chart discovery has not answered yet, which is not the
+  // same as "the third-party PMTiles plugin is enabled": the early status update that opens tile
+  // serving runs before discovery finishes, and treating the two the same told operators to disable
+  // a plugin they had never installed.
+  let pmtilesEnabled: boolean | undefined
   // The charts directory resolved from the active config, captured so the override re-apply closure
   // rescans the configured directory, not the default. Set in setupCharts.
   let activeChartsDir: string | undefined
@@ -337,10 +367,15 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
   }
 
   function updatePluginStatus (): void {
+    // A recorded startup error replaces the generic unavailable line rather than being overwritten
+    // by it, so the operator keeps the message that names the remedy. Once an address resolves the
+    // container is running, and the recorded error no longer describes anything.
+    const blockingError = tilecacheAddress === null ? tilecacheError : null
+    const unavailable = blockingError ?? 'Tilecache container unavailable; tile caching is disabled.'
     const tcStatus = tilecacheAddress === null
-      ? pmtilesEnabled
-        ? 'Tilecache container unavailable; tile caching is disabled. PMTiles charts ready.'
-        : 'Tilecache container unavailable; tile caching is disabled.'
+      ? pmtilesEnabled === true
+        ? `${unavailable} PMTiles charts ready.`
+        : unavailable
       : tilecacheHealthDetail !== null
         ? `Tilecache at ${tilecacheAddress}; ${tilecacheHealthDetail}`
         : !tilecacheConfigured
@@ -348,11 +383,14 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
             : !tilecacheHealthy
                 ? `Tilecache at ${tilecacheAddress}; health is pending.`
                 : `Tilecache at ${tilecacheAddress}; ready.`
-    if (!pmtilesEnabled) {
-      app.setPluginStatus(`${tcStatus} PMTiles charts disabled: signalk-pmtiles-plugin is enabled, disable it to use the Chart Locker chart provider.`)
-    } else {
-      app.setPluginStatus(tcStatus)
-    }
+    const withCharts = pmtilesEnabled === false
+      ? `${tcStatus} PMTiles charts disabled: signalk-pmtiles-plugin is enabled, disable it to use the Chart Locker chart provider.`
+      : tcStatus
+    const message = managementApiAvailable
+      ? withCharts
+      : `${withCharts} The management API could not be admin-gated on this server and is unavailable, so the settings panel cannot reach the plugin.`
+    if (blockingError !== null || !managementApiAvailable) app.setPluginError(message)
+    else app.setPluginStatus(message)
   }
 
   async function doStart (rawConfig: ChartLockerConfig): Promise<void> {
@@ -365,6 +403,9 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
     startController = startupController
     pluginRunning = true
     resetTilecacheServingState()
+    tilecacheError = null
+    // Chart discovery has not answered for this start yet, whatever the previous start concluded.
+    pmtilesEnabled = undefined
     geocodingEnabled = config.advanced?.geocodingEnabled ?? true
     configuredCachePath = readConfigPath('cacheVolumeSource', config.advanced?.cacheVolumeSource) || null
     const dataDir = app.getDataDirPath()
@@ -395,15 +436,19 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
     // PMTiles discovery is independent of the container. Start it before checking the optional
     // tilecache runtime so local charts remain available when signalk-container is absent or offline.
     const chartsReady = syncCharts(config)
-    chartLifecycle = chartsReady
-    const manager = requireContainerManager(app)
+    // Attach the handler in the same tick the promise is created. The first real await on
+    // chartsReady is after the container work below, and a synchronous failure inside syncCharts
+    // (an unreadable overrides file, for example) rejects before then, which Node reports as a
+    // process-level unhandled rejection. The awaits below still surface the real error.
+    chartLifecycle = chartsReady.catch((error: unknown) => { app.debug('PMTiles provider startup failed:', error) })
+    const manager = requireContainerManager(tilecacheErrorSink)
     if (!manager) {
       await chartsReady
       watchMutualExclusion(config)
       updatePluginStatus()
       return
     }
-    if (!(await ensureRuntimeReady(app, manager, { signal: startupController.signal }))) {
+    if (!(await ensureRuntimeReady(tilecacheErrorSink, manager, { signal: startupController.signal }))) {
       await chartsReady
       if (startupController.signal.aborted) return
       watchMutualExclusion(config)
@@ -450,6 +495,12 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
       }
       const warmAddress = warmOutcome.status === 'completed' ? warmOutcome.value : null
       if (warmAddress) {
+        // A resolved address is positive proof that a container with this plugin's fixed name is
+        // running, so the plugin owns it from here whether or not the probe below finds it healthy
+        // and whether or not the reconcile that follows succeeds. Rolling the adoption back drops
+        // the serving state, never the ownership: the container is still running.
+        tilecacheOwned = true
+        tilecacheManager = manager
         const warmStatus = await probeTilecacheHealthStatus(warmAddress, undefined, startupController.signal)
         if (startupController.signal.aborted) {
           await chartsReady
@@ -499,7 +550,9 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
         onVolumeIssue: (event) => {
           if (event.action === 'aborted' && configuredCachePath !== null && event.source === configuredCachePath) {
             requiredVolumeUnavailable = true
-            app.setPluginError(`External tile cache path is unavailable: ${event.source}. Create or mount it on the host, grant the effective container-mapped tilecache user read and write access, and restart Chart Locker.`)
+            // The remedy here is physical (mount the drive), so this is the one message that must
+            // survive to the operator rather than being replaced by the generic unavailable line.
+            reportTilecacheError(`External tile cache path is unavailable: ${event.source}. Create or mount it on the host, grant the effective container-mapped tilecache user read and write access, and restart Chart Locker.`)
           }
         }
       }
@@ -517,7 +570,7 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
         if (requiredVolumeUnavailable) await stopForUnavailableVolume()
         throw ensureOutcome.error
       }
-      tilecacheLaunched = true
+      tilecacheOwned = true
       tilecacheManager = manager
       // Show update state for this container in the Container Manager panel. Re-registering on
       // every start is the supported pattern, and the detached initial check populates the badge
@@ -785,7 +838,7 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
 
     // Clear the tilecache address first so the proxy routes report unavailable, then stop its container.
     resetTilecacheServingState()
-    if (tilecacheLaunched) {
+    if (tilecacheOwned) {
       let manager = tilecacheManager
       if (manager === null) {
         try { manager = getContainerManager() } catch (error) { app.debug('Cannot access the container manager during teardown:', error); manager = null }
@@ -809,7 +862,7 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
           app.debug('Failed to stop tilecache container:', err)
         }
       }
-      tilecacheLaunched = false
+      tilecacheOwned = false
       tilecacheManager = null
     }
     controlToken = null
@@ -971,16 +1024,20 @@ export function createPlugin (app: ServerAPI, deps: PluginDeps = {}): Plugin {
         regionsRoutesHandle = routesHandle
         if (pluginRunning) routesHandle.start()
       }
-      registerCacheInfoRoute(router as unknown as CacheInfoRouter, app, { cachePath: () => configuredCachePath })
-      registerPmtilesServeRoute(readRouter as ServeRouter, registry, () => pmtilesEnabled)
-      registerChartManagementRoutes(
+      const cacheInfoMounted = registerCacheInfoRoute(router as unknown as CacheInfoRouter, app, { cachePath: () => configuredCachePath })
+      registerPmtilesServeRoute(readRouter as ServeRouter, registry, () => pmtilesEnabled === true)
+      const managementMounted = registerChartManagementRoutes(
         router as unknown as ManagementRouter,
         app,
         registry,
         getOverrides(),
         () => discovery?.rescan() ?? Promise.resolve(),
-        () => pmtilesEnabled
+        () => pmtilesEnabled === true
       )
+      // The three /api registrars fail closed on a server that exposes no admin middleware. Record
+      // that so the plugin status says the management API is unavailable instead of reporting a
+      // ready tilecache while every panel request answers 404.
+      managementApiAvailable = routesHandle !== false && cacheInfoMounted && managementMounted
     }
   }
 }

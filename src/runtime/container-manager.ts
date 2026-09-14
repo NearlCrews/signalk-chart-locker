@@ -1,7 +1,16 @@
 /** Resolves the signalk-container manager from the global it publishes, and guards on a detected runtime. */
 
-import type { ServerAPI } from '@signalk/server-api'
 import type { ContainerManager } from '../shared/types.js'
+
+/**
+ * The only surface these helpers need from the server. Narrowed from ServerAPI so a caller can route
+ * the diagnosis somewhere else as well as to the server: setPluginStatus and setPluginError write the
+ * same status slot, so the plugin has to keep an actionable error and re-state it, which it cannot do
+ * when the message never leaves this module.
+ */
+export interface PluginErrorReporter {
+  setPluginError: (message: string) => void
+}
 
 /** The global key signalk-container publishes its manager on, mirrored by BRIDGE_GLOBAL_KEY for the bridge. */
 export const CONTAINER_MANAGER_GLOBAL_KEY = '__signalk_containerManager'
@@ -38,7 +47,7 @@ export function getContainerManager (): ContainerManager | null {
   return manager ?? null
 }
 
-export function requireContainerManager (app: ServerAPI): ContainerManager | null {
+export function requireContainerManager (app: PluginErrorReporter): ContainerManager | null {
   const manager = getContainerManager()
   if (!manager) {
     app.setPluginError('The signalk-container plugin is required but was not found. Install and enable it.')
@@ -48,7 +57,7 @@ export function requireContainerManager (app: ServerAPI): ContainerManager | nul
 }
 
 export async function ensureRuntimeReady (
-  app: ServerAPI,
+  app: PluginErrorReporter,
   manager: ContainerManager,
   options: { timeoutMs?: number, signal?: AbortSignal } = {}
 ): Promise<boolean> {

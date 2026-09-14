@@ -12,10 +12,23 @@ process.once('exit', () => {
   for (const dir of helperTempDirs) rmSync(dir, { recursive: true, force: true })
 })
 
+/** One write to the server's single per-plugin status slot. */
+export interface StatusSlotWrite {
+  type: 'status' | 'error'
+  message: string
+}
+
 /** A ServerAPI stand-in that records the status, error, and debug calls the plugin makes. */
 export interface Recorder {
   status: string[]
   errors: string[]
+  /**
+   * Every status and error write in call order. setPluginStatus and setPluginError write the same
+   * slot on the real server (both reach doSetProviderStatus, which assigns one message), so the
+   * separate arrays above cannot tell you what an operator actually sees. Assert against this, or
+   * against statusSlot, whenever the question is what the plugin is reporting.
+   */
+  slotWrites: StatusSlotWrite[]
   config: { configPath: string }
   /** True once the navigation.position unsubscribe returned by getSelfBus().onValue() is called. */
   positionUnsubCalled: boolean
@@ -40,11 +53,12 @@ export function fakeApp (): Recorder {
   const app: Recorder = {
     status: [],
     errors: [],
+    slotWrites: [],
     config: { configPath: dir },
     get positionUnsubCalled () { return positionUnsubCalls > 0 },
     get positionUnsubCalls () { return positionUnsubCalls },
-    setPluginStatus (m) { app.status.push(m) },
-    setPluginError (m) { app.errors.push(m) },
+    setPluginStatus (m) { app.status.push(m); app.slotWrites.push({ type: 'status', message: m }) },
+    setPluginError (m) { app.errors.push(m); app.slotWrites.push({ type: 'error', message: m }) },
     error () {},
     debug () {},
     getDataDirPath () { return dir },
@@ -54,6 +68,14 @@ export function fakeApp (): Recorder {
     securityStrategy: { addAdminMiddleware () {} }
   }
   return app
+}
+
+/**
+ * The message currently in the server's single status slot, or null when nothing was reported. A free
+ * function rather than a getter, so it still reads the live record through a spread copy of the app.
+ */
+export function statusSlot (app: Pick<Recorder, 'slotWrites'>): StatusSlotWrite | null {
+  return app.slotWrites[app.slotWrites.length - 1] ?? null
 }
 
 /** Records container ensure, recreate, stop, and exec calls made through the fake manager. */

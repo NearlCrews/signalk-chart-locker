@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createPlugin } from '../src/plugin/plugin.js'
-import { fakeApp, fakeManager, setContainerManager, clearGlobals } from './helpers.js'
+import { fakeApp, fakeManager, setContainerManager, clearGlobals, statusSlot } from './helpers.js'
 import { buildPmtilesFixture } from './pmtiles-fixture.js'
 
 interface ChartApp extends ReturnType<typeof fakeApp> {
@@ -60,8 +60,45 @@ test('doStart discovers PMTiles charts when the container manager is unavailable
   try {
     await plugin.start({}, () => {})
     assert.equal(providers.length, 1)
-    assert.ok(app.status.some((status) => status.includes('PMTiles charts ready')))
+    // The server keeps one status slot, so assert what an operator actually ends up seeing. With no
+    // container manager the slot holds the actionable error, and it still says charts are ready.
+    const slot = statusSlot(app)
+    assert.equal(slot?.type, 'error')
+    assert.match(slot!.message, /signalk-container plugin is required but was not found/)
+    assert.match(slot!.message, /PMTiles charts ready/)
   } finally {
+    await plugin.stop()
+    clearGlobals()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a chart start that fails before the container work is not a process-level unhandled rejection', async () => {
+  const root = await configRoot()
+  const { app } = chartApp(root)
+  // The override store rethrows any read failure that is not ENOENT. A directory here reproduces in a
+  // portable way what EACCES does in the field: syncCharts rejects synchronously, well before the
+  // first real await on it, so a stored promise with no handler escapes to the process.
+  await mkdir(join(root, 'pmtiles-overrides.json'), { recursive: true })
+  const manager = fakeManager()
+  // A real signalk-container readiness check does I/O, so startup yields to the macrotask queue before
+  // the first await on the chart work. That is the window in which an unhandled rejection is reported.
+  manager.whenReady = async () => { await new Promise((resolve) => setTimeout(resolve, 5)) }
+  setContainerManager(manager)
+  const escaped: unknown[] = []
+  const record = (reason: unknown): void => { escaped.push(reason) }
+  process.on('unhandledRejection', record)
+  const plugin = createPlugin(app as never)
+  try {
+    await plugin.start({}, () => {})
+    // Two turns of the microtask and macrotask queues: Node reports an unhandled rejection after the
+    // queue drains, so a synchronous assertion here would pass either way.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.deepEqual(escaped, [])
+    // The failure still has to reach the operator, through the startup error rather than the log.
+    assert.ok(app.errors.some((message) => message.includes('Startup failed')))
+  } finally {
+    process.off('unhandledRejection', record)
     await plugin.stop()
     clearGlobals()
     await rm(root, { recursive: true, force: true })

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createPlugin } from '../src/plugin/plugin.js'
 import { PLUGIN_ID, PLUGIN_NAME } from '../src/shared/plugin-id.js'
 import { TILECACHE_CONTAINER_NAME, DEFAULT_TILECACHE_IMAGE, DEFAULT_TILECACHE_TAG } from '../src/runtime/tilecache-container.js'
-import { fakeApp, fakeManager, managerRecord, readinessRouter, updatesRecord, setContainerManager, clearGlobals, type ManagerRecord } from './helpers.js'
+import { fakeApp, fakeManager, managerRecord, readinessRouter, statusSlot, updatesRecord, setContainerManager, clearGlobals, type ManagerRecord } from './helpers.js'
 
 async function waitUntil (predicate: () => boolean, timeoutMs = 1000): Promise<void> {
   const deadline = Date.now() + timeoutMs
@@ -66,7 +66,25 @@ test('start sets a plugin error and does nothing when the container manager is m
   const app = fakeApp()
   const plugin = createPlugin(app as never)
   await plugin.start({}, () => {})
-  assert.equal(app.errors.length, 1)
+  // Restated rather than counted: the error is now written once when it is raised and again by every
+  // later status update, and no other message may reach the slot.
+  assert.ok(app.errors.length > 0)
+  assert.ok(app.errors.every((message) => message.includes('signalk-container plugin is required')))
+  // The server holds one status slot, so the actionable diagnosis has to be the last thing written.
+  const slot = statusSlot(app)
+  assert.equal(slot?.type, 'error')
+  assert.match(slot!.message, /signalk-container plugin is required but was not found\. Install and enable it\./)
+  await plugin.stop()
+})
+
+test('a missing container runtime keeps its remedy in the status slot', async () => {
+  setContainerManager(fakeManager({ runtime: null }))
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  await plugin.start({}, () => {})
+  const slot = statusSlot(app)
+  assert.equal(slot?.type, 'error')
+  assert.match(slot!.message, /No container runtime was detected\. Install Docker or Podman/)
   await plugin.stop()
 })
 
@@ -146,7 +164,11 @@ test('start reports an unavailable configured external cache path without silent
   await plugin.start({ advanced: { cacheVolumeSource: '/media/offline-drive/cache' } }, () => {})
 
   assert.ok(app.errors.some((message) => message.includes('/media/offline-drive/cache')))
-  assert.ok(app.status.some((message) => message.includes('Tilecache container unavailable')))
+  // The remedy is physical, so the generic unavailable line must not replace it in the status slot.
+  const slot = statusSlot(app)
+  assert.equal(slot?.type, 'error')
+  assert.match(slot!.message, /External tile cache path is unavailable: \/media\/offline-drive\/cache/)
+  assert.doesNotMatch(slot!.message, /Tilecache container unavailable/)
   assert.deepEqual(record.stopped, [TILECACHE_CONTAINER_NAME])
   await plugin.stop()
 })
@@ -819,6 +841,111 @@ test('warm adoption is rolled back when the container reconcile fails', async (t
     failEnsure()
     await plugin.stop()
   }
+  // Serving state rolls back, ownership does not: the adopted container is still running under
+  // restart: unless-stopped, so stopping the plugin has to stop it rather than strand it.
+  assert.deepEqual(record.stopped, [TILECACHE_CONTAINER_NAME])
+})
+
+test('a container adopted at startup is stopped even when the plugin never launched one', async (t) => {
+  const record = managerRecord()
+  const manager = fakeManager({ record, address: '127.0.0.1:8080' })
+  const failEnsure = gateEnsureRunning(manager, record, 'fail')
+  setContainerManager(manager)
+  t.mock.method(globalThis, 'fetch', tilecacheFetch(true))
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  const { router, ready } = readinessRouter()
+  plugin.registerWithRouter?.(router as never)
+  const starting = plugin.start({}, () => {})
+  await waitUntil(() => ready() === 200)
+  failEnsure()
+  await starting
+  // The launch path never ran to completion, so nothing was ensured, yet a container by this
+  // plugin's fixed name is demonstrably running: adoption resolved its address and probed it.
+  assert.deepEqual(record.ensured, [])
+  assert.deepEqual(record.stopped, [])
+
+  await plugin.stop()
+
+  assert.deepEqual(record.stopped, [TILECACHE_CONTAINER_NAME])
+})
+
+test('a start aborted during warm adoption still stops the adopted container', async (t) => {
+  const record = managerRecord()
+  const manager = fakeManager({ record, address: '127.0.0.1:8080' })
+  let releaseProbe!: () => void
+  let probeStarted = false
+  const probeGate = new Promise<void>((resolve) => { releaseProbe = resolve })
+  setContainerManager(manager)
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+    const url = String(input)
+    if (url.endsWith('/health')) {
+      probeStarted = true
+      await probeGate
+      return Response.json({ status: 'ok', configured: true })
+    }
+    if (url.endsWith('/config')) return new Response(null, { status: 204 })
+    if (url.endsWith('/cache/regions')) return Response.json({ regions: {} })
+    throw new Error(`unexpected fetch ${url}`)
+  })
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  const starting = plugin.start({}, () => {})
+  // Stop only once doStart is genuinely parked inside the adoption probe, so the abort lands on the
+  // checkpoint that follows it rather than after the whole start has run.
+  await waitUntil(() => probeStarted)
+  const stopping = plugin.stop()
+  releaseProbe()
+  await starting
+  await stopping
+  // doStart returns at the abort checkpoint right after the adoption probe, so the launch path never
+  // ran. The container it found is still this plugin's to stop.
+  assert.deepEqual(record.ensured, [])
+  assert.deepEqual(record.stopped, [TILECACHE_CONTAINER_NAME])
+})
+
+test('the early warm-adoption status does not blame a PMTiles plugin that is not installed', async (t) => {
+  const record = managerRecord()
+  const manager = fakeManager({ record, address: '127.0.0.1:8080' })
+  const releaseEnsure = gateEnsureRunning(manager, record, 'complete')
+  setContainerManager(manager)
+  t.mock.method(globalThis, 'fetch', tilecacheFetch(true))
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  const { router, ready } = readinessRouter()
+  plugin.registerWithRouter?.(router as never)
+  const starting = plugin.start({}, () => {})
+  try {
+    await waitUntil(() => ready() === 200)
+    // Chart discovery has not answered yet at this point. Reporting the third-party conflict here
+    // told operators to disable signalk-pmtiles-plugin on installs that never had it.
+    assert.ok(app.slotWrites.length > 0)
+    for (const write of app.slotWrites) assert.doesNotMatch(write.message, /signalk-pmtiles-plugin is enabled/)
+    assert.ok(app.status.some((status) => status.startsWith('Tilecache at 127.0.0.1:8080;')))
+  } finally {
+    releaseEnsure()
+    await starting
+    await plugin.stop()
+  }
+})
+
+test('an ungatable server reports the unavailable management API instead of a ready status', async () => {
+  const record = managerRecord()
+  setContainerManager(fakeManager({ record, address: null }))
+  const app = fakeApp()
+  // A server that exposes no admin middleware: the three /api registrars fail closed and unmount,
+  // which used to leave the plugin reporting a healthy state while every panel request answered 404.
+  const ungatable = { ...app, securityStrategy: undefined }
+  const plugin = createPlugin(ungatable as never)
+  plugin.registerWithRouter?.({ get () {}, post () {}, delete () {} } as never)
+  await plugin.start({}, () => {})
+  try {
+    const slot = statusSlot(app)
+    assert.equal(slot?.type, 'error')
+    assert.match(slot!.message, /management API could not be admin-gated on this server/)
+  } finally {
+    await plugin.stop()
+  }
 })
 
 test('teardown remains best effort when discovery and region cleanup reject', async () => {
@@ -889,6 +1016,39 @@ test('address resolution and teardown manager calls are independently bounded', 
     await plugin.stop()
     assert.ok(Date.now() - started < 1000)
     assert.deepEqual(record.stopped, [TILECACHE_CONTAINER_NAME])
+  }
+})
+
+test('a teardown stop does not clear an older cleanup and let the next start race it', async (t) => {
+  const record = managerRecord()
+  const manager = fakeManager({ record, address: '127.0.0.1:8080' })
+  let releaseEnsure!: () => void
+  let ensureCalls = 0
+  const ensureGate = new Promise<void>((resolve) => { releaseEnsure = resolve })
+  manager.ensureRunning = async (name, config) => {
+    ensureCalls++
+    await ensureGate
+    record.ensured.push({ name, config })
+  }
+  setContainerManager(manager)
+  t.mock.method(globalThis, 'fetch', tilecacheFetch(true))
+  const app = fakeApp()
+  const plugin = createPlugin(app as never, { managerOperationTimeoutMs: 20 })
+  try {
+    // The launch outlives its own timeout, so a late cleanup is scheduled to stop whatever it
+    // eventually creates, and stays outstanding while the launch itself is still in flight.
+    await plugin.start({}, () => {})
+    assert.equal(ensureCalls, 1)
+    // The teardown stop must be absorbed into that outstanding cleanup rather than replacing it. A
+    // replacement clears the slot as soon as the stop settles, and the start below would then launch
+    // a container the older cleanup goes on to stop.
+    await plugin.stop()
+
+    await plugin.start({}, () => {})
+    assert.equal(ensureCalls, 1, 'the newer start must not launch while a cleanup is outstanding')
+  } finally {
+    releaseEnsure()
+    await plugin.stop()
   }
 })
 
