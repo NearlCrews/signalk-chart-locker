@@ -20,13 +20,15 @@ export interface StatusSlotWrite {
 
 /** A ServerAPI stand-in that records the status, error, and debug calls the plugin makes. */
 export interface Recorder {
-  status: string[]
-  errors: string[]
+  /** Every status message written, in call order. Derived from slotWrites. */
+  readonly status: string[]
+  /** Every error message written, in call order. Derived from slotWrites. */
+  readonly errors: string[]
   /**
    * Every status and error write in call order. setPluginStatus and setPluginError write the same
-   * slot on the real server (both reach doSetProviderStatus, which assigns one message), so the
-   * separate arrays above cannot tell you what an operator actually sees. Assert against this, or
-   * against statusSlot, whenever the question is what the plugin is reporting.
+   * slot on the real server (both reach doSetProviderStatus, which assigns one message), so the two
+   * views above cannot tell you what an operator actually sees. Assert against this, or against
+   * statusSlot, whenever the question is what the plugin is reporting.
    */
   slotWrites: StatusSlotWrite[]
   config: { configPath: string }
@@ -51,14 +53,16 @@ export function fakeApp (): Recorder {
   helperTempDirs.add(dir)
   let positionUnsubCalls = 0
   const app: Recorder = {
-    status: [],
-    errors: [],
     slotWrites: [],
     config: { configPath: dir },
+    // Views over the one record, the same way positionUnsubCalled derives from its own counter, so a
+    // write can never reach one of them and miss another.
+    get status () { return app.slotWrites.filter((write) => write.type === 'status').map((write) => write.message) },
+    get errors () { return app.slotWrites.filter((write) => write.type === 'error').map((write) => write.message) },
     get positionUnsubCalled () { return positionUnsubCalls > 0 },
     get positionUnsubCalls () { return positionUnsubCalls },
-    setPluginStatus (m) { app.status.push(m); app.slotWrites.push({ type: 'status', message: m }) },
-    setPluginError (m) { app.errors.push(m); app.slotWrites.push({ type: 'error', message: m }) },
+    setPluginStatus (m) { app.slotWrites.push({ type: 'status', message: m }) },
+    setPluginError (m) { app.slotWrites.push({ type: 'error', message: m }) },
     error () {},
     debug () {},
     getDataDirPath () { return dir },

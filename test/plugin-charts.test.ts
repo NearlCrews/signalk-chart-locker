@@ -24,13 +24,14 @@ async function configRoot (): Promise<string> {
 function chartApp (configPath: string): { app: ChartApp, providers: unknown[], routes: Record<string, unknown> } {
   const providers: unknown[] = []
   const routes: Record<string, unknown> = {}
-  const app = {
-    ...fakeApp(),
+  // Extended in place rather than spread: the recorder derives its status and error views from the
+  // one slot record it holds, and a spread would freeze those views at the moment of the copy.
+  const app = Object.assign(fakeApp(), {
     config: { configPath },
     getDataDirPath: () => configPath,
     registerResourceProvider: (p: unknown) => providers.push(p),
     get: (path: string, handler: unknown) => { routes[path] = handler }
-  } as ChartApp
+  }) as ChartApp
   return { app, providers, routes }
 }
 

@@ -1,9 +1,10 @@
-import test from 'node:test'
+import test, { type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
+import type { Plugin } from '@signalk/server-api'
 import { createPlugin } from '../src/plugin/plugin.js'
 import { PLUGIN_ID, PLUGIN_NAME } from '../src/shared/plugin-id.js'
 import { TILECACHE_CONTAINER_NAME, DEFAULT_TILECACHE_IMAGE, DEFAULT_TILECACHE_TAG } from '../src/runtime/tilecache-container.js'
-import { fakeApp, fakeManager, managerRecord, readinessRouter, statusSlot, updatesRecord, setContainerManager, clearGlobals, type ManagerRecord } from './helpers.js'
+import { fakeApp, fakeManager, managerRecord, readinessRouter, statusSlot, updatesRecord, setContainerManager, clearGlobals, type ManagerRecord, type Recorder } from './helpers.js'
 
 async function waitUntil (predicate: () => boolean, timeoutMs = 1000): Promise<void> {
   const deadline = Date.now() + timeoutMs
@@ -40,6 +41,45 @@ function gateEnsureRunning (manager: ReturnType<typeof fakeManager>, record: Man
 test.afterEach(() => {
   clearGlobals()
 })
+
+interface LifecycleOptions {
+  /** The address the fake manager resolves for the tilecache container. */
+  address?: string
+  /** Whether the stubbed container reports itself configured. Ignored when `fetch` is supplied. */
+  configured?: boolean
+  /** Replaces the three-endpoint stub, for a test that has to park inside the health probe. */
+  fetch?: (input: string | URL | Request) => Promise<Response>
+  /** Holds ensureRunning until `release` is called, then completes or throws. */
+  gate?: 'complete' | 'fail'
+  /** Extra plugin dependencies, for a test that has to reach inside a registrar. */
+  deps?: Parameters<typeof createPlugin>[1]
+}
+
+/**
+ * The setup every warm-adoption lifecycle test shares: a fake container manager with a resolvable
+ * address, the tilecache fetch stub, and a plugin registered on a readiness router. Without it a
+ * change to the plugin's construction is an edit in each of these tests rather than one here.
+ */
+function lifecyclePlugin (t: TestContext, options: LifecycleOptions = {}): {
+  record: ManagerRecord
+  app: Recorder
+  plugin: Plugin
+  ready: () => number
+  release: () => void
+} {
+  const record = managerRecord()
+  const manager = fakeManager({ record, address: options.address ?? '127.0.0.1:8080' })
+  const release = options.gate === undefined
+    ? (): void => {}
+    : gateEnsureRunning(manager, record, options.gate)
+  setContainerManager(manager)
+  t.mock.method(globalThis, 'fetch', options.fetch ?? tilecacheFetch(options.configured ?? true))
+  const app = fakeApp()
+  const plugin = createPlugin(app as never, options.deps)
+  const { router, ready } = readinessRouter()
+  plugin.registerWithRouter?.(router as never)
+  return { record, app, plugin, ready, release }
+}
 
 test('the plugin exposes id, name, and a schema', () => {
   const plugin = createPlugin(fakeApp() as never)
@@ -766,15 +806,7 @@ test('admin recovery routes retain the container address when configuration fail
 })
 
 test('a running configured tilecache serves tiles while the container reconcile is still pending', async (t) => {
-  const record = managerRecord()
-  const manager = fakeManager({ record, address: '127.0.0.1:8080' })
-  const releaseEnsure = gateEnsureRunning(manager, record, 'complete')
-  setContainerManager(manager)
-  t.mock.method(globalThis, 'fetch', tilecacheFetch(true))
-  const app = fakeApp()
-  const plugin = createPlugin(app as never)
-  const { router, ready } = readinessRouter()
-  plugin.registerWithRouter?.(router as never)
+  const { record, plugin, ready, release: releaseEnsure } = lifecyclePlugin(t, { gate: 'complete' })
   const starting = plugin.start({}, () => {})
   try {
     await waitUntil(() => ready() === 200)
@@ -789,21 +821,17 @@ test('a running configured tilecache serves tiles while the container reconcile 
 })
 
 test('a running but unconfigured tilecache is adopted for admin routes only, not tile serving', async (t) => {
-  const record = managerRecord()
-  const manager = fakeManager({ record, address: '127.0.0.1:8080' })
-  const releaseEnsure = gateEnsureRunning(manager, record, 'complete')
-  setContainerManager(manager)
-  t.mock.method(globalThis, 'fetch', tilecacheFetch(false))
-  const app = fakeApp()
   let adminAddress: (() => string | null) | undefined
-  const plugin = createPlugin(app as never, {
-    registerRegionsRoutes: ((_router: unknown, _app: unknown, getAddress: () => string | null) => {
-      adminAddress = getAddress
-      return { start () {}, async stop () {} }
-    }) as never
+  const { record, plugin, ready, release: releaseEnsure } = lifecyclePlugin(t, {
+    configured: false,
+    gate: 'complete',
+    deps: {
+      registerRegionsRoutes: ((_router: unknown, _app: unknown, getAddress: () => string | null) => {
+        adminAddress = getAddress
+        return { start () {}, async stop () {} }
+      }) as never
+    }
   })
-  const { router, ready } = readinessRouter()
-  plugin.registerWithRouter?.(router as never)
   const starting = plugin.start({}, () => {})
   try {
     await waitUntil(() => adminAddress?.() === '127.0.0.1:8080')
@@ -820,15 +848,7 @@ test('a running but unconfigured tilecache is adopted for admin routes only, not
 })
 
 test('warm adoption is rolled back when the container reconcile fails', async (t) => {
-  const record = managerRecord()
-  const manager = fakeManager({ record, address: '127.0.0.1:8080' })
-  const failEnsure = gateEnsureRunning(manager, record, 'fail')
-  setContainerManager(manager)
-  t.mock.method(globalThis, 'fetch', tilecacheFetch(true))
-  const app = fakeApp()
-  const plugin = createPlugin(app as never)
-  const { router, ready } = readinessRouter()
-  plugin.registerWithRouter?.(router as never)
+  const { record, app, plugin, ready, release: failEnsure } = lifecyclePlugin(t, { gate: 'fail' })
   const starting = plugin.start({}, () => {})
   try {
     await waitUntil(() => ready() === 200)
@@ -847,15 +867,7 @@ test('warm adoption is rolled back when the container reconcile fails', async (t
 })
 
 test('a container adopted at startup is stopped even when the plugin never launched one', async (t) => {
-  const record = managerRecord()
-  const manager = fakeManager({ record, address: '127.0.0.1:8080' })
-  const failEnsure = gateEnsureRunning(manager, record, 'fail')
-  setContainerManager(manager)
-  t.mock.method(globalThis, 'fetch', tilecacheFetch(true))
-  const app = fakeApp()
-  const plugin = createPlugin(app as never)
-  const { router, ready } = readinessRouter()
-  plugin.registerWithRouter?.(router as never)
+  const { record, plugin, ready, release: failEnsure } = lifecyclePlugin(t, { gate: 'fail' })
   const starting = plugin.start({}, () => {})
   await waitUntil(() => ready() === 200)
   failEnsure()
@@ -871,25 +883,22 @@ test('a container adopted at startup is stopped even when the plugin never launc
 })
 
 test('a start aborted during warm adoption still stops the adopted container', async (t) => {
-  const record = managerRecord()
-  const manager = fakeManager({ record, address: '127.0.0.1:8080' })
   let releaseProbe!: () => void
   let probeStarted = false
   const probeGate = new Promise<void>((resolve) => { releaseProbe = resolve })
-  setContainerManager(manager)
-  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
-    const url = String(input)
-    if (url.endsWith('/health')) {
-      probeStarted = true
-      await probeGate
-      return Response.json({ status: 'ok', configured: true })
+  const { record, plugin } = lifecyclePlugin(t, {
+    fetch: async (input) => {
+      const url = String(input)
+      if (url.endsWith('/health')) {
+        probeStarted = true
+        await probeGate
+        return Response.json({ status: 'ok', configured: true })
+      }
+      if (url.endsWith('/config')) return new Response(null, { status: 204 })
+      if (url.endsWith('/cache/regions')) return Response.json({ regions: {} })
+      throw new Error(`unexpected fetch ${url}`)
     }
-    if (url.endsWith('/config')) return new Response(null, { status: 204 })
-    if (url.endsWith('/cache/regions')) return Response.json({ regions: {} })
-    throw new Error(`unexpected fetch ${url}`)
   })
-  const app = fakeApp()
-  const plugin = createPlugin(app as never)
   const starting = plugin.start({}, () => {})
   // Stop only once doStart is genuinely parked inside the adoption probe, so the abort lands on the
   // checkpoint that follows it rather than after the whole start has run.
@@ -905,15 +914,7 @@ test('a start aborted during warm adoption still stops the adopted container', a
 })
 
 test('the early warm-adoption status does not blame a PMTiles plugin that is not installed', async (t) => {
-  const record = managerRecord()
-  const manager = fakeManager({ record, address: '127.0.0.1:8080' })
-  const releaseEnsure = gateEnsureRunning(manager, record, 'complete')
-  setContainerManager(manager)
-  t.mock.method(globalThis, 'fetch', tilecacheFetch(true))
-  const app = fakeApp()
-  const plugin = createPlugin(app as never)
-  const { router, ready } = readinessRouter()
-  plugin.registerWithRouter?.(router as never)
+  const { app, plugin, ready, release: releaseEnsure } = lifecyclePlugin(t, { gate: 'complete' })
   const starting = plugin.start({}, () => {})
   try {
     await waitUntil(() => ready() === 200)
