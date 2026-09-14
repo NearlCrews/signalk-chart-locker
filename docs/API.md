@@ -1,8 +1,10 @@
 # HTTP API
 
-Chart Locker routes are mounted below `/plugins/signalk-chart-locker`. This reference documents the
-maintained plugin-facing API. The Rust container routes are private implementation details and should
-not be exposed outside the Signal K host.
+Most Chart Locker routes are mounted below `/plugins/signalk-chart-locker`. Discovered PMTiles
+charts are additionally published through the Signal K `charts` resource API at the server root,
+which is how chart clients find them. This reference documents the maintained plugin-facing API. The
+Rust container routes are private implementation details and should not be exposed outside the
+Signal K host.
 
 ## Access control
 
@@ -30,11 +32,30 @@ when it sent one, because a shed or shutting-down container is retryable.
 
 | Method | Route | Purpose |
 | ------ | ----- | ------- |
-| GET | `/tiles/ready` | Returns 200 when a container address is available, otherwise 503 |
+| GET | `/tiles/ready` | Returns 200 when the container is addressable, healthy, and configured, otherwise 503 |
 | GET | `/tile/:source/:z/:x/:y` | Streams a raster or vector tile through the cache |
 | GET | `/style/:source` | Returns a cached vector style with its sprite URL rewritten to the same origin |
 | GET | `/style/:source/*` | Streams style tiles, glyphs, and sprites |
 | GET | `/pmtiles/:file` | Serves a discovered PMTiles archive with ETag, conditional request, and byte-range support |
+
+## Chart resources
+
+Discovered PMTiles archives are published as Signal K `charts` resources. Chart Locker registers a v2
+resource provider for `charts` and also serves the v1 read routes directly:
+
+| Method | Route | Purpose |
+| ------ | ----- | ------- |
+| GET | `/signalk/v1/api/resources/charts` | Every valid chart, keyed by identifier |
+| GET | `/signalk/v1/api/resources/charts/:identifier` | One chart, or 404 |
+
+Each resource carries `identifier`, `name`, `description`, `type` (always `tilelayer`), `scale`,
+`minzoom`, `maxzoom`, `format`, `layers`, an optional `bounds`, and `url` and `tilemapUrl` pointing
+at `/plugins/signalk-chart-locker/pmtiles/<file>`. Writes are refused: the provider implements
+`setResource` and `deleteResource` as errors, because chart metadata is edited through
+`POST /api/charts/:id/override`.
+
+Vector (MVT) and raster (PNG, JPEG, WebP, and AVIF) archives are accepted. An archive with any other
+tile type is reported as invalid and is not published.
 
 ## Cache management
 
@@ -199,9 +220,11 @@ false, the private container endpoint and this proxy return 404 without contacti
 
 | Status | Meaning |
 | ------ | ------- |
-| 400 | Malformed input, invalid bounds, unknown sources, a time-dynamic source, invalid estimate data, invalid zooms, or a region estimate above budget |
+| 400 | Malformed request body, or a rejected value: bounds, zooms, sources, estimate data, or a region estimate above the saved-regions budget |
 | 404 | Unknown chart, region, source, or warm job, or reverse geocoding is disabled |
 | 409 | PMTiles management is disabled by a provider conflict, the saved-region limit is reached, a region warm is already active, or deletion could not stop an active warm |
 | 429 | The container warm-job limit is active |
+| 500 | The plugin could not persist saved-region, position-warm, or chart-override state, or a chart rescan failed |
 | 502 | The container request failed, returned an invalid response, rejected the plugin's control token, or reported an outright server fault |
 | 503 | The tile-cache container, its address, or a required internal service is temporarily unavailable, or the container shed the request while busy. Retryable, and carries `Retry-After` when the container supplied one |
+| 507 | The plugin could not persist state because the filesystem is full or over quota (`ENOSPC` or `EDQUOT`). Free disk space and retry |

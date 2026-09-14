@@ -51,12 +51,14 @@ native libraries.
 
 - `src/charts/`: PMTiles discovery, metadata, registry, serving support, and overrides
 - `src/http/`: public proxy routes and admin-gated management routes
-- `src/panel/`: federated React configuration panel, domain components and hooks, and local table
-  styles; shared primitives and themes come from `signalk-nearlcrews-ui`
+- `src/panel/`: federated React configuration panel, its domain hooks, and the slider-plus-number
+  cache cap control; the panel shell, save bar, fields, table, text, and themes come from
+  `signalk-nearlcrews-ui`, pinned exactly and verified by its `snui-check-consumer` in the panel build
 - `src/plugin/`: Signal K lifecycle and container-manager integration
 - `src/runtime/`: persistent state, cache client, position warming, and runtime helpers
 - `container/tilecache/`: SQLite cache, upstream fetcher, styles, warm jobs, health, and HTTP routes
 - `test/`: Node plugin and panel-support tests
+- `tests/browser/`: the Playwright panel spec, run against the production remote
 - `docs/OPERATIONS.md`: operational state, recovery, storage, and diagnostics
 - `docs/API.md`: maintained plugin HTTP API
 - `docs/superpowers/`: historical design records plus the maintained publish runbook
@@ -93,6 +95,13 @@ cargo build --locked --release --bin tilecache --all-features
 cargo audit --file Cargo.lock
 ```
 
+The panel build ends with the shared UI package's `snui-check-consumer`, which asserts the exact pin
+against the installed version, the bundled version stamp, the host share map, and the gzip size
+recorded in `scripts/panel-size-baseline.json`. When a deliberate change grows the remote past the
+recorded allowance, re-measure and update `gzipBytes` in the same change rather than raising the
+percentage. The Node test suite and the browser spec load the package directly through its `default`
+export condition, which needs Node 22.12 or newer; `devEngines` already requires that.
+
 Check panel layout and interaction changes in a real browser using light, dark, and night-red themes.
 Update the three App Store screenshots after material visual changes.
 
@@ -104,3 +113,13 @@ check rejects stale retired modules.
 Publishing to npm and creating a version tag require explicit final owner approval. Follow the
 [publish runbook](docs/superpowers/2026-06-30-publish-runbook.md). The matching versioned container
 image must be public and pullable before the GitHub release triggers npm publication.
+
+## Shared skills
+
+Domain expertise for this repository lives in the shared skills installed for both Codex and Claude Code from `~/src/nearlcrews-agent-toolkit` (Claude Code: `/skill-name`; Codex: `$skill-name`; both hosts also select them from their descriptions). Load these before working here:
+
+- `signalk-development`: Signal K plugin and webapp lifecycle, server APIs, deltas, route security, package metadata, App Store, registry score, plugin CI, and release readiness.
+- `standardize-project-toolchain`: toolchain audits, lint, type, test, and CI alignment, and Node or TypeScript floor decisions.
+- `svelte-maplibre-stack`: its PMTiles section, which also covers the server-side PMTiles usage here.
+
+To delegate, spawn a general-purpose subagent and tell it which of these to load; there are no per-host agent definitions.

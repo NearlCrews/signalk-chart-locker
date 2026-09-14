@@ -16,9 +16,9 @@ container image. Do not publish to npm or create a release tag without explicit 
    `config-panel.png`, `config-panel-dark.png`, and `config-panel-night.png`.
 7. If the panel's comparable production gzip total grew by more than 5 percent, record the baseline
    and current total, and obtain explicit owner approval for the exception.
-8. Publish Binnacle 0.15.4 or newer before Chart Locker 0.6.0. Confirm the README records 0.15.4 as
-   the exact minimum and that Binnacle continues polling by region identifier after either HTTP 202
-   shape.
+8. Confirm the README's stated Binnacle Chartplotter minimum is still correct, and that the
+   published Binnacle at that version still polls by region identifier after either HTTP 202
+   recovery shape.
 
 Any change under `container/` requires a plugin version bump. The plugin pins the image tag to its own
 version, and `signalk-container` recreates the container only when that tag changes.
@@ -62,7 +62,10 @@ cargo install cargo-audit --version 0.22.2 --locked
 cargo audit --file Cargo.lock
 cd ..
 TILECACHE_BIN="$PWD/container/target/release/tilecache" npm run test:node-rust-contract
-docker build --file container/tilecache/Dockerfile --tag chart-locker-tilecache:verify .
+# Podman needs --format docker or the HEALTHCHECK is dropped from the image.
+podman build --format docker --file container/tilecache/Dockerfile --tag chart-locker-tilecache:verify .
+# Docker:
+# docker build --file container/tilecache/Dockerfile --tag chart-locker-tilecache:verify .
 ```
 
 Inspect the release tarball report and checksum under `package/`. The automated package check requires

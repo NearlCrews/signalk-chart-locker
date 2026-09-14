@@ -1,7 +1,6 @@
 # Operations
 
-This guide covers the maintained operational behavior of Chart Locker. Historical implementation
-plans under `docs/superpowers/` are not an operational reference.
+This guide covers the maintained operational behavior of Chart Locker.
 
 ## Runtime model
 
@@ -25,7 +24,9 @@ diagnosing an access failure.
 
 ## Readiness states
 
-The plugin panel and status line distinguish these conditions:
+The configuration panel distinguishes all of these conditions. The plugin status line reports the
+first five; disk pressure and slow upstream appear only in the panel, which reads them from cache
+statistics.
 
 | State | Meaning | Operator action |
 | ----- | ------- | --------------- |
@@ -164,14 +165,15 @@ serving remain available when the tile-cache container or its runtime is unavail
 
 ## Diagnostics
 
-The panel reads these counters from `/api/cache/stats`:
+`/api/cache/stats` reports these counters. The panel shows the first three in its diagnostics line;
+read `configPushes` from the route directly:
 
 | Counter | Meaning |
 | ------- | ------- |
+| `cacheOperationErrors` | Cache read, write, eviction, deletion, or management failures |
 | `diskPressureEvents` | Writes declined because filesystem headroom was insufficient or SQLite reported a full disk |
 | `warmRejections` | Warm requests rejected for an unknown source, invalid geometry, a tile limit, or a job limit |
 | `configPushes` | Configuration pushes accepted by the container |
-| `cacheOperationErrors` | Cache read, write, eviction, deletion, or management failures |
 
 Relevant structured container events include:
 
@@ -183,11 +185,21 @@ Relevant structured container events include:
 - `event=cache_touch_failed`
 - `event=cache_eviction_failed`
 - `event=cache_region_delete_failed`
+- `event=cache_region_promote_failed`
+- `event=region_delete_cancel_timeout`
 - `event=cache_database_recreating`
 - `event=cache_database_recreated`
 
+A failed region delete carries the region it could not remove, as
+`event=cache_region_delete_failed region_id=<id> error=<detail>`. A delete that could not stop the
+region's in-flight warm requests first reports `event=region_delete_cancel_timeout` and returns 409
+without touching the pins.
+
 Plugin configuration-push events are `event=tilecache_config_push_succeeded` and
-`event=tilecache_config_push_failed`.
+`event=tilecache_config_push_failed`. Plugin-side events reach the plugin's debug channel rather
+than the main server log, so enable debug logging for Chart Locker in the Signal K plugin
+configuration before collecting them. Container events are written to standard error and always
+appear in the container log.
 
 Host-side port recovery events are `event=tilecache_host_recovery_started` and
 `event=tilecache_host_recovery_succeeded`. Chart Locker probes the same resolved address used by its
@@ -196,6 +208,7 @@ healthcheck. A healthy container with an unreachable published port is restarted
 resolved again. The plugin restores the source allowlist, cache cap, saved-region budget, position
 warm budget, and scroll retention before reporting recovery. Recovery failures remain in plugin
 status, and another restart is not attempted for five minutes.
+
 Each health response also reports configuration readiness. If Docker or Podman restarts the process
 outside the plugin lifecycle, Chart Locker detects the healthy but unconfigured service and restores
 the same settings without recreating it again.
@@ -237,7 +250,8 @@ conversion succeeds.
 2. Confirm `signalk-container` is enabled and its runtime check passes.
 3. Check container health for `databaseReady: true`.
 4. Check cache statistics for `configured`, `diskPressure`, filesystem free bytes, and diagnostics.
-5. Inspect structured events in the Signal K and container logs.
+5. Inspect structured events in the container log, and in the plugin's debug log once debug logging
+   is enabled for Chart Locker.
 6. Use Refresh for cache statistics or Rescan charts for delayed filesystem events.
 7. Re-download only regions marked `needs-redownload`, `error`, or `capped` when more coverage is
    required.

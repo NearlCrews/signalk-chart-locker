@@ -10,8 +10,10 @@ Use these maintained references for current Chart Locker behavior:
 - [Contributing](../.github/CONTRIBUTING.md): project conventions and required verification
 - [Dependency updates](DEPENDENCY_UPDATES.md): pinned workflow, toolchain, and base-image update policy
 - [Publish runbook](superpowers/2026-06-30-publish-runbook.md): owner-approved release sequence
-- [Third-party notices](../THIRD_PARTY_NOTICES.md): bundled panel attribution and the generated locked
-  Rust runtime license inventory
+- [Third-party notices](../THIRD_PARTY_NOTICES.md): attribution for the packages bundled into the
+  configuration panel
+- [Rust third-party licenses](../RUST_THIRD_PARTY_LICENSES.md): the generated locked license
+  inventory for the tile-cache container
 
 The remaining material under `superpowers/` records earlier designs, plans, reviews, decisions, and
 handoffs. It is preserved for historical context and does not override the maintained references.

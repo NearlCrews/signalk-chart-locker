@@ -18,10 +18,12 @@
 - [ ] `npm test` passes
 - [ ] `npm run typecheck` passes
 - [ ] `npm run lint` passes
+- [ ] `npm run ci:workflows` passes
+- [ ] `npm run deadcode` passes
 - [ ] `npm run build` passes
 - [ ] `npm run check:package` passes
 - [ ] `npm run test:browser:cross` passes for panel changes
-- [ ] `npm audit` passes when dependencies or release files change
+- [ ] `npm audit --omit=dev` passes when dependencies or release files change
 - [ ] For container changes: `cargo test --locked --workspace --all-features`,
   `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
   `cargo build --locked --release --bin tilecache --all-features`,

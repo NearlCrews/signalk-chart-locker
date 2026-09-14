@@ -29,8 +29,9 @@ serves, and any implementation ideas you have.
 2. Install the locked dependencies with `npm ci`.
 3. Make focused commits with clear messages (see below).
 4. Add tests for any new functionality and keep the existing suites green.
-5. Run `npm run lint`, `npm run typecheck`, `npm test`, `npm run test:browser:cross`,
-   `npm run build`, `npm run check:package`, and `npm audit` before pushing.
+5. Run `npm run lint`, `npm run typecheck`, `npm run ci:workflows`, `npm run deadcode`, `npm test`,
+   `npm run test:browser:cross`, `npm run build`, `npm run check:package`, and
+   `npm audit --omit=dev` before pushing. These are the gates CI runs.
 6. For container changes, run `cargo test --locked --workspace --all-features`,
    `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`,
    `cargo build --locked --release --bin tilecache --all-features`, and

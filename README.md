@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/signalk-chart-locker.svg)](https://www.npmjs.com/package/signalk-chart-locker)
 [![npm downloads](https://img.shields.io/npm/dm/signalk-chart-locker.svg)](https://www.npmjs.com/package/signalk-chart-locker)
 [![CI](https://github.com/NearlCrews/signalk-chart-locker/actions/workflows/ci.yml/badge.svg)](https://github.com/NearlCrews/signalk-chart-locker/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue.svg)](#license)
+[![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue.svg)](https://github.com/NearlCrews/signalk-chart-locker#license)
 [![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://www.buymeacoffee.com/nearlcrews)
 
@@ -57,12 +57,13 @@ tiles. A standalone install of Binnacle is unaffected.
   cache, the same tile is never fetched more than once, and the overlays keep rendering offline
   at sea. Learned vector-style metadata is stored with the cache, so warmed styles, glyphs, sprites,
   and tiles remain routable after the container restarts without internet access.
-- **Saved regions.** Draw a box in the Binnacle chartplotter and download the raster overlays
-  covering it into the shared cache before leaving internet coverage. Each region is named
-  automatically by an optional reverse geocode, saved durably, and can be re-downloaded or deleted.
-  A live byte estimate is re-validated on the server against the saved-regions budget before the
-  download starts, so an over-budget region is refused. The region tiles are pinned and never
-  evicted, and a region never stays stuck downloading.
+- **Saved regions.** Draw a box in the Binnacle chartplotter and download the raster overlays and
+  the vector basemap covering it into the shared cache before leaving internet coverage. A region
+  that includes a vector basemap also stores its glyphs and sprites, so the basemap renders offline.
+  Each region is named automatically by an optional reverse geocode, saved durably, and can be
+  re-downloaded or deleted. A live byte estimate is re-validated on the server against the
+  saved-regions budget before the download starts, so an over-budget region is refused. The region
+  tiles are pinned and never evicted, and a region never stays stuck downloading.
 - **Auto-cache around the boat.** An optional throttled fill keeps a small tile radius warm around
   the vessel as it travels outside the saved regions, always LRU-bounded so it never displaces
   the pinned coverage. A radius that crosses the antimeridian is split into two bounded boxes and
@@ -122,10 +123,12 @@ starts the tilecache container automatically when Signal K restarts. No further 
 required for the tile cache or the PMTiles provider.
 
 **Tile cache capacity.** The cache cap slider moves in 4 GiB steps from 4 through 32 GiB. On a new
-configuration, the panel recommends about 80 percent of the free space on the filesystem that will
-hold the cache, floored to the nearest 4 GiB and capped at 32 GiB. When an external cache path is
-configured and available, its filesystem is measured. If it is unavailable, the panel clearly
-reports that free-space guidance has fallen back to the Signal K data filesystem.
+configuration, the panel recommends a share of the free space on the filesystem that will hold the
+cache: about 80 percent when at least 16 GiB is free, and about 50 percent below that so a small disk
+keeps more headroom. The recommendation is floored to the nearest 4 GiB, never drops below 4 GiB, and
+never exceeds 32 GiB. When an external cache path is configured and available, its filesystem is
+measured. If it is unavailable, the panel clearly reports that free-space guidance has fallen back to
+the Signal K data filesystem.
 
 The saved-regions budget is a ceiling on pinned region tiles. Leave it at 0 to use half the cache
 cap. It must not exceed the cache cap. This budget does not remove space from the scroll cache until
@@ -167,10 +170,15 @@ per second, keeps up to 256 successful lookups in memory for 24 hours, and never
 the control is disabled. The cache is cleared when the container restarts. A disabled or unavailable
 geocoder does not block a region download; the chartplotter uses an editable coordinate-derived name.
 
-**PMTiles charts.** Place `.pmtiles` files in the server's charts folder (the same folder
-`signalk-pmtiles-plugin` uses). Chart Locker detects and registers them automatically. If
-`signalk-pmtiles-plugin` is already enabled and serving that folder, Chart Locker surfaces a
-clear status and defers to it.
+**PMTiles charts.** Place `.pmtiles` files in `charts/pmtiles` under the Signal K configuration
+directory, which is `~/.signalk/charts/pmtiles` on a default install. Chart Locker creates that
+directory on first start, then detects and registers archives automatically. To use a different
+directory, set the PMTiles charts directory in the plugin configuration to a path relative to the
+Signal K configuration directory. If `signalk-pmtiles-plugin` is already enabled, Chart Locker
+surfaces a clear status and defers to it.
+
+Vector (MVT) and raster (PNG, JPEG, WebP, and AVIF) PMTiles archives are all supported. An archive
+with any other tile type is reported as invalid in the panel.
 
 The panel reports valid and invalid archives, their latest scan time, and each validation error. Use
 the Rescan charts action after copying files when an operating-system watch event was delayed.
@@ -189,6 +197,7 @@ consecutive failures, it runs the healthcheck inside the container. If the conta
 the published port is unreachable, Chart Locker restarts the container, resolves the port again, and
 restores its source and budget configuration before reporting recovery. Failed recovery attempts are
 rate-limited for five minutes and remain visible in the plugin status.
+
 The health payload also carries configuration readiness, so an automatic Docker or Podman restart
 that leaves the process healthy but clears its in-memory sources triggers the same configuration
 restore without another container restart.
