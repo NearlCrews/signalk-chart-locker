@@ -332,7 +332,6 @@ export async function startDiscovery (deps: DiscoveryDeps): Promise<DiscoveryHan
   await rescanCharts(scopedDeps)
   const debounceMs = deps.debounceMs ?? 300
   let timer: NodeJS.Timeout | undefined
-  let pollTimer: NodeJS.Timeout | undefined
   let pollInFlight: Promise<void> | null = null
   let watcher: FSWatcher | undefined
   let watchedIdentity: string | undefined
@@ -393,16 +392,20 @@ export async function startDiscovery (deps: DiscoveryDeps): Promise<DiscoveryHan
     const identity = await (deps.directoryIdentity ?? directoryIdentity)(deps.chartsDir)
     if (identity !== undefined) installWatcher(identity)
   }
-  if (rootAccepted) {
-    pollTimer = setInterval(requestPoll, deps.pollIntervalMs ?? 5000)
-    pollTimer.unref()
-  }
+  // The poll runs even when the configured root was rejected, because rejection is a configuration
+  // state the operator can fix while the plugin runs: replacing a symlinked path component with a
+  // real directory, for example. poll() re-checks chartsRootIsSafe before it installs the watcher and
+  // rescans on every tick, so a repaired directory starts serving without a plugin restart. Gating
+  // the interval on rootAccepted left a chartplotter with valid charts on disk serving none, with no
+  // watcher and no poll, until someone restarted the plugin.
+  const pollTimer = setInterval(requestPoll, deps.pollIntervalMs ?? 5000)
+  pollTimer.unref()
   return {
     rescan: () => stopped ? Promise.resolve() : rescanCharts(scopedDeps),
     async stop () {
       stopped = true
       if (timer) clearTimeout(timer)
-      if (pollTimer) clearInterval(pollTimer)
+      clearInterval(pollTimer)
       watcher?.close()
       watchedIdentity = undefined
       const activePoll = pollInFlight

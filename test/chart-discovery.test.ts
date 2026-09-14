@@ -1,7 +1,7 @@
 // test/chart-discovery.test.ts
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, rm, rename, stat, symlink } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, rm, rename, stat, symlink, unlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ChartRegistry } from '../src/charts/chart-registry.js'
@@ -304,6 +304,36 @@ test('startDiscovery rejects a charts-root symlink outside its allowed root', { 
   try {
     assert.equal(registry.records().length, 0)
     assert.equal(registry.errors()[0]?.fileName, '<charts-directory>')
+  } finally {
+    await handle.stop()
+    await rm(root, { recursive: true, force: true })
+    await rm(outside, { recursive: true, force: true })
+  }
+})
+
+test('a rejected charts root self-heals once the operator repairs it, with no plugin restart', { skip: process.platform === 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'charts-allowed-'))
+  const outside = await mkdtemp(join(tmpdir(), 'charts-outside-'))
+  const linked = join(root, 'charts')
+  await symlink(outside, linked, 'dir')
+  const registry = new ChartRegistry()
+  const handle = await startDiscovery({ chartsDir: linked, allowedRoot: root, registry, pollIntervalMs: 5 })
+  try {
+    assert.equal(registry.errors()[0]?.fileName, '<charts-directory>')
+
+    // What the operator does after reading that error in the panel: replace the symlinked path with a
+    // real directory and drop the charts in. Gating the self-heal poll on the initial acceptance left
+    // this install serving nothing until someone restarted the plugin.
+    await unlink(linked)
+    await mkdir(linked, { recursive: true })
+    await writeFile(join(linked, 'repaired.pmtiles'), buildPmtilesFixture())
+
+    const deadline = Date.now() + 4000
+    while (registry.records().length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    assert.equal(registry.records().length, 1)
+    assert.deepEqual(registry.errors(), [])
   } finally {
     await handle.stop()
     await rm(root, { recursive: true, force: true })
