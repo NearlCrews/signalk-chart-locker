@@ -1,7 +1,7 @@
 /**
  * Shared fetch scaffolding for every panel HTTP hook. It owns the per-mount abort
  * controller (fired on unmount) and mints a fresh timeout signal per call, so a slow request cannot
- * hang past the panel's timeout and an outstanding request does not run against an unmounted component.
+ * hang past its own budget and an outstanding request does not run against an unmounted component.
  * The returned object is stable across renders, so callers can safely reference it from an effect.
  */
 
@@ -9,7 +9,8 @@ import { useEffect, useRef } from 'react'
 import { PANEL_REQUEST_TIMEOUT_MS } from '../request-timeout.js'
 
 export interface AbortableFetch {
-  request: (url: string, init?: RequestInit) => Promise<Response>
+  /** Issue the request, optionally on a budget other than the default read timeout. */
+  request: (url: string, init?: RequestInit, timeoutMs?: number) => Promise<Response>
   /** Fetch the URL with same-origin credentials, a fresh per-call timeout, and unmount abort. Rejects
    *  with Error 'HTTP <status>' on a non-2xx, and rejects on a transport error or an abort. */
   fetchJson: (url: string, init?: RequestInit) => Promise<unknown>
@@ -36,6 +37,18 @@ export function isTeardownAbort (cause: unknown): boolean {
   return cause instanceof DOMException && cause.name === 'AbortError'
 }
 
+/**
+ * Whether a rejection is an expired request budget rather than a rejection from the server.
+ *
+ * The distinction matters for a write. A read that times out has produced nothing, so the operator
+ * has simply not been told anything. A write that times out has already reached the route and is
+ * still running there, so reporting it as a failure would be wrong: the panel has lost track of the
+ * result, not the server.
+ */
+export function isRequestTimeout (cause: unknown): boolean {
+  return cause instanceof DOMException && cause.name === 'TimeoutError'
+}
+
 export function useAbortableFetch (): AbortableFetch {
   const unmountRef = useRef<AbortController | null>(null)
   const canceledRef = useRef(false)
@@ -54,10 +67,14 @@ export function useAbortableFetch (): AbortableFetch {
   const apiRef = useRef<AbortableFetch | null>(null)
   if (apiRef.current === null) {
     apiRef.current = {
-      async request (url: string, init: RequestInit = {}): Promise<Response> {
+      async request (
+        url: string,
+        init: RequestInit = {},
+        timeoutMs: number = PANEL_REQUEST_TIMEOUT_MS
+      ): Promise<Response> {
         // A fresh timeout per call: a single hook-lifetime timeout would abort every later poll.
         const unmountSignal = unmountRef.current?.signal
-        const signals = [AbortSignal.timeout(PANEL_REQUEST_TIMEOUT_MS)]
+        const signals = [AbortSignal.timeout(timeoutMs)]
         if (unmountSignal !== undefined) signals.push(unmountSignal)
         if (init.signal !== undefined && init.signal !== null) signals.push(init.signal)
         try {

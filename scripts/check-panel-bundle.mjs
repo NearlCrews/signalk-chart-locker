@@ -1,6 +1,15 @@
+/**
+ * Repository-specific checks on the built panel remote.
+ *
+ * The shared UI package's own `snui-check-consumer`, which `build:panel` runs right after this
+ * script, already proves the exact pin, the bundled library's version stamp, the absence of a React
+ * runtime, the host share map (in the remote and in webpack.config.cjs), and the gzip size baseline
+ * in scripts/panel-size-baseline.json. Nothing here repeats those. What remains is what only this
+ * repository knows: which packages its bundle may contain, that the notices file covers them, that
+ * no React module beyond the production JSX runtime was bundled, that Babel emitted the production
+ * JSX runtime, and that the remote's classic container actually renders the configuration form.
+ */
 import { readFileSync, readdirSync } from 'node:fs'
-import { createRequire } from 'node:module'
-import { gzipSync } from 'node:zlib'
 import vm from 'node:vm'
 import React from 'react'
 import ReactDOM from 'react-dom'
@@ -23,43 +32,18 @@ function flattenModules (modules, flattened = []) {
 }
 
 const modules = flattenModules(stats.modules)
-const consumedHostReact = modules.some((module) =>
-  module.moduleType === 'consume-shared-module' &&
-  typeof module.name === 'string' &&
-  module.name.includes('react@^19.2.0') &&
-  module.name.includes('(singleton)')
-)
-if (!consumedHostReact) {
-  throw new Error('webpack stats do not prove that the panel consumes singleton React from the host')
-}
-
-const require = createRequire(import.meta.url)
-const webpackConfig = require('../webpack.config.cjs')
-const federation = webpackConfig.plugins.find((plugin) => plugin?.options?.shared !== undefined)
-const shared = federation?.options?.shared
-const sharedPackageNames = Object.keys(shared ?? {}).sort()
-if (JSON.stringify(sharedPackageNames) !== JSON.stringify(['react', 'react-dom'])) {
-  throw new Error(`Module Federation must share only React and React DOM; found ${sharedPackageNames.join(', ')}`)
-}
-for (const packageName of ['react', 'react-dom']) {
-  const entry = shared?.[packageName]
-  if (entry?.singleton !== true || entry?.import !== false || entry?.requiredVersion !== '^19.2.0') {
-    throw new Error(`${packageName} must be configured as an exact host-provided singleton share`)
-  }
-}
-
 const normalizedModulePaths = modules
   .map((module) => typeof module.nameForCondition === 'string'
     ? module.nameForCondition.replaceAll('\\', '/')
     : null)
   .filter((modulePath) => modulePath !== null)
 
+// React Aria arrives through the shared UI package, whose PanelRoot mounts an overlay portal
+// provider, so it is bundled even though this panel imports no overlay entry point.
 const expectedBundledPackages = new Set([
-  'css-loader',
   'react',
   'react-aria',
-  'signalk-nearlcrews-ui',
-  'style-loader'
+  'signalk-nearlcrews-ui'
 ])
 const bundledPackages = new Set(normalizedModulePaths
   .filter((modulePath) => modulePath.includes('/node_modules/'))
@@ -72,10 +56,6 @@ const unexpectedPackages = [...bundledPackages].filter((name) => !expectedBundle
 const missingPackages = [...expectedBundledPackages].filter((name) => !bundledPackages.has(name))
 if (unexpectedPackages.length > 0 || missingPackages.length > 0) {
   throw new Error(`panel dependency inventory changed; unexpected: ${unexpectedPackages.join(', ') || 'none'}; missing: ${missingPackages.join(', ') || 'none'}`)
-}
-
-if (!normalizedModulePaths.some((modulePath) => modulePath.includes('/node_modules/signalk-nearlcrews-ui/dist/'))) {
-  throw new Error('webpack stats do not prove that signalk-nearlcrews-ui is bundled into the remote')
 }
 
 const allowedReactModules = new Set([
@@ -106,16 +86,6 @@ for (const packageName of [...expectedBundledPackages, 'webpack']) {
   if (!noticedPackages.has(packageName)) {
     throw new Error(`THIRD_PARTY_NOTICES.md has no section for bundled ${packageName}; run npm run licenses`)
   }
-}
-
-// The shared UI package and the React Aria it pulls in through PanelRoot's portal provider dominate
-// the measured bundle, which nearlcrews-ui 0.8.2 puts at ~37.3 KiB. The ceiling keeps a small margin
-// above that. Importing signalk-nearlcrews-ui/data-grid would breach it by a wide margin: that entry
-// point adds react-aria-components and react-stately, measured at 103 KiB.
-const PANEL_GZIP_LIMIT_BYTES = 40 * 1024
-const panelGzipBytes = bundles.reduce((total, { source }) => total + gzipSync(source, { level: 9 }).length, 0)
-if (panelGzipBytes > PANEL_GZIP_LIMIT_BYTES) {
-  throw new Error(`panel bundle is ${panelGzipBytes} gzip bytes; limit is ${PANEL_GZIP_LIMIT_BYTES}`)
 }
 
 for (const { name, source } of bundles) {
@@ -207,14 +177,4 @@ const markup = renderToStaticMarkup(React.createElement(panelModule.default, {
 if (!markup.includes('Cache size cap')) throw new Error('panel runtime check did not render the configuration form')
 if (!markup.includes('data-snui-version')) throw new Error('panel runtime check did not render signalk-nearlcrews-ui')
 
-const combinedSource = bundles.map(({ source }) => source).join('\n')
-for (const marker of [
-  '__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE',
-  'react-dom.production.min'
-]) {
-  if (combinedSource.includes(marker)) {
-    throw new Error(`panel bundle included a React implementation marker: ${marker}`)
-  }
-}
-
-process.stdout.write(`Panel production runtime rendered across ${bundles.length} bundles with stats-verified host React and bundled signalk-nearlcrews-ui (${panelGzipBytes} gzip bytes).\n`)
+process.stdout.write(`Panel production runtime rendered across ${bundles.length} bundles with the expected dependency inventory and production JSX runtime.\n`)

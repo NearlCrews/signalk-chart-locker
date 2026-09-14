@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { PLUGIN_ID } from '../../shared/plugin-id.js'
 import { isRecord } from '../../shared/record.js'
 import { hasControlCharacter } from '../../shared/text.js'
+import { PANEL_MUTATION_TIMEOUT_MS } from '../request-timeout.js'
 import { useAbortableFetch } from './use-abortable-fetch.js'
 
 const API_BASE = `/plugins/${PLUGIN_ID}/api/cache`
@@ -185,10 +186,12 @@ export function useCacheOperations (): {
   const mutate = useCallback(async (path: string, body?: unknown): Promise<void> => {
     setBusy(true)
     try {
+      // The operator's own maintenance budget, not the poller's: clearing a large scroll cache is
+      // unbounded work on the container's side and must not be reported as a failure at 4 seconds.
       await fetcher.request(`${API_BASE}/${path}`, {
         method: 'POST',
         ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
-      })
+      }, PANEL_MUTATION_TIMEOUT_MS)
       // A poll that began before the mutation can only return the old state. Drain it, then require a
       // fresh read before the action finishes so the panel cannot report success with stale controls.
       await refreshAfterActive()

@@ -3,6 +3,12 @@
 const path = require('node:path')
 const webpack = require('webpack')
 const pkg = require('./package.json')
+// The Module Federation share map the shared UI package was verified with: React and React DOM as
+// non-strict host singletons with `import: false`. `hostNotes` on the same entry records why the
+// shares are non-strict (Signal K Admin releases up to at least 2.24.0 register their React share as
+// 19.0.0 while shipping a newer React). The package itself is deliberately absent from the map so it
+// stays bundled with this remote.
+const { shared } = require('signalk-nearlcrews-ui/federation')
 
 // The Signal K admin UI looks up a configurator panel on window[<safeName>],
 // so the Module Federation container name must be the package name with any
@@ -27,21 +33,6 @@ module.exports = {
   },
   module: {
     rules: [
-      {
-        test: /\.module\.css$/,
-        use: [
-          'style-loader',
-          {
-            loader: 'css-loader',
-            options: {
-              modules: {
-                localIdentName: 'cl-[local]-[hash:base64:5]',
-                namedExport: false
-              }
-            }
-          }
-        ]
-      },
       {
         test: /\.tsx?$/,
         loader: 'babel-loader',
@@ -82,26 +73,7 @@ module.exports = {
         // rather than dead code beside the panel.
         './PluginConfigurationPanel': './src/panel/index.tsx'
       },
-      // React and ReactDOM are host-owned singletons. The shared UI package is
-      // intentionally absent from this map so it remains bundled with the
-      // remote while both React packages resolve from Signal K Admin.
-      // strictVersion must stay off: the Admin registers a declared share
-      // version that understates the React it actually ships (Signal K 2.24.0
-      // bundles React 19.2.4 but registers its shares as 19.0.0), so strict
-      // enforcement rejects a compatible host and the panel never mounts
-      // there. A range mismatch stays a console warning instead.
-      shared: {
-        react: {
-          singleton: true,
-          requiredVersion: '^19.2.0',
-          import: false
-        },
-        'react-dom': {
-          singleton: true,
-          requiredVersion: '^19.2.0',
-          import: false
-        }
-      }
+      shared
     })
   ]
 }

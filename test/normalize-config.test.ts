@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { resolveNumberDraft } from 'signalk-nearlcrews-ui'
 import { normalizeConfig } from '../src/panel/normalize-config.js'
-import { commitNumberDraft } from '../src/panel/hooks/use-number-draft.js'
 
 test('normalizeConfig yields the schema defaults for a never-configured plugin', () => {
   const config = normalizeConfig(null)
@@ -66,10 +66,13 @@ test('normalizeConfig defaults a malformed geocoding flag to enabled', () => {
   assert.equal(normalizeConfig({ advanced: { geocodingEnabled: 'false' } }).advanced.geocodingEnabled, true)
 })
 
-test('commitNumberDraft snaps a typed cap to the step and stays within the bounds', () => {
-  const opts = { min: 4, max: 32, integer: true, step: 4 }
-  assert.equal(commitNumberDraft('6', opts), 8)
-  assert.equal(commitNumberDraft('13', opts), 12)
-  assert.equal(commitNumberDraft('99', opts), 32) // snap then clamp to the max
-  assert.equal(commitNumberDraft('', opts), 4) // empty falls back to min
+test('the cache cap number box snaps a typed value to the step and stays within the bounds', () => {
+  // The options RangeField hands the shared number draft. The fallback puts the draft in clamp
+  // mode, which is what makes every keystroke commit an in-range multiple of the step; this pins the
+  // contract the slider and the number box rely on to agree.
+  const options = { min: 4, max: 32, integer: true, step: 4, fallback: 4 }
+  assert.deepEqual(resolveNumberDraft('6', options), { status: 'valid', value: 8 })
+  assert.deepEqual(resolveNumberDraft('13', options), { status: 'valid', value: 12 })
+  assert.deepEqual(resolveNumberDraft('99', options), { status: 'valid', value: 32 }, 'snap then clamp to the max')
+  assert.deepEqual(resolveNumberDraft('', options), { status: 'valid', value: 4 }, 'empty falls back to the minimum')
 })

@@ -8,15 +8,24 @@
  * would misreport the same number.
  */
 
+// The operator's locale decides the grouping separator and the decimal mark, the same way the
+// per-source tile counts beside these figures already do. A hand-rolled toFixed would print a
+// period next to a comma-decimal tile count in the same table row.
+const WHOLE = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 })
+const ONE_DECIMAL = new Intl.NumberFormat(undefined, {
+  minimumFractionDigits: 1,
+  maximumFractionDigits: 1
+})
+
 /**
  * Split a byte count into a rounded value and its unit, for the Metric unit
  * suffix slot. A null count reports as "Unknown" with no unit.
  */
 export function splitBytes (bytes: number | null): { value: string, unit?: string } {
   if (bytes === null) return { value: 'Unknown' }
-  if (bytes < 1024 ** 2) return { value: `${Math.round(bytes / 1024)}`, unit: 'KiB' }
-  if (bytes < 1024 ** 3) return { value: (bytes / 1024 ** 2).toFixed(1), unit: 'MiB' }
-  return { value: (bytes / 1024 ** 3).toFixed(1), unit: 'GiB' }
+  if (bytes < 1024 ** 2) return { value: WHOLE.format(bytes / 1024), unit: 'KiB' }
+  if (bytes < 1024 ** 3) return { value: ONE_DECIMAL.format(bytes / 1024 ** 2), unit: 'MiB' }
+  return { value: ONE_DECIMAL.format(bytes / 1024 ** 3), unit: 'GiB' }
 }
 
 /** Render a byte count as one string, for a cell or a sentence. */

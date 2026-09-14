@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { PLUGIN_ID } from '../../shared/plugin-id.js'
 import { isRecord } from '../../shared/record.js'
 import { hasControlCharacter } from '../../shared/text.js'
+import { PANEL_MUTATION_TIMEOUT_MS } from '../request-timeout.js'
 import { useAbortableFetch } from './use-abortable-fetch.js'
 
 const URL = `/plugins/${PLUGIN_ID}/api/charts`
@@ -58,20 +59,24 @@ export function parseChartDiscovery (raw: unknown): ChartDiscoveryState {
 export function useChartDiscovery (): {
   discovery: ChartDiscoveryState | null
   error: string | null
-  rescan: () => Promise<void>
+  rescan: () => Promise<ChartDiscoveryState | null>
 } {
   const fetcher = useAbortableFetch()
   const [discovery, setDiscovery] = useState<ChartDiscoveryState | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  const load = useCallback(async (): Promise<void> => {
+  // Resolves with the state it committed, or null when the read failed or the panel unmounted, so
+  // a caller can report the result without waiting for the state update to land.
+  const load = useCallback(async (): Promise<ChartDiscoveryState | null> => {
     try {
       const next = parseChartDiscovery(await fetcher.fetchJson(URL))
-      if (fetcher.canceled()) return
+      if (fetcher.canceled()) return null
       setDiscovery(next)
       setError(null)
+      return next
     } catch (cause) {
       if (!fetcher.abandoned(cause)) setError(cause instanceof Error ? cause.message : String(cause))
+      return null
     }
   }, [fetcher])
 
@@ -79,9 +84,11 @@ export function useChartDiscovery (): {
 
   // No busy flag: the panel drives the rescan button's loading and disabled state from its own
   // pendingAction, so a second copy here would only re-render the panel twice per rescan.
-  const rescan = useCallback(async (): Promise<void> => {
-    await fetcher.request(`${URL}/rescan`, { method: 'POST' })
-    await load()
+  const rescan = useCallback(async (): Promise<ChartDiscoveryState | null> => {
+    // A rescan reads and validates every PMTiles header in the charts directory, so it gets the
+    // maintenance budget rather than the poller's.
+    await fetcher.request(`${URL}/rescan`, { method: 'POST' }, PANEL_MUTATION_TIMEOUT_MS)
+    return load()
   }, [fetcher, load])
 
   return { discovery, error, rescan }

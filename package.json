@@ -18,7 +18,7 @@
   "scripts": {
     "build": "npm run build:plugin && npm run build:panel",
     "build:plugin": "node scripts/clean-dist.mjs && tsc",
-    "build:panel": "webpack --config webpack.config.cjs --json .panel-stats.json && node scripts/check-panel-bundle.mjs",
+    "build:panel": "webpack --config webpack.config.cjs --json .panel-stats.json && node scripts/check-panel-bundle.mjs && snui-check-consumer --root . --remote public/remoteEntry.js --baseline scripts/panel-size-baseline.json",
     "watch:panel": "webpack --watch --mode development --config webpack.config.cjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.panel.json && tsc --noEmit -p tsconfig.test.json && tsc --noEmit -p tsconfig.browser.json",
     "lint": "npm run lint:code && npm run lint:docs && npm run spellcheck",

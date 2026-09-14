@@ -57,3 +57,13 @@ export {
 export const REGIONS_BUDGET_MIN_GIB = 0
 /** The panel's default saved-regions budget, in GiB. Mirrors the schema default. */
 export const REGIONS_BUDGET_DEFAULT_GIB = 0
+
+// Scroll-cache retention is container state rather than plugin configuration, so it travels over
+// /api/cache/config instead of the schema. The bounds still belong here beside the other named
+// limits, so the field, the statistics parser, and the panel's own default agree on one set.
+/** Smallest retention the container accepts, in days. 0 disables age-based removal. */
+export const SCROLL_CACHE_TTL_MIN_DAYS = 0
+/** Largest retention the container accepts, in days. */
+export const SCROLL_CACHE_TTL_MAX_DAYS = 365
+/** The retention the container ships with, and what an emptied retention box commits. */
+export const SCROLL_CACHE_TTL_DEFAULT_DAYS = 30

@@ -199,6 +199,20 @@ window.fetch = async (input, init): Promise<Response> => {
     return jsonResponse({ ok: true })
   }
   if (path.endsWith('/api/charts')) {
+    if (parameters.has('no-charts')) {
+      return jsonResponse({ charts: [], invalid: [], discovery: { lastScanAt: null } })
+    }
+    if (parameters.has('invalid-charts')) {
+      // Seven, so the consolidated warning has to cap its list and summarize the remainder.
+      return jsonResponse({
+        charts: [{ id: 'local-one' }],
+        invalid: Array.from({ length: 7 }, (_unused, index) => ({
+          fileName: `broken-${index + 1}.pmtiles`,
+          error: 'unknown tile type'
+        })),
+        discovery: { lastScanAt: 1783953000000 }
+      })
+    }
     return jsonResponse({
       charts: [{ id: 'local-one' }, { id: 'local-two' }],
       invalid: [],

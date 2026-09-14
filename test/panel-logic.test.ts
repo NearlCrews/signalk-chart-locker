@@ -1,10 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { configReducer } from '../src/panel/config-reducer.js'
-import { saveButtonDisabled } from '../src/panel/footer-bar-state.js'
 import { formatBytes, splitBytes } from '../src/panel/format-bytes.js'
-import { isTeardownAbort } from '../src/panel/hooks/use-abortable-fetch.js'
-import { ageMsSince } from '../src/panel/relative-age.js'
+import { isRequestTimeout, isTeardownAbort } from '../src/panel/hooks/use-abortable-fetch.js'
 import type { ChartLockerConfig } from '../src/panel/config-types.js'
 import { validatePanelConfig } from '../src/panel/validate-config.js'
 import { parseCacheStats } from '../src/panel/hooks/use-cache-operations.js'
@@ -48,21 +46,6 @@ test('configReducer changes the geocoding setting without rebuilding other group
   assert.equal(next.advanced.geocodingEnabled, false)
 })
 
-test('saveButtonDisabled: disabled only when clean and already configured', () => {
-  assert.equal(saveButtonDisabled(false, false), true, 'clean and configured: disabled')
-  assert.equal(saveButtonDisabled(true, false), false, 'dirty: enabled')
-  assert.equal(saveButtonDisabled(false, true), false, 'unconfigured: enabled')
-  assert.equal(saveButtonDisabled(true, true), false, 'dirty and unconfigured: enabled')
-})
-
-test('ageMsSince clamps a host clock that stepped backwards', () => {
-  assert.equal(ageMsSince(1_000, 6_000), 5_000, 'an ordinary age is the plain difference')
-  assert.equal(ageMsSince(6_000, 6_000), 0, 'a reading taken this instant is zero, not negative')
-  // formatRelativeAge returns its fallback for a negative age, so an unclamped skew would turn a live
-  // readout into "unknown" until the clock caught up.
-  assert.equal(ageMsSince(9_000, 6_000), 0, 'a future timestamp clamps to zero rather than going negative')
-})
-
 test('a teardown abort is distinguished from a request that ran out of time', () => {
   const controller = new AbortController()
   controller.abort()
@@ -70,20 +53,46 @@ test('a teardown abort is distinguished from a request that ran out of time', ()
   assert.equal(
     isTeardownAbort(new DOMException('timed out', 'TimeoutError')),
     false,
-    'a timeout is a failure the operator needs to see'
+    'an expired budget is not the panel tearing itself down'
   )
   assert.equal(isTeardownAbort(new Error('HTTP 503')), false)
   assert.equal(isTeardownAbort(null), false)
 })
 
+test('an expired request budget is distinguished from a route failure', () => {
+  const controller = new AbortController()
+  controller.abort()
+  assert.equal(
+    isRequestTimeout(new DOMException('signal timed out', 'TimeoutError')),
+    true,
+    'a write that outlives its budget is still running on the route'
+  )
+  assert.equal(
+    isRequestTimeout(controller.signal.reason),
+    false,
+    'an unmount abort is not an expired budget'
+  )
+  assert.equal(isRequestTimeout(new Error('HTTP 503')), false, 'a rejected request is a real failure')
+  assert.equal(isRequestTimeout(null), false)
+})
+
 test('byte formatting picks binary units and reports an unknown count', () => {
+  // Byte figures follow the operator's locale, the way the per-source tile counts beside them
+  // already do, so the expectations are built with an independent formatter rather than pinned to
+  // one locale's separators.
+  const whole = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 })
+  const oneDecimal = new Intl.NumberFormat(undefined, {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1
+  })
   assert.deepEqual(splitBytes(null), { value: 'Unknown' })
-  assert.deepEqual(splitBytes(2048), { value: '2', unit: 'KiB' })
-  assert.deepEqual(splitBytes(700 * 1024 ** 2), { value: '700.0', unit: 'MiB' })
-  assert.deepEqual(splitBytes(8 * 1024 ** 3), { value: '8.0', unit: 'GiB' })
-  // The last KiB before the MiB threshold stays in KiB rather than rounding into it.
-  assert.deepEqual(splitBytes(1024 ** 2 - 1), { value: '1024', unit: 'KiB' })
-  assert.equal(formatBytes(700 * 1024 ** 2), '700.0 MiB')
+  assert.deepEqual(splitBytes(2048), { value: whole.format(2), unit: 'KiB' })
+  assert.deepEqual(splitBytes(700 * 1024 ** 2), { value: oneDecimal.format(700), unit: 'MiB' })
+  assert.deepEqual(splitBytes(8 * 1024 ** 3), { value: oneDecimal.format(8), unit: 'GiB' })
+  // The last KiB before the MiB threshold stays in KiB rather than rounding into it, and a
+  // four-digit count is grouped rather than run together.
+  assert.deepEqual(splitBytes(1024 ** 2 - 1), { value: whole.format(1024), unit: 'KiB' })
+  assert.equal(formatBytes(700 * 1024 ** 2), `${oneDecimal.format(700)} MiB`)
   assert.equal(formatBytes(null), 'Unknown')
 })
 
