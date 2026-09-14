@@ -22,7 +22,7 @@ jobs:
       - run: npm ci
       - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.0
           components: rustfmt, clippy
       - name: rustfmt
         run: cargo fmt --check

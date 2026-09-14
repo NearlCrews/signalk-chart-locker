@@ -234,7 +234,7 @@ routes and validation limits.
 ## Development
 
 This project targets Node.js 22 or newer. The Rust container is a Cargo workspace under
-`container/` and uses the pinned Rust 1.97.1 toolchain. TypeScript compilation uses the 7.0 native
+`container/` and uses the pinned Rust 1.98.0 toolchain. TypeScript compilation uses the 7.0 native
 compiler, while ESLint's type-aware parser uses the TypeScript 6 compiler API compatibility package.
 ESLint remains on the latest 9.x release until neostandard and eslint-plugin-react support ESLint 10.
 
