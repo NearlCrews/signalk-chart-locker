@@ -184,11 +184,19 @@ Relevant structured container events include:
 - `event=cache_write_failed`
 - `event=cache_touch_failed`
 - `event=cache_eviction_failed`
+- `event=cache_clear_unpinned_failed`
+- `event=cache_fill_task_failed`
+- `event=cache_region_bytes_failed`
 - `event=cache_region_delete_failed`
 - `event=cache_region_promote_failed`
 - `event=region_delete_cancel_timeout`
+- `event=scroll_ttl_swept`
+- `event=scroll_ttl_sweep_failed`
 - `event=cache_database_recreating`
 - `event=cache_database_recreated`
+
+Cache work that runs on a blocking thread also reports a `_task_failed` variant of its own event
+when the thread itself does not return, for example `event=cache_region_delete_task_failed`.
 
 A failed region delete carries the region it could not remove, as
 `event=cache_region_delete_failed region_id=<id> error=<detail>`. A delete that could not stop the

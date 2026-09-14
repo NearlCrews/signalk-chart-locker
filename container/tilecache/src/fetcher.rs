@@ -476,7 +476,7 @@ async fn fill_and_await(
     match handle.await {
         Ok(outcome) => outcome,
         Err(e) => {
-            eprintln!("tilecache: fill task failed: {e}");
+            eprintln!("event=cache_fill_task_failed error={e}");
             FetchOutcome::Unavailable
         }
     }

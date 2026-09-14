@@ -18,11 +18,11 @@ pub async fn run_sweep_once(state: &AppState) {
     match tokio::task::spawn_blocking(move || cache.sweep_aged_unpinned(ttl, now)).await {
         Ok(Ok((bytes, rows))) => {
             if rows > 0 {
-                eprintln!("tilecache: scroll TTL swept {rows} tiles, {bytes} bytes");
+                eprintln!("event=scroll_ttl_swept rows={rows} bytes={bytes}");
             }
         }
-        Ok(Err(e)) => eprintln!("tilecache: scroll TTL sweep failed: {e}"),
-        Err(e) => eprintln!("tilecache: scroll TTL sweep task failed: {e}"),
+        Ok(Err(e)) => eprintln!("event=scroll_ttl_sweep_failed error={e}"),
+        Err(e) => eprintln!("event=scroll_ttl_sweep_task_failed error={e}"),
     }
 }
 

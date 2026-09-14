@@ -18,6 +18,7 @@ use axum::{
 use serde::Deserialize;
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::OwnedSemaphorePermit;
 
@@ -537,12 +538,12 @@ async fn clear_scroll(State(st): State<AppState>, headers: HeaderMap) -> Respons
         }
         Ok(Err(e)) => {
             st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
-            eprintln!("tilecache: clear_unpinned failed: {e}");
+            eprintln!("event=cache_clear_unpinned_failed error={e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
         Err(e) => {
             st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
-            eprintln!("tilecache: clear_unpinned task failed: {e}");
+            eprintln!("event=cache_clear_unpinned_task_failed error={e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
@@ -558,12 +559,12 @@ async fn region_bytes_route(State(st): State<AppState>, Path(region_id): Path<St
         Ok(Ok(bytes)) => Json(serde_json::json!({ "bytes": bytes })).into_response(),
         Ok(Err(e)) => {
             st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
-            eprintln!("tilecache: region_bytes failed: {e}");
+            eprintln!("event=cache_region_bytes_failed error={e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
         Err(e) => {
             st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
-            eprintln!("tilecache: region_bytes task failed: {e}");
+            eprintln!("event=cache_region_bytes_task_failed error={e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
@@ -616,9 +617,11 @@ async fn delete_region_route(
     }
     let cache = st.cache.clone();
     let cap = st.live_cap_bytes.load(Ordering::Relaxed);
-    // The blocking task takes ownership of the id, so keep a copy for the failure events: an
-    // operator reading the log needs to know which region did not go away.
-    let region_id_for_log = region_id.clone();
+    // The blocking task takes ownership of the id, and both failure events name the region an
+    // operator needs to know did not go away, so the two share one allocation by reference count
+    // rather than the success path copying a string it then drops untouched.
+    let region_id: Arc<str> = region_id.into();
+    let region_id_for_log = Arc::clone(&region_id);
     // delete_region walks region_tiles and can demote many pinned rows, so run it and the follow-up
     // evict_to on a blocking thread rather than on the async runtime.
     let result = tokio::task::spawn_blocking(move || {
