@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7
 
-# The tilecache image is separate from the offline router image, so internet egress is isolated from
-# the routing engine. Build from the repository root with
+# The tilecache is the workspace's only image: it holds every path that reaches the internet, so
+# upstream egress stays inside one container the plugin starts, configures, and can restart on its
+# own. Build from the repository root with
 # `podman build --format docker --file container/tilecache/Dockerfile .` or the HEALTHCHECK is dropped.
 
 FROM rust:1.97.1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS builder

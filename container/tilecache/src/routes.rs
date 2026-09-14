@@ -616,6 +616,9 @@ async fn delete_region_route(
     }
     let cache = st.cache.clone();
     let cap = st.live_cap_bytes.load(Ordering::Relaxed);
+    // The blocking task takes ownership of the id, so keep a copy for the failure events: an
+    // operator reading the log needs to know which region did not go away.
+    let region_id_for_log = region_id.clone();
     // delete_region walks region_tiles and can demote many pinned rows, so run it and the follow-up
     // evict_to on a blocking thread rather than on the async runtime.
     let result = tokio::task::spawn_blocking(move || {
@@ -630,11 +633,13 @@ async fn delete_region_route(
     match result {
         Ok(Ok(())) => StatusCode::NO_CONTENT,
         Ok(Err(e)) => {
-            eprintln!("tilecache: delete_region failed: {e}");
+            eprintln!("event=cache_region_delete_failed region_id={region_id_for_log} error={e}");
             StatusCode::INTERNAL_SERVER_ERROR
         }
         Err(e) => {
-            eprintln!("tilecache: delete_region task failed: {e}");
+            eprintln!(
+                "event=cache_region_delete_task_failed region_id={region_id_for_log} error={e}"
+            );
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
