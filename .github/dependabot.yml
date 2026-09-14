@@ -81,6 +81,11 @@ updates:
         update-types:
           - minor
           - patch
+    # The reusable plugin-ci workflow is pinned to a signalk-server master commit and bumped by
+    # hand each release. Dependabot resolves it against signalk-server's release tags, and once
+    # proposed a tag whose commit predates the workflow entirely, which broke the run.
+    ignore:
+      - dependency-name: "SignalK/signalk-server/.github/workflows/plugin-ci.yml"
     labels:
       - dependencies
       - github-actions
