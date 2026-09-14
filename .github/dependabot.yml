@@ -9,11 +9,18 @@ updates:
       default-days: 7
     open-pull-requests-limit: 10
     groups:
+      # The shared UI package ships breaking changes in 0.x minors and is pinned exactly, so its
+      # update arrives alone and is reviewed against the library's migration guide.
+      signalk-nearlcrews-ui:
+        patterns:
+          - "signalk-nearlcrews-ui"
       dev-dependencies:
         dependency-type: development
         update-types:
           - minor
           - patch
+        exclude-patterns:
+          - "signalk-nearlcrews-ui"
       production-dependencies:
         dependency-type: production
         update-types:
