@@ -10,6 +10,34 @@ import { PACKAGE_VERSION, THEME_STORAGE_KEY } from 'signalk-nearlcrews-ui'
 const snuiVersion = PACKAGE_VERSION
 const themeStorageKey = THEME_STORAGE_KEY
 
+/** Loads a fixture scenario and waits for the panel to be mounted against it. */
+async function gotoFixture (page: Page, query = ''): Promise<void> {
+  await page.goto(`/${query}`)
+  await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
+}
+
+/**
+ * A control that refuses through aria-disabled rather than the native attribute, so it keeps its
+ * place in the tab order and stays reachable beside the reason it gives.
+ */
+async function expectAriaDisabled (control: Locator): Promise<void> {
+  await expect(control).toBeDisabled()
+  await expect(control).toHaveAttribute('aria-disabled', 'true')
+  await expect(control).not.toHaveAttribute('disabled')
+}
+
+/**
+ * One of the panel's own announcers: present, carrying the role its politeness implies, and off
+ * screen. Invisibility is asserted through the box the browser gives it rather than by naming the
+ * library class that hides it, which is the package's to rename.
+ */
+async function expectPanelAnnouncer (region: Locator, role: 'alert' | 'status'): Promise<void> {
+  await expect(region).toHaveCount(1)
+  await expect(region).toHaveAttribute('role', role)
+  const box = await region.boundingBox()
+  expect(box === null || (box.width <= 1 && box.height <= 1)).toBe(true)
+}
+
 async function expectVisibleFocusRing (control: Locator): Promise<void> {
   const outline = await control.evaluate((element) => {
     const style = getComputedStyle(element)
@@ -54,8 +82,7 @@ async function writeSharedThemeFromAnotherDocument (page: Page, value: string | 
 }
 
 test.beforeEach(async ({ page }) => {
-  await page.goto('/')
-  await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
+  await gotoFixture(page)
   await expect(page.getByRole('heading', { name: 'Plugin status' })).toBeVisible()
   await expect(page.getByRole('group', { name: 'Used' })).toContainText('700.0 MiB')
 })
@@ -92,9 +119,7 @@ test('loads the production remote and completes save and discard flows', async (
   )
   // A save blocked by an invalid field refuses through aria-disabled rather than the native
   // attribute, so Save keeps its place in the tab order and stays reachable beside the reason.
-  await expect(saveButton).toBeDisabled()
-  await expect(saveButton).toHaveAttribute('aria-disabled', 'true')
-  await expect(saveButton).not.toHaveAttribute('disabled')
+  await expectAriaDisabled(saveButton)
 
   await chartsPath.fill('charts/new')
   await expect(chartsPath).not.toHaveAttribute('aria-invalid')
@@ -138,17 +163,14 @@ test('breaks cache usage down per chart source', async ({ page }) => {
 })
 
 test('opens Advanced when a stored setting is invalid', async ({ page }) => {
-  await page.goto('/?invalid-advanced')
-  await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
+  await gotoFixture(page, '?invalid-advanced')
 
   const advanced = page.getByRole('button', { name: 'Advanced', exact: true })
   const imageTag = page.getByRole('textbox', { name: 'Tile cache container image tag' })
   await expect(advanced).toHaveAttribute('aria-expanded', 'true')
   await expect(page.getByText('The container image tag is not a valid OCI tag.')).toBeVisible()
   const blockedSave = page.getByRole('button', { name: 'Save', exact: true })
-  await expect(blockedSave).toBeDisabled()
-  await expect(blockedSave).toHaveAttribute('aria-disabled', 'true')
-  await expect(blockedSave).not.toHaveAttribute('disabled')
+  await expectAriaDisabled(blockedSave)
   await expect(imageTag).toHaveAttribute('aria-invalid', 'true')
 
   // Advanced can be collapsed again over an invalid field, so the section header carries a marker
@@ -173,34 +195,35 @@ test('opens Advanced when a stored setting is invalid', async ({ page }) => {
 test('announces action outcomes and ambient conditions from regions that stay mounted', async ({ page }) => {
   // Each announcer is rendered before it has anything to say, because a screen reader only observes
   // a live region that already existed when its text changed.
-  const alerts = page.locator('[data-panel-announcer="assertive"].snui-visually-hidden')
-  const notices = page.locator('[data-panel-announcer="polite"].snui-visually-hidden')
-  await expect(alerts).toHaveAttribute('role', 'alert')
-  await expect(notices.first()).toHaveAttribute('role', 'status')
-  await expect(alerts).toHaveCount(1)
+  const alerts = page.locator('[data-panel-announcer="assertive"]')
+  const notices = page.locator('[data-panel-announcer="polite"]')
+  await expectPanelAnnouncer(alerts, 'alert')
+  await expectPanelAnnouncer(notices, 'status')
   await expect(alerts).toHaveText('')
-  await expect(notices).toHaveCount(2)
-  for (const index of [0, 1]) await expect(notices.nth(index)).toHaveText('')
+  await expect(notices).toHaveText('')
 
+  // One-shot outcomes speak through the frame's own announcer, which is mounted before the panel
+  // renders, so they land in a polite region that already existed rather than in a fourth one the
+  // panel would have to mount beside the words.
+  const announcements = page.locator('[role="status"]')
   await page.getByRole('button', { name: /Refresh/ }).click()
-  await expect(notices.filter({ hasText: 'Cache statistics refreshed.' })).toHaveCount(1)
+  await expect(announcements.filter({ hasText: 'Cache statistics refreshed.' })).toHaveCount(1)
 
   const retention = page.getByRole('spinbutton', { name: 'Scroll cache retention' })
   await retention.fill('31')
   await page.getByRole('button', { name: 'Apply retention', exact: true }).click()
-  await expect(notices.filter({ hasText: 'Scroll cache retention set to 31 days.' })).toHaveCount(1)
+  await expect(announcements.filter({ hasText: 'Scroll cache retention set to 31 days.' })).toHaveCount(1)
 
   await page.getByRole('button', { name: /Rescan charts/ }).click()
   await expect(
-    notices.filter({ hasText: 'Charts rescanned: 2 valid charts, 0 invalid.' })
+    announcements.filter({ hasText: 'Charts rescanned: 2 valid charts, 0 invalid.' })
   ).toHaveCount(1)
 })
 
 test('reports a failed action through the assertive announcer, not a fresh region', async ({ page }) => {
-  await page.goto('/?fail-retention')
-  await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
-  const alert = page.locator('[data-panel-announcer="assertive"].snui-visually-hidden')
-  await expect(alert).toHaveCount(1)
+  await gotoFixture(page, '?fail-retention')
+  const alert = page.locator('[data-panel-announcer="assertive"]')
+  await expectPanelAnnouncer(alert, 'alert')
   await expect(alert).toHaveText('')
 
   await page.getByRole('spinbutton', { name: 'Scroll cache retention' }).fill('31')
@@ -209,8 +232,7 @@ test('reports a failed action through the assertive announcer, not a fresh regio
 })
 
 test('summarizes unreadable chart files in one capped warning', async ({ page }) => {
-  await page.goto('/?invalid-charts')
-  await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
+  await gotoFixture(page, '?invalid-charts')
 
   const charts = page.getByRole('region', { name: 'Charts' })
   await expect(charts.getByText('7 chart files could not be read')).toBeVisible()
@@ -218,14 +240,14 @@ test('summarizes unreadable chart files in one capped warning', async ({ page })
   await expect(charts.getByText('2 more not listed.')).toBeVisible()
   await expect(charts.getByText('1 valid chart, 7 invalid.')).toBeVisible()
 
-  // The warning is the panel's only nested list, so audit it where it is rendered.
-  const results = await new AxeBuilder({ page }).analyze()
+  // The warning is the panel's only nested list, so audit the region that renders it rather than
+  // repeating the whole-page audit this suite already runs elsewhere.
+  const results = await new AxeBuilder({ page }).include('[data-panel-section="charts"]').analyze()
   expect(results.violations).toEqual([])
 })
 
 test('orients the operator when the charts directory holds nothing', async ({ page }) => {
-  await page.goto('/?no-charts')
-  await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
+  await gotoFixture(page, '?no-charts')
 
   const charts = page.getByRole('region', { name: 'Charts' })
   await expect(charts.getByText('No charts found')).toBeVisible()
@@ -281,8 +303,7 @@ test('uses an inline confirmation for destructive cache clearing', async ({ page
 test('runs cache and chart actions with stable focus, loading state, and repeat suppression', async ({ page }) => {
   test.setTimeout(120_000)
 
-  await page.goto('/?hold-actions')
-  await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
+  await gotoFixture(page, '?hold-actions')
   await expect(page.getByRole('group', { name: 'Used' })).toContainText('700.0 MiB')
 
   const body = page.locator('body')
@@ -371,8 +392,7 @@ test('waits out an older cache poll and refreshes again after a mutation', async
 })
 
 test('reports action failures and keeps the last successful live data visible', async ({ page }) => {
-  await page.goto('/?fail-retention')
-  await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
+  await gotoFixture(page, '?fail-retention')
   await expect(page.getByRole('group', { name: 'Used' })).toContainText('700.0 MiB')
 
   await page.getByRole('spinbutton', { name: 'Scroll cache retention' }).fill('31')
@@ -382,8 +402,7 @@ test('reports action failures and keeps the last successful live data visible', 
 })
 
 test('explains unavailable filesystem guidance and failed live-data refreshes', async ({ page }) => {
-  await page.goto('/?fail-cache-stats')
-  await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
+  await gotoFixture(page, '?fail-cache-stats')
   // The loading line and the failure share one status region, so the failure lands as an update to
   // a region that already existed rather than as a freshly inserted one.
   const unavailableStats = page.getByRole('status').filter({ hasText: 'Statistics unavailable: HTTP 503' })
@@ -401,16 +420,14 @@ test('explains unavailable filesystem guidance and failed live-data refreshes', 
 
   // The panel's announcers carry the same words as the banners, so each visible banner is located
   // inside the section it belongs to rather than by text across the whole document.
-  await page.goto('/?fail-cache-info')
-  await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
+  await gotoFixture(page, '?fail-cache-info')
   await expect(
     page.getByRole('region', { name: 'Tile cache' })
       .getByText('Filesystem-specific cache guidance is unavailable: HTTP 503.')
   ).toBeVisible()
   await expect(page.getByRole('group', { name: 'Used' })).toContainText('700.0 MiB')
 
-  await page.goto('/?fail-cache-refresh')
-  await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
+  await gotoFixture(page, '?fail-cache-refresh')
   await expect(page.getByRole('group', { name: 'Used' })).toContainText('700.0 MiB')
   await page.getByRole('button', { name: /Refresh/ }).click()
   await expect(
@@ -647,8 +664,7 @@ test('every interactive control meets its pointer target floor and is reachable'
 })
 
 test('shows a compatibility message when native CSS scope is unavailable', async ({ page }) => {
-  await page.goto('/?unsupported-css-scope')
-  await expect(page.locator('body')).toHaveAttribute('data-fixture-ready', 'true')
+  await gotoFixture(page, '?unsupported-css-scope')
   await expect(page.locator('[data-browser-compatibility-message]')).toContainText('Browser update required')
   await expect(page.locator('[data-snui-root]')).toHaveCount(0)
 })

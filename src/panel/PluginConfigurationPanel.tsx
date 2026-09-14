@@ -10,11 +10,13 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import {
   Badge,
   Banner,
+  type BannerTone,
   Button,
   Checkbox,
   Cluster,
   Code,
   CollapsibleSection,
+  formatCount,
   InlineConfirm,
   LabeledField,
   LiveRegion,
@@ -28,6 +30,7 @@ import {
   StatusIndicator,
   Text,
   TextInput,
+  usePanelAnnouncer,
   useUnsavedChangesGuard
 } from 'signalk-nearlcrews-ui'
 import {
@@ -67,31 +70,57 @@ import { MAX_IMAGE_TAG_LENGTH } from '../shared/image-tag.js'
 const SAVE_REQUEST_NOTICE_MS = 2500
 
 /**
- * How the save bar names each invalid field. The message has to name the field because an invalid
- * Advanced setting can sit inside a collapsed section, where "fix the highlighted fields" points at
- * nothing the operator can see.
+ * Every field the panel validates: the label its own control shows, and whether it lives under
+ * Advanced.
+ *
+ * The save bar has to name the field, because an invalid Advanced setting can sit inside a collapsed
+ * section where "fix the highlighted fields" points at nothing the operator can see. The control's
+ * label, the save bar's phrasing, and the Advanced badge's count all read this one table, so a
+ * renamed field cannot leave the save bar pointing at a name that is no longer on screen and a new
+ * Advanced field cannot be counted by the save bar but missed by the section header.
  */
-const INVALID_FIELD_LABELS: Readonly<Record<keyof PanelValidation, string>> = {
-  regionsBudget: 'the saved-regions reserved budget',
-  chartsPath: 'the PMTiles charts directory',
-  imageTag: 'the tile cache container image tag under Advanced',
-  cacheVolumeSource: 'the external tile cache drive under Advanced'
+const VALIDATED_FIELDS: Readonly<Record<keyof PanelValidation, { label: string, advanced: boolean }>> = {
+  regionsBudget: { label: 'Saved-regions reserved budget', advanced: false },
+  chartsPath: { label: 'PMTiles charts directory', advanced: false },
+  imageTag: { label: 'Tile cache container image tag', advanced: true },
+  cacheVolumeSource: { label: 'External tile cache drive', advanced: true }
 }
 
 /** The fields to test, in the order the save bar counts them. */
-const VALIDATED_FIELDS = Object.keys(INVALID_FIELD_LABELS) as Array<keyof PanelValidation>
+const VALIDATED_FIELD_KEYS = Object.keys(VALIDATED_FIELDS) as Array<keyof PanelValidation>
+
+/**
+ * How the save bar names one invalid field: its own label, mid-sentence, plus where to find it. A
+ * label that opens with an acronym keeps its capitals, because "pMTiles" names nothing.
+ */
+function describeField (key: keyof PanelValidation): string {
+  const { label, advanced } = VALIDATED_FIELDS[key]
+  const opening = /^[A-Z][a-z]/.test(label) ? `${label.charAt(0).toLowerCase()}${label.slice(1)}` : label
+  return `the ${opening}${advanced ? ' under Advanced' : ''}`
+}
 
 /** How many unreadable chart files the warning lists by name before it summarizes the rest. */
 const MAX_LISTED_INVALID_CHARTS = 5
 
 type PanelAction = 'retention' | 'clear-scroll' | 'refresh-cache' | 'rescan-charts'
 
-/** What each action is doing, for the sentence below. */
-const ACTION_IN_PROGRESS: Readonly<Record<PanelAction, string>> = {
-  retention: 'applying the retention change',
-  'clear-scroll': 'clearing the scroll cache',
-  'refresh-cache': 'reading cache statistics',
-  'rescan-charts': 'rescanning charts'
+/**
+ * How each action reads while it runs: the phrase the still-running sentence uses, and the label the
+ * button that starts it shows. Clearing the scroll cache carries no button label, because its inline
+ * confirmation owns the busy state rather than the trigger beside it.
+ */
+const PANEL_ACTIONS: Readonly<Record<PanelAction, { inProgress: string, loadingLabel?: string }>> = {
+  retention: { inProgress: 'applying the retention change', loadingLabel: 'Applying retention' },
+  'clear-scroll': { inProgress: 'clearing the scroll cache' },
+  'refresh-cache': { inProgress: 'refreshing cache statistics', loadingLabel: 'Refreshing cache statistics' },
+  'rescan-charts': { inProgress: 'rescanning charts', loadingLabel: 'Rescanning charts' }
+}
+
+/** What a button shows while the panel is busy, taken from the action it starts. */
+interface ActionProps {
+  ariaDisabled: boolean
+  loading: boolean
+  loadingLabel: string | undefined
 }
 
 /**
@@ -100,19 +129,58 @@ const ACTION_IN_PROGRESS: Readonly<Record<PanelAction, string>> = {
  * outcome on their own, so this reports the loss of the answer rather than the loss of the work.
  */
 function describeStillRunning (action: PanelAction): string {
-  return `Chart Locker is still ${ACTION_IN_PROGRESS[action]}. The panel will show the result on its next refresh.`
+  return `Chart Locker is still ${PANEL_ACTIONS[action].inProgress}. The panel will show the result on its next refresh.`
+}
+
+/**
+ * A counted noun carrying the operator's own digit grouping. The plural rule is the package's, so
+ * the panel's sentences and the words the library renders beside them cannot disagree; the grouping
+ * is the panel's own, because a chart count reaches four digits.
+ */
+function countOf (count: number, singular: string): string {
+  return formatCount(count, singular).replace(String(count), count.toLocaleString())
 }
 
 /** How the retention outcome is spelled, so 0 does not announce as a duration. */
 function describeRetention (days: number): string {
   if (days === SCROLL_CACHE_TTL_MIN_DAYS) return 'Scroll cache retention disabled. Tiles are no longer removed by age.'
-  return `Scroll cache retention set to ${days} day${days === 1 ? '' : 's'}.`
+  return `Scroll cache retention set to ${formatCount(days, 'day')}.`
 }
 
 /** The chart counts, shared by the visible summary and its announcement. */
 function describeChartCounts (valid: number, invalid: number): string {
-  return `${valid.toLocaleString()} valid chart${valid === 1 ? '' : 's'}, ${invalid.toLocaleString()} invalid`
+  return `${countOf(valid, 'valid chart')}, ${invalid.toLocaleString()} invalid`
 }
+
+/** One condition's words, with the severity it is both shown and announced at. */
+interface PanelMessage {
+  text: string
+  tone: BannerTone
+}
+
+function panelMessage (text: string, tone: BannerTone): PanelMessage {
+  return { text, tone }
+}
+
+interface MessageBannerProps {
+  message: PanelMessage | null
+}
+
+/** One banner, or nothing at all when the condition it reports does not hold. */
+function MessageBanner ({ message }: MessageBannerProps): React.ReactElement | null {
+  return message === null ? null : <Banner tone={message.tone}>{message.text}</Banner>
+}
+
+/** The banners stacked under the status bar, in the order they are shown. */
+const TOP_BANNER_KEYS = [
+  'statusUnavailable',
+  'tileCacheUnconfigured',
+  'diskPressure',
+  'slowUpstream',
+  'actionFailed',
+  'actionStillRunning',
+  'restartOnSave'
+] as const
 
 /**
  * Join the conditions that currently hold into one announcement, each ending in a full stop.
@@ -121,10 +189,10 @@ function describeChartCounts (valid: number, invalid: number): string {
  * while another is already up is never dropped. An unchanged set produces an identical string, which
  * leaves the region's text untouched and announces nothing.
  */
-function announce (...texts: Array<string | null>): string {
-  return texts
-    .filter((text): text is string => text !== null && text !== '')
-    .map((text) => (text.endsWith('.') ? text : `${text}.`))
+function announce (...messages: Array<PanelMessage | null>): string {
+  return messages
+    .filter((message): message is PanelMessage => message !== null && message.text !== '')
+    .map(({ text }) => (text.endsWith('.') ? text : `${text}.`))
     .join(' ')
 }
 
@@ -165,15 +233,22 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
   const cache = useCacheOperations()
   const charts = useChartDiscovery()
   const { state, requestedState, dispatch, markSaveRequested, reseed } = useConfig(configuration)
+  // The frame mounts its announcer before any message exists, which is the arrangement a screen
+  // reader actually observes, and re-announces a repeated message on its own. A one-shot action
+  // outcome therefore speaks through it rather than through a region this panel would have to mount
+  // and blank beside the words it wants read.
+  const announceOutcome = usePanelAnnouncer()
   const [saveRequestedAt, setSaveRequestedAt] = useState<number | null>(null)
   const [ttlDraft, setTtlDraft] = useState(SCROLL_CACHE_TTL_DEFAULT_DAYS)
   const [actionError, setActionError] = useState<string | null>(null)
-  const [actionStillRunning, setActionStillRunning] = useState<string | null>(null)
-  const [actionOutcome, setActionOutcome] = useState('')
+  const [stillRunning, setStillRunning] = useState<string | null>(null)
   const [clearScrollConfirmation, setClearScrollConfirmation] = useState(false)
   const [pendingAction, setPendingAction] = useState<PanelAction | null>(null)
   const pendingActionRef = useRef<PanelAction | null>(null)
   const mountedRef = useRef(true)
+  // Narrowed once for the whole cache section. A null check repeated in every row is a null check
+  // the reader cannot tell has already been made.
+  const stats = cache.stats
 
   useEffect(() => {
     mountedRef.current = true
@@ -186,12 +261,12 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
   // longer matches the server, so the change is theirs to make.
   const lastServerTtlRef = useRef<number | null>(null)
   useEffect(() => {
-    const serverTtl = cache.stats?.ttlDays
+    const serverTtl = stats?.ttlDays
     if (serverTtl === undefined) return
     const lastServerTtl = lastServerTtlRef.current
     lastServerTtlRef.current = serverTtl
     setTtlDraft((current) => (lastServerTtl === null || current === lastServerTtl ? serverTtl : current))
-  }, [cache.stats?.ttlDays])
+  }, [stats?.ttlDays])
 
   // Whether the plugin has received a save request. The admin UI does not re-pass configuration
   // after a request, so this local state flips instead of deriving forever from the mount prop.
@@ -212,17 +287,31 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
   // Save stays enabled before the first request so defaults can enable the plugin.
   const unconfigured = !saveWasRequested
 
-  const validation = useMemo(() => validatePanelConfig(state), [state])
-  const invalidFields = VALIDATED_FIELDS.filter((field) => validation[field] !== null)
-  // One sentence for one state. A single invalid field is named, because the operator has to be
-  // able to find it; several are counted, because listing them all would outgrow the save bar.
-  const invalidMessage = invalidFields.length === 0
-    ? null
-    : invalidFields.length === 1
-      ? `Fix ${INVALID_FIELD_LABELS[invalidFields[0]]} before saving.`
-      : `Fix the ${invalidFields.length} highlighted configuration fields before saving.`
-  const advancedProblems = [validation.imageTag, validation.cacheVolumeSource]
-    .filter((error) => error !== null).length
+  // One pass over the field table per configuration change rather than one per render: the save bar
+  // needs a count and the first failing field, and the Advanced header needs the count of its own.
+  const { validation, invalidMessage, advancedProblems } = useMemo(() => {
+    const fields = validatePanelConfig(state)
+    let invalid = 0
+    let advanced = 0
+    let first: keyof PanelValidation | null = null
+    for (const key of VALIDATED_FIELD_KEYS) {
+      if (fields[key] === null) continue
+      invalid += 1
+      if (first === null) first = key
+      if (VALIDATED_FIELDS[key].advanced) advanced += 1
+    }
+    // One sentence for one state. A single invalid field is named, because the operator has to be
+    // able to find it; several are counted, because listing them all would outgrow the save bar.
+    return {
+      validation: fields,
+      advancedProblems: advanced,
+      invalidMessage: first === null
+        ? null
+        : invalid === 1
+          ? `Fix ${describeField(first)} before saving.`
+          : `Fix the ${invalid} highlighted configuration fields before saving.`
+    }
+  }, [state])
   const advancedInvalid = advancedProblems > 0
   const [advancedOpen, setAdvancedOpen] = useState(advancedInvalid)
 
@@ -230,14 +319,15 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
     if (advancedInvalid) setAdvancedOpen(true)
   }, [advancedInvalid])
 
+  // No dirty guard: state and requestedState are the same object while the panel is clean, so all
+  // three identity comparisons already report no change.
   const restartChanges = useMemo(() => {
-    if (!dirty) return []
     const changes: string[] = []
     if (state.tileCache !== requestedState.tileCache) changes.push('tile-cache limits')
     if (state.charts !== requestedState.charts) changes.push('chart discovery')
     if (state.advanced !== requestedState.advanced) changes.push('container settings')
     return changes
-  }, [dirty, state, requestedState])
+  }, [state, requestedState])
 
   const runAction = useCallback(<T, >(
     key: PanelAction,
@@ -249,11 +339,7 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
     pendingActionRef.current = key
     setPendingAction(key)
     setActionError(null)
-    setActionStillRunning(null)
-    // Clearing the outcome first is what makes a repeated identical result announce again: the
-    // announcer's text goes back to empty between runs, so the next one is a change rather than
-    // the same string written twice.
-    setActionOutcome('')
+    setStillRunning(null)
     Promise.resolve()
       .then(action)
       .then((result) => {
@@ -263,7 +349,7 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
         if (!mountedRef.current) return
         // An expired budget on a write is not a failure: the route has the request and is still
         // working on it. Saying "failed" here would push the operator into running it a second time.
-        if (isRequestTimeout(cause)) setActionStillRunning(describeStillRunning(key))
+        if (isRequestTimeout(cause)) setStillRunning(describeStillRunning(key))
         else setActionError(cause instanceof Error ? cause.message : String(cause))
       })
       .finally(() => {
@@ -271,6 +357,18 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
         if (mountedRef.current) setPendingAction(null)
       })
   }, [])
+
+  /**
+   * The busy-except-me rule, stated once: a control refuses while another action runs, and shows its
+   * own loading state while it is the one running. Both read the key the button was given, so the
+   * key cannot be spelled one way in the guard and another in the loading test.
+   */
+  const actionProps = (key: PanelAction): ActionProps => ({
+    ariaDisabled: pendingAction !== null && pendingAction !== key,
+    loading: pendingAction === key,
+    loadingLabel: PANEL_ACTIONS[key].loadingLabel
+  })
+  const retentionAction = actionProps('retention')
 
   // Warn before a tab close or reload while edits are unsaved.
   useUnsavedChangesGuard(dirty)
@@ -287,12 +385,10 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
     reseed({ ...state, tileCache: { ...state.tileCache, cacheCapGiB: recommendedCapGiB } })
   }, [unconfigured, dirty, recommendedCapGiB, state, reseed])
 
-  // Read the latest state through a ref so the save callback remains identity-stable while editing.
-  const stateRef = useRef(state)
-  stateRef.current = state
   const handleSave = useCallback((): void => {
-    save(stateRef.current)
-    markSaveRequested()
+    // markSaveRequested returns the snapshot it recorded, so the configuration that reaches the
+    // server and the one the dirty check compares against are one value with one owner.
+    save(markSaveRequested())
     setSaveRequestedAt(Date.now())
     setSaveWasRequested(true)
   }, [save, markSaveRequested])
@@ -301,47 +397,97 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
     dispatch({ type: 'discard', config: requestedState })
   }, [dispatch, requestedState])
 
-  const slowUpstream = Object.entries(cache.stats?.upstream ?? {}).some(([, upstream]) => upstream.slow)
+  const slowUpstream = useMemo(
+    () => Object.values(stats?.upstream ?? {}).some((upstream) => upstream.slow),
+    [stats]
+  )
   const invalidChartCount = charts.discovery?.invalid.length ?? 0
 
-  // Every banner's words in one place. A live region only announces text that changes inside a
-  // region that already existed, so the banners below are visual surfaces with no `live` of their
-  // own and the announcers at the top of the panel carry the words. Reading both from this one
-  // table is what keeps the announcement and the banner from drifting apart.
-  const messages = {
+  // Every banner's words and its severity in one place. A live region only announces text that
+  // changes inside a region that already existed, so the banners below are visual surfaces with no
+  // `live` of their own and the announcers at the top of the panel carry the words. Reading both
+  // from this one table is what keeps the announcement and the banner from drifting apart, and
+  // composing it once per change rather than once per render keeps a keystroke in a text field from
+  // rebuilding every sentence on the page.
+  const messages = useMemo(() => ({
     statusUnavailable: error === null
       ? null
-      : `Status unavailable: ${error}. The next poll will retry automatically.`,
-    diskPressure: cache.stats?.diskPressure === true
-      ? 'The cache filesystem is below its reserved free-space headroom. New tiles will be served without being cached.'
+      : panelMessage(`Status unavailable: ${error}. The next poll will retry automatically.`, 'danger'),
+    diskPressure: stats?.diskPressure === true
+      ? panelMessage('The cache filesystem is below its reserved free-space headroom. New tiles will be served without being cached.', 'danger')
       : null,
-    actionFailed: actionError === null ? null : `Panel action failed: ${actionError}`,
-    tileCacheUnconfigured: cache.stats !== null && !cache.stats.configured
-      ? 'Tile cache is running but still waiting for its source and budget configuration.'
+    actionFailed: actionError === null ? null : panelMessage(`Panel action failed: ${actionError}`, 'danger'),
+    actionStillRunning: stillRunning === null ? null : panelMessage(stillRunning, 'info'),
+    tileCacheUnconfigured: stats !== null && !stats.configured
+      ? panelMessage('Tile cache is running but still waiting for its source and budget configuration.', 'warning')
       : null,
     slowUpstream: slowUpstream
-      ? 'One or more chart sources are responding slowly. Chart Locker has increased their request timeout automatically.'
+      ? panelMessage('One or more chart sources are responding slowly. Chart Locker has increased their request timeout automatically.', 'warning')
       : null,
-    cacheRefreshFailed: cache.stats !== null && cache.error !== null
-      ? `Cache statistics refresh failed: ${cache.error}. Showing the last successful result.`
+    cacheRefreshFailed: stats !== null && cache.error !== null
+      ? panelMessage(`Cache statistics refresh failed: ${cache.error}. Showing the last successful result.`, 'warning')
       : null,
     externalCacheFallback: usingFallback
-      ? 'The configured external cache path is unavailable, so free space is measured on the Signal K data filesystem.'
+      ? panelMessage('The configured external cache path is unavailable, so free space is measured on the Signal K data filesystem.', 'warning')
       : null,
     cacheGuidanceUnavailable: cacheInfoError === null
       ? null
-      : `Filesystem-specific cache guidance is unavailable: ${cacheInfoError}. The static cache limits remain available.`,
+      : panelMessage(`Filesystem-specific cache guidance is unavailable: ${cacheInfoError}. The static cache limits remain available.`, 'warning'),
     capExceedsFreeSpace: freeGiB !== null && state.tileCache.cacheCapGiB > freeGiB
-      ? 'Cache cap exceeds free space. Reduce it, or move the cache to an external drive under Advanced.'
+      ? panelMessage('Cache cap exceeds free space. Reduce it, or move the cache to an external drive under Advanced.', 'warning')
       : null,
     invalidCharts: invalidChartCount === 0
       ? null
-      : `${invalidChartCount.toLocaleString()} chart file${invalidChartCount === 1 ? '' : 's'} could not be read`,
-    chartDiscoveryUnavailable: charts.error === null ? null : `Chart discovery unavailable: ${charts.error}`,
+      : panelMessage(`${countOf(invalidChartCount, 'chart file')} could not be read`, 'warning'),
+    chartDiscoveryUnavailable: charts.error === null
+      ? null
+      : panelMessage(`Chart discovery unavailable: ${charts.error}`, 'warning'),
     restartOnSave: restartChanges.length === 0
       ? null
-      : `Saving will reapply ${restartChanges.join(', ')} and may recreate the tile-cache container.`
-  }
+      : panelMessage(`Saving will reapply ${restartChanges.join(', ')} and may recreate the tile-cache container.`, 'info')
+  }), [
+    actionError,
+    cache.error,
+    cacheInfoError,
+    charts.error,
+    error,
+    freeGiB,
+    invalidChartCount,
+    restartChanges,
+    slowUpstream,
+    state.tileCache.cacheCapGiB,
+    stats,
+    stillRunning,
+    usingFallback
+  ])
+
+  const alertAnnouncement = useMemo(
+    () => announce(messages.statusUnavailable, messages.diskPressure, messages.actionFailed),
+    [messages.statusUnavailable, messages.diskPressure, messages.actionFailed]
+  )
+  const noticeAnnouncement = useMemo(() => announce(
+    messages.tileCacheUnconfigured,
+    messages.slowUpstream,
+    messages.cacheRefreshFailed,
+    messages.externalCacheFallback,
+    messages.cacheGuidanceUnavailable,
+    messages.capExceedsFreeSpace,
+    messages.invalidCharts,
+    messages.chartDiscoveryUnavailable,
+    messages.restartOnSave,
+    messages.actionStillRunning
+  ), [
+    messages.tileCacheUnconfigured,
+    messages.slowUpstream,
+    messages.cacheRefreshFailed,
+    messages.externalCacheFallback,
+    messages.cacheGuidanceUnavailable,
+    messages.capExceedsFreeSpace,
+    messages.invalidCharts,
+    messages.chartDiscoveryUnavailable,
+    messages.restartOnSave,
+    messages.actionStillRunning
+  ])
 
   // A scan that found nothing at all gets an orientation instead of a count of zero, because a
   // count of zero says nothing about where the files belong or what a chart file looks like. A
@@ -355,11 +501,9 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
   // the empty state can carry an action without putting a second identical button beside it.
   const rescanButton = (
     <Button
-      ariaDisabled={pendingAction !== null && pendingAction !== 'rescan-charts'}
-      loading={pendingAction === 'rescan-charts'}
-      loadingLabel='Rescanning charts'
+      {...actionProps('rescan-charts')}
       onClick={() => runAction('rescan-charts', charts.rescan, (result) => {
-        setActionOutcome(result === null
+        announceOutcome(result === null
           ? 'Charts rescanned.'
           : `Charts rescanned: ${describeChartCounts(result.valid, result.invalid.length)}.`)
       })}
@@ -371,64 +515,33 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
   return (
     <>
       {/*
-        * Three announcers, mounted for the panel's whole life and empty until they have something
-        * to say. Interrupting conditions are separated from routine ones so a cleared cache never
-        * cuts across a screen reader, and an action's own outcome gets its own region so reporting
-        * it does not re-announce every ambient condition beside it.
+        * Two announcers, mounted for the panel's whole life and empty until they have something to
+        * say. Interrupting conditions are separated from routine ones so a cleared cache never cuts
+        * across a screen reader. A one-shot action outcome goes through the frame's own announcer
+        * instead, so reporting it neither re-announces every ambient condition beside it nor needs
+        * a region of its own.
         *
-        * Each carries data-panel-announcer because the panel shell mounts an announcer of its own,
-        * so role alone no longer tells the panel's regions from the shell's.
+        * Each carries data-panel-announcer because the panel shell mounts announcers of its own, so
+        * role alone no longer tells the panel's regions from the shell's.
         */}
       <LiveRegion
         data-panel-announcer='assertive'
         live='assertive'
-        message={announce(messages.statusUnavailable, messages.diskPressure, messages.actionFailed)}
+        message={alertAnnouncement}
       />
       <LiveRegion
         data-panel-announcer='polite'
         live='polite'
-        message={announce(
-          messages.tileCacheUnconfigured,
-          messages.slowUpstream,
-          messages.cacheRefreshFailed,
-          messages.externalCacheFallback,
-          messages.cacheGuidanceUnavailable,
-          messages.capExceedsFreeSpace,
-          messages.invalidCharts,
-          messages.chartDiscoveryUnavailable,
-          messages.restartOnSave,
-          actionStillRunning
-        )}
+        message={noticeAnnouncement}
       />
-      <LiveRegion data-panel-announcer='polite' live='polite' message={actionOutcome} />
 
       <StatusBar status={status} lastUpdatedMs={lastUpdatedMs} />
 
-      {messages.statusUnavailable !== null
-        ? <Banner tone='danger'>{messages.statusUnavailable}</Banner>
-        : null}
-      {messages.tileCacheUnconfigured !== null
-        ? <Banner tone='warning'>{messages.tileCacheUnconfigured}</Banner>
-        : null}
-      {messages.diskPressure !== null
-        ? <Banner tone='danger'>{messages.diskPressure}</Banner>
-        : null}
-      {messages.slowUpstream !== null
-        ? <Banner tone='warning'>{messages.slowUpstream}</Banner>
-        : null}
-      {messages.actionFailed !== null
-        ? <Banner tone='danger'>{messages.actionFailed}</Banner>
-        : null}
-      {actionStillRunning !== null
-        ? <Banner tone='info'>{actionStillRunning}</Banner>
-        : null}
-      {messages.restartOnSave !== null
-        ? <Banner tone='info'>{messages.restartOnSave}</Banner>
-        : null}
+      {TOP_BANNER_KEYS.map((key) => <MessageBanner key={key} message={messages[key]} />)}
 
       <Section title='Cache operations' description='Live usage, source health, retention, and maintenance controls.'>
         <Stack gap={3}>
-          {cache.stats === null
+          {stats === null
             ? (
               // One live status that stays mounted from the loading line through a failure, so the
               // failure text is announced as an update to a region that already existed.
@@ -438,17 +551,15 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
               )
             : (
               <>
-                {messages.cacheRefreshFailed !== null
-                  ? <Banner tone='warning'>{messages.cacheRefreshFailed}</Banner>
-                  : null}
+                <MessageBanner message={messages.cacheRefreshFailed} />
                 <MetricGrid>
                   {([
-                    ['Used', cache.stats.bytes],
-                    ['Capacity', cache.stats.cap],
-                    ['Saved regions', cache.stats.pinnedBytes],
-                    ['Scroll cache', cache.stats.scrollBytes],
-                    ['Region headroom', cache.stats.regionsFreeBytes],
-                    ['Filesystem free', cache.stats.availableBytes]
+                    ['Used', stats.bytes],
+                    ['Capacity', stats.cap],
+                    ['Saved regions', stats.pinnedBytes],
+                    ['Scroll cache', stats.scrollBytes],
+                    ['Region headroom', stats.regionsFreeBytes],
+                    ['Filesystem free', stats.availableBytes]
                   ] as const).map(([label, bytes]) => {
                     const { value, unit } = splitBytes(bytes)
                     return <Metric key={label} label={label} value={value} unit={unit} />
@@ -479,17 +590,18 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
                 <Cluster gap={3}>
                   <Button
                     variant='primary'
-                    ariaDisabled={ttlDraft === cache.stats.ttlDays || (pendingAction !== null && pendingAction !== 'retention')}
-                    loading={pendingAction === 'retention'}
-                    loadingLabel='Applying retention'
+                    {...retentionAction}
+                    ariaDisabled={retentionAction.ariaDisabled || ttlDraft === stats.ttlDays}
                     onClick={() => runAction(
                       'retention',
                       () => cache.setTtlDays(ttlDraft),
-                      () => setActionOutcome(describeRetention(ttlDraft))
+                      () => announceOutcome(describeRetention(ttlDraft))
                     )}
                   >
                     Apply retention
                   </Button>
+                  {/* Every action, not only its own: this opens a confirmation, and a confirmation
+                      raised over work already running would ask about a state that is moving. */}
                   <Button
                     ariaDisabled={pendingAction !== null}
                     onClick={() => setClearScrollConfirmation(true)}
@@ -497,13 +609,11 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
                     Clear scroll cache
                   </Button>
                   <Button
-                    ariaDisabled={pendingAction !== null && pendingAction !== 'refresh-cache'}
-                    loading={pendingAction === 'refresh-cache'}
-                    loadingLabel='Refreshing cache statistics'
+                    {...actionProps('refresh-cache')}
                     onClick={() => runAction(
                       'refresh-cache',
                       cache.refresh,
-                      () => setActionOutcome('Cache statistics refreshed.')
+                      () => announceOutcome('Cache statistics refreshed.')
                     )}
                   >
                     Refresh
@@ -520,7 +630,7 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
                   onCancel={() => setClearScrollConfirmation(false)}
                   onConfirm={() => runAction('clear-scroll', cache.clearScroll, () => {
                     setClearScrollConfirmation(false)
-                    setActionOutcome('Scroll cache cleared.')
+                    announceOutcome('Scroll cache cleared.')
                   })}
                 />
 
@@ -530,7 +640,7 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
                   * against a few KiB for this markup. The breakdown is bounded at 256 sources and is
                   * usually two or three, so nothing here needs sorting or virtualization.
                   */}
-                {cache.stats.bySource.length > 0
+                {stats.bySource.length > 0
                   ? (
                     <TableScrollRegion aria-label='Cache usage by chart source'>
                       <Table caption='Cache usage by chart source' captionVisibility='hidden'>
@@ -543,8 +653,8 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
                           </tr>
                         </thead>
                         <tbody>
-                          {cache.stats.bySource.map((source) => {
-                            const slow = cache.stats?.upstream[source.source]?.slow === true
+                          {stats.bySource.map((source) => {
+                            const slow = stats.upstream[source.source]?.slow === true
                             return (
                               <tr key={source.source}>
                                 <TableCell><Code>{source.source}</Code></TableCell>
@@ -561,7 +671,7 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
                   : null}
 
                 <Text as='p' tone='muted' size='sm'>
-                  Diagnostics: {cache.stats.diagnostics.cacheOperationErrors} cache errors, {cache.stats.diagnostics.diskPressureEvents} disk-pressure events, and {cache.stats.diagnostics.warmRejections} rejected warm requests.
+                  Diagnostics: {stats.diagnostics.cacheOperationErrors} cache errors, {stats.diagnostics.diskPressureEvents} disk-pressure events, and {stats.diagnostics.warmRejections} rejected warm requests.
                 </Text>
               </>
               )}
@@ -594,17 +704,11 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
           {freeGiB !== null
             ? <Text as='p' tone='muted' size='sm'>{freeGiB.toLocaleString()} GiB free on the {storage === 'external' ? 'external cache filesystem' : 'Signal K data filesystem'}.</Text>
             : null}
-          {messages.externalCacheFallback !== null
-            ? <Banner tone='warning'>{messages.externalCacheFallback}</Banner>
-            : null}
-          {messages.cacheGuidanceUnavailable !== null
-            ? <Banner tone='warning'>{messages.cacheGuidanceUnavailable}</Banner>
-            : null}
-          {messages.capExceedsFreeSpace !== null
-            ? <Banner tone='warning'>{messages.capExceedsFreeSpace}</Banner>
-            : null}
+          <MessageBanner message={messages.externalCacheFallback} />
+          <MessageBanner message={messages.cacheGuidanceUnavailable} />
+          <MessageBanner message={messages.capExceedsFreeSpace} />
           <NumberField
-            label='Saved-regions reserved budget'
+            label={VALIDATED_FIELDS.regionsBudget.label}
             unit='GiB'
             layout='inline'
             min={REGIONS_BUDGET_MIN_GIB}
@@ -625,10 +729,12 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
         </Stack>
       </Section>
 
-      <Section title='Charts' description='Local PMTiles charts served by the plugin.'>
+      {/* Named for the suite that audits this subtree on its own: the section landmark is named by
+          its heading, which no CSS selector can reach. */}
+      <Section data-panel-section='charts' title='Charts' description='Local PMTiles charts served by the plugin.'>
         <Stack gap={3}>
           <LabeledField
-            label='PMTiles charts directory'
+            label={VALIDATED_FIELDS.chartsPath.label}
             layout='inline'
             error={validation.chartsPath}
             errorLive='polite'
@@ -672,7 +778,7 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
             */}
           {messages.invalidCharts !== null && charts.discovery !== null
             ? (
-              <Banner tone='warning' title={messages.invalidCharts}>
+              <Banner tone={messages.invalidCharts.tone} title={messages.invalidCharts.text}>
                 {/* Stack wraps each child in its own list item, so these are bare fragments. */}
                 <Stack as='ul' gap={1}>
                   {charts.discovery.invalid.slice(0, MAX_LISTED_INVALID_CHARTS).map((item) => (
@@ -689,9 +795,7 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
               </Banner>
               )
             : null}
-          {messages.chartDiscoveryUnavailable !== null
-            ? <Banner tone='warning'>{messages.chartDiscoveryUnavailable}</Banner>
-            : null}
+          <MessageBanner message={messages.chartDiscoveryUnavailable} />
           {chartsDirectoryEmpty ? null : <Cluster>{rescanButton}</Cluster>}
         </Stack>
       </Section>
@@ -707,7 +811,7 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
         open={advancedOpen}
         onOpenChange={setAdvancedOpen}
         actions={advancedInvalid
-          ? <Badge tone='danger'>{advancedProblems} problem{advancedProblems === 1 ? '' : 's'}</Badge>
+          ? <Badge tone='danger'>{formatCount(advancedProblems, 'problem')}</Badge>
           : undefined}
       >
         <Stack gap={3}>
@@ -724,7 +828,7 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
             onChange={(event) => dispatch({ type: 'setGeocodingEnabled', enabled: event.currentTarget.checked })}
           />
           <LabeledField
-            label='Tile cache container image tag'
+            label={VALIDATED_FIELDS.imageTag.label}
             layout='inline'
             error={validation.imageTag}
             errorLive='polite'
@@ -744,7 +848,7 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
             />
           </LabeledField>
           <LabeledField
-            label='External tile cache drive'
+            label={VALIDATED_FIELDS.cacheVolumeSource.label}
             layout='inline'
             error={validation.cacheVolumeSource}
             errorLive='polite'

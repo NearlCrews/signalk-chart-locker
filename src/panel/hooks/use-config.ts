@@ -18,8 +18,12 @@ export interface UseConfigResult {
   requestedState: ChartLockerConfig
   /** Dispatches a ConfigAction through the reducer. */
   dispatch: Dispatch<ConfigAction>
-  /** Records the current state as requested, clearing the dirty flag. */
-  markSaveRequested: () => void
+  /**
+   * Records the current state as requested, clearing the dirty flag, and reports the snapshot it
+   * recorded so the caller can save that exact value rather than reading the latest state again
+   * through a mirror of the ref this hook already holds.
+   */
+  markSaveRequested: () => ChartLockerConfig
   /**
    * Replace both the working state and requested snapshot with `config`, so the panel adopts a value
    * (for example a free-space-seeded default) without counting it as an unsaved edit. Both point at
@@ -43,8 +47,10 @@ export function useConfig (configuration: unknown): UseConfigResult {
   // root uses for handleSave) so the ref can never lag a committed state.
   const stateRef = useRef(state)
   stateRef.current = state
-  const markSaveRequested = useCallback((): void => {
-    setRequestedState(stateRef.current)
+  const markSaveRequested = useCallback((): ChartLockerConfig => {
+    const snapshot = stateRef.current
+    setRequestedState(snapshot)
+    return snapshot
   }, [])
 
   // Point the working state and requested snapshot at the same object, so state === requestedState holds

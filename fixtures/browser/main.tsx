@@ -112,6 +112,9 @@ const cacheStats = {
   }
 }
 
+/** The one fixed scan time every chart scenario reports, so an age on screen never moves. */
+const FIXTURE_LAST_SCAN_AT = 1783953000000
+
 const jsonResponse = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), {
   status,
   headers: { 'content-type': 'application/json' }
@@ -210,13 +213,13 @@ window.fetch = async (input, init): Promise<Response> => {
           fileName: `broken-${index + 1}.pmtiles`,
           error: 'unknown tile type'
         })),
-        discovery: { lastScanAt: 1783953000000 }
+        discovery: { lastScanAt: FIXTURE_LAST_SCAN_AT }
       })
     }
     return jsonResponse({
       charts: [{ id: 'local-one' }, { id: 'local-two' }],
       invalid: [],
-      discovery: { lastScanAt: 1783953000000 }
+      discovery: { lastScanAt: FIXTURE_LAST_SCAN_AT }
     })
   }
   if (path.endsWith('/api/charts/rescan') && init?.method === 'POST') {
