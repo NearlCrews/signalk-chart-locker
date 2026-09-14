@@ -22,7 +22,7 @@ permissions:
 
 jobs:
   plugin-ci:
-    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@0495a4a94acd69443d94498b3b431738c2ba4eff # master 2026-09-08
+    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@7d96d5230d40b8fec9b7fd093d134fb22b39fad7 # master 2026-09-08
     with:
       build-command: npm run build
       # Declared rather than inherited: the reusable workflow's defaults can change under us, and
