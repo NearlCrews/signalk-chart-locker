@@ -23,16 +23,26 @@ either package that `npx tsc --version` still reports 7.x and that `npm run lint
 ESLint 10 requires Node.js 20.19 or newer and flat configuration, but compatibility also depends on
 the peer ranges declared by neostandard and eslint-plugin-react. Keep ESLint on the latest 9.x
 release while either peer range excludes 10.x, and re-evaluate the major upgrade when both packages
-support it.
+support it. As of September 2026 both still block it: eslint-plugin-react 7.37.5, which the panel's
+React rules use directly, declares `eslint: ^9.7` at the top of its range and its ESLint 10
+compatibility change (jsx-eslint/eslint-plugin-react pull request 4022, tracked by issue 4027) is
+unreleased, and neostandard's stable 0.13.0 declares `eslint: ^9.0.0` (its ESLint 10 support is
+merged but published only as the 0.14.0 prerelease, neostandard issue 350). Installing ESLint 10
+against either fails npm's peer resolution. Drop this hold when a stable eslint-plugin-react and a
+stable neostandard both admit ESLint 10.
 
 `engines.node` states the runtime floor and nothing else. Derive it from the runtime-facing closure,
-meaning `dependencies` plus `peerDependencies` walked transitively: today that is 73 packages topping
-out at `>=22` from `signalk-chart-sources` and `signalk-container`, so the floor is `>=22.0.0`.
+meaning `dependencies` plus `peerDependencies` walked transitively: today that is 9 packages topping
+out at `>=22` from `signalk-chart-sources`, so the floor is `>=22.0.0`. `signalk-container` is not in
+that closure: it is a companion plugin the operator installs from the App Store, declared in
+`signalk.requires` rather than as a peer dependency, so npm never resolves it under this package.
 
 A development-only package never raises that floor, however high its own `engines` reaches. Babel and
 cspell run at build time and constrain the lowest workflow Node instead. `signalk-nearlcrews-ui`
-constrains neither: webpack parses it and inlines it into the panel bundle, so Node never executes it.
-The toolchain floor belongs in `devEngines`, which is why that field carries the newer range.
+constrains neither: webpack inlines it into the panel bundle, and the only Node that executes it is
+the test suite, which loads its pure utilities through the package's `default` export condition under
+the `devEngines` range. Its own `engines.node` is `>=22`, inside the runtime floor either way. The
+toolchain floor belongs in `devEngines`, which is why that field carries the newer range.
 
 `@types/node` tracks the `engines.node` major so nothing newer than the lowest supported runtime can
 typecheck.

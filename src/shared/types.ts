@@ -88,7 +88,19 @@ export interface ContainerUpdateService {
   }
 }
 
-/** The subset of the signalk-container manager API this plugin uses. */
+/**
+ * The subset of the signalk-container manager API this plugin uses.
+ *
+ * Typed here rather than imported, because signalk-container is a companion Signal K plugin the
+ * operator installs from the App Store, not an npm dependency of this package: the manager arrives on
+ * a global at runtime. package.json names it in signalk.requires, which is where the App Store reads a
+ * companion from. Declaring it as a peerDependency instead would make npm auto-install a second plugin
+ * under this package's tree.
+ *
+ * The shape below is the signalk-container 1.20.0 contract, with `updates` optional because it landed
+ * later. Nothing enforces that floor at install time, so requireContainerManager and every call site
+ * degrade rather than assume a member is present.
+ */
 export interface ContainerManager {
   whenReady(): Promise<void>
   getRuntime(): ContainerRuntimeInfo | null

@@ -75,8 +75,7 @@
     ]
   },
   "peerDependencies": {
-    "@signalk/server-api": ">=2.24.0 <3",
-    "signalk-container": ">=1.20.0"
+    "@signalk/server-api": ">=2.24.0 <3"
   },
   "engines": {
     "node": ">=22.0.0"
@@ -103,47 +102,43 @@
     "@babel/core": "^8.0.1",
     "@babel/preset-react": "^8.0.1",
     "@babel/preset-typescript": "^8.0.1",
-    "@playwright/test": "^1.62.1",
-    "@signalk/server-api": "^2.31.1",
-    "@types/node": "^22.20.1",
-    "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.4",
+    "@playwright/test": "^1.63.0",
+    "@signalk/server-api": "^2.32.0",
+    "@types/node": "^22.20.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@typescript/native": "npm:typescript@^7.0.2",
-    "@vitejs/plugin-react": "^6.1.0",
+    "@vitejs/plugin-react": "^6.1.1",
     "babel-loader": "^10.1.1",
-    "cspell": "10.0.1",
-    "css-loader": "^7.1.4",
+    "cspell": "10.3.0",
     "eslint": "^9.39.5",
     "eslint-plugin-react": "^7.37.5",
-    "knip": "^6.32.2",
+    "knip": "^6.35.1",
     "markdownlint-cli2": "0.23.2",
     "neostandard": "^0.13.0",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8",
-    "signalk-nearlcrews-ui": "0.8.2",
-    "style-loader": "^4.0.0",
-    "tsx": "^4.23.12",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "signalk-nearlcrews-ui": "0.11.1",
+    "tsx": "^4.23.13",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "vite": "^8.2.2",
-    "webpack": "^5.109.2",
-    "webpack-cli": "^7.2.2"
+    "vite": "^8.3.0",
+    "webpack": "^5.110.3",
+    "webpack-cli": "^7.2.3"
   },
   "dependencies": {
     "pmtiles": "^4.5.0",
     "signalk-chart-sources": "^0.7.2"
   },
   "allowScripts": {
-    "cpu-features": false,
-    "esbuild@0.28.2": true,
-    "protobufjs": false,
-    "ssh2": false
+    "esbuild@0.28.2": true
   },
   "overrides": {
-    "minimatch": "10.2.5"
+    "minimatch": "10.2.6",
+    "smol-toml": "1.8.0"
   },
   "directories": {
     "doc": "docs",
-    "test": "tests"
+    "test": "test"
   },
   "type": "commonjs"
 }
