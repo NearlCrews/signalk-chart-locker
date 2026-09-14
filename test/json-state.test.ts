@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { preserveInvalidJsonState, readJsonState, sweepStaleJsonStateTemporaries, writeJsonState } from '../src/runtime/json-state.js'
@@ -78,6 +78,28 @@ test('an abandoned temporary file is reaped once it is older than the threshold'
   const remaining = readdirSync(dir).sort()
   assert.deepEqual(remaining, ['other.json.tmp-4244-3-unrelated', 'state.json', 'state.json.tmp-4243-2-fresh'].sort())
   assert.ok(statSync(path).isFile())
+})
+
+test('the write path reaps abandoned temporaries once per state file', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'json-state-'))
+  const path = join(dir, 'state.json')
+  const abandon = (name: string): string => {
+    const file = join(dir, name)
+    writeFileSync(file, '{}')
+    const old = new Date(Date.now() - 60 * 60_000)
+    utimesSync(file, old, old)
+    return file
+  }
+
+  const leftByAnotherProcess = abandon('state.json.tmp-4242-1-abandoned')
+  writeJsonState(path, { value: 'first' })
+  assert.equal(existsSync(leftByAnotherProcess), false)
+
+  // Only a process killed mid-write leaves one of these, so a later write here would list the whole
+  // data directory to find nothing. The next load of this file sweeps again.
+  const leftAfterTheSweep = abandon('state.json.tmp-4243-2-abandoned')
+  writeJsonState(path, { value: 'second' })
+  assert.equal(existsSync(leftAfterTheSweep), true)
 })
 
 test('a sweep on an unreadable directory is silent rather than failing the write', () => {

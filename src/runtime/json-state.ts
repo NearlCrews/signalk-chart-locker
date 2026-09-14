@@ -17,6 +17,7 @@ import {
   unlinkSync,
   writeFileSync
 } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { basename, dirname, join } from 'node:path'
 
 export interface ReadJsonStateOptions<T> {
@@ -83,6 +84,27 @@ export function sweepStaleJsonStateTemporaries (path: string, maxAgeMs: number =
 }
 
 /**
+ * The sidecar name a durable write stages its next document under.
+ *
+ * The prefix is exactly what `sweepStaleJsonStateTemporaries` matches on, so every writer takes its
+ * name from here. Assembling one independently is how a module ends up leaving debris the reaper
+ * beside it cannot recognize, with no test or type to catch it.
+ */
+export function jsonStateTemporaryPath (path: string): string {
+  return `${path}.tmp-${process.pid}-${Date.now()}-${randomBytes(12).toString('hex')}`
+}
+
+/**
+ * State files this process has already swept.
+ *
+ * The temporaries being reaped can only be left behind by a process that died between openSync and
+ * renameSync, so a sweep after the first one in this process is guaranteed to find nothing. Without
+ * this, every region add, delete, and retention change from the panel would list the whole Signal K
+ * data directory synchronously, and that directory grows over a vessel's life.
+ */
+const sweptStatePaths = new Set<string>()
+
+/**
  * Read and validate the JSON at `path`.
  *
  * A missing file returns `fallback`. Other read failures remain visible to callers. Invalid JSON or an
@@ -124,8 +146,11 @@ export function readJsonState<T> (path: string, fallback: T, options: ReadJsonSt
 export function writeJsonState (path: string, value: unknown): void {
   const parent = dirname(path)
   mkdirSync(parent, { recursive: true })
-  sweepStaleJsonStateTemporaries(path)
-  const temporary = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  if (!sweptStatePaths.has(path)) {
+    sweptStatePaths.add(path)
+    sweepStaleJsonStateTemporaries(path)
+  }
+  const temporary = jsonStateTemporaryPath(path)
   let fd: number | undefined
   try {
     fd = openSync(temporary, 'wx', 0o600)
