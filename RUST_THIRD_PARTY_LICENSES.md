@@ -2115,7 +2115,7 @@ limitations under the License.
 - `openssl-probe` 0.2.1
 - `percent-encoding` 2.3.2
 - `rustls-native-certs` 0.8.4
-- `rustls` 0.23.43
+- `rustls` 0.23.45
 - `signal-hook-registry` 1.4.8
 - `smallvec` 1.15.2
 - `socket2` 0.6.5
