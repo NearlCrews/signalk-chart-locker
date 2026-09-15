@@ -14,8 +14,8 @@ const expectedIntegrity = tarballIntegrity(readFileSync(resolve(packageDirectory
 const packageName = process.env.PACKAGE_NAME
 const packageVersion = process.env.PACKAGE_VERSION
 const expectedGitHead = process.env.EXPECTED_GIT_HEAD
-const attempts = Number.parseInt(process.env.REGISTRY_VERIFY_ATTEMPTS ?? '12', 10)
-const delayMs = Number.parseInt(process.env.REGISTRY_VERIFY_DELAY_MS ?? '5000', 10)
+const attempts = Number.parseInt(process.env.REGISTRY_VERIFY_ATTEMPTS ?? '24', 10)
+const delayMs = Number.parseInt(process.env.REGISTRY_VERIFY_DELAY_MS ?? '10000', 10)
 
 if (!packageName || !packageVersion || !expectedGitHead) {
   throw new Error('PACKAGE_NAME, PACKAGE_VERSION, and EXPECTED_GIT_HEAD are required')
