@@ -456,7 +456,7 @@ test('release metadata uses an explicit release ref type over the workflow branc
   const outputFile = join(outputDirectory, 'github-output')
   writeFileSync(outputFile, '')
   try {
-    const output = execFileSync('node', ['scripts/release-metadata.mjs'], {
+    const output = execFileSync(process.execPath, ['scripts/release-metadata.mjs'], {
       cwd: root,
       encoding: 'utf8',
       env: {

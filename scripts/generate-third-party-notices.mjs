@@ -43,7 +43,7 @@ function bundledPackageNames () {
   const result = spawnSync(
     process.execPath,
     ['node_modules/webpack-cli/bin/cli.js', '--config', 'webpack.config.cjs', '--json'],
-    { cwd: repositoryDir.pathname, encoding: 'utf8', maxBuffer: 512 * 1024 * 1024 }
+    { cwd: repositoryDir, encoding: 'utf8', maxBuffer: 512 * 1024 * 1024 }
   )
   if (result.status !== 0) {
     process.stderr.write(result.stderr ?? '')

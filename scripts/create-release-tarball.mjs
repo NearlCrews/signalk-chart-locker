@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { assertPackageFiles, parsePackReport } from './package-contract.mjs'
+import { assertPackageFiles, npmCommand, parsePackReport } from './package-contract.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const outputDirectory = resolve(root, 'package')
@@ -18,13 +18,13 @@ let output
 try {
   const manifest = JSON.parse(originalPackage)
   writeFileSync(packagePath, `${JSON.stringify({ ...manifest, gitHead }, null, 2)}\n`)
-  output = execFileSync('npm', [
+  output = execFileSync(...npmCommand([
     'pack',
     '--ignore-scripts',
     '--json',
     '--pack-destination',
     outputDirectory
-  ], { cwd: root, encoding: 'utf8' })
+  ]), { cwd: root, encoding: 'utf8' })
 } finally {
   writeFileSync(packagePath, originalPackage)
 }

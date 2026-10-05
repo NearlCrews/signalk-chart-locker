@@ -89,8 +89,8 @@ toolchain, or container base image.
 `RUST_THIRD_PARTY_LICENSES.md` is generated from the locked runtime dependency graph. When a Cargo
 dependency update changes it, run `npm run licenses:rust:update`, review the resulting attribution and
 license texts, then run `npm run licenses:rust:check` before committing both the lockfile and report.
-The script downloads checksum-pinned cargo-about 0.9.1 binaries on Linux x64 and arm64. On another
-platform, set `CARGO_ABOUT` to the absolute path of a cargo-about 0.9.1 binary.
+The script downloads checksum-pinned cargo-about 0.9.2 binaries on Linux x64 and arm64. On another
+platform, set `CARGO_ABOUT` to the absolute path of a cargo-about 0.9.2 binary.
 
 ## Commit messages
 

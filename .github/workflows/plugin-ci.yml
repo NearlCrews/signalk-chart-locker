@@ -22,13 +22,10 @@ permissions:
 
 jobs:
   plugin-ci:
-    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@5612cf40785f8c3be2bc918750caec163e5bd7b1 # master 2026-09-13
+    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@faab2be886fa7d52f926e7d2acf91c910623d4d7 # master 2026-10-04
     with:
       build-command: npm run build
       # Declared rather than inherited: the reusable workflow's defaults can change under us, and
-      # naming them pins the desktop matrix and gives the harness its longer caps.
+      # naming them pins the commands and the desktop Node matrix.
       test-command: npm test
       node-versions: '["22", "24"]'
-      # engines.node is >=22, so the armv7 Cerbo GX lane runs Node 20 and can never install this
-      # package. The lane defaults to enabled; leaving it on would only ever produce noise.
-      enable-armv7: false

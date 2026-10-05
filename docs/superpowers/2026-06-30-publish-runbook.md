@@ -162,7 +162,7 @@ than moving an already-published version tag.
 Before the first release through this workflow, configure npm trusted publishing for package
 `signalk-chart-locker` with organization or user `NearlCrews`, repository `signalk-chart-locker`,
 workflow `publish.yml`, GitHub environment `npm`, and the `npm publish` allowed action. The publish
-job uses GitHub OIDC on a GitHub-hosted runner with Node 24 and npm 12.0.2. Once the first trusted
+job uses GitHub OIDC on a GitHub-hosted runner with Node 24 and npm 12.1.0. Once the first trusted
 publish succeeds, revoke obsolete npm automation tokens and restrict token-based package publishing.
 Do not add an `NPM_TOKEN` fallback. Configure the GitHub `npm` environment with a required release
 maintainer reviewer and a deployment tag policy restricted to `v*`. Manual recovery runs are

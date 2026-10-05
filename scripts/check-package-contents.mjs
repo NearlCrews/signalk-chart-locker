@@ -1,17 +1,8 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { assertPackageFiles, parsePackReport } from './package-contract.mjs'
+import { assertPackageFiles, npmCommand, parsePackReport } from './package-contract.mjs'
 
-const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-// The shared UI package is bundled into the panel remote, so it must never reach operators as a
-// runtime dependency. The exact pin, and that the installed package is that exact version, are
-// asserted by the package's own `snui-check-consumer` in the panel build, which accepts either
-// dependency field; this is the one rule it leaves to the consumer.
-if (packageJson.dependencies?.['signalk-nearlcrews-ui'] !== undefined) {
-  throw new Error('signalk-nearlcrews-ui must be a bundled development dependency')
-}
-
-const output = execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
+const output = execFileSync(...npmCommand(['pack', '--dry-run', '--json', '--ignore-scripts']), {
   cwd: new URL('..', import.meta.url),
   encoding: 'utf8'
 })

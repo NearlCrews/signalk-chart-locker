@@ -1,13 +1,17 @@
 import { readdir, readFile } from 'node:fs/promises'
 
+// Paths resolve from this file, not the working directory, so a direct run from anywhere checks
+// the same tree.
+const repositoryUrl = (path) => new URL(`../${path}`, import.meta.url)
+const readRepositoryFile = (path) => readFile(repositoryUrl(path), 'utf8')
 const workflowDirectory = '.github/workflows'
-const workflowPaths = (await readdir(workflowDirectory))
+const workflowPaths = (await readdir(repositoryUrl(workflowDirectory)))
   .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
   .map((name) => `${workflowDirectory}/${name}`)
 const failures = []
 
 for (const path of workflowPaths) {
-  const workflow = await readFile(path, 'utf8')
+  const workflow = await readRepositoryFile(path)
   for (const [index, line] of workflow.split('\n').entries()) {
     const action = /\buses:\s+([^\s#]+)@([^\s#]+)/.exec(line)
     if (action !== null && !/^[0-9a-f]{40}$/.test(action[2] ?? '')) {
@@ -21,21 +25,21 @@ for (const path of workflowPaths) {
   }
 }
 
-const ci = await readFile('.github/workflows/ci.yml', 'utf8')
+const ci = await readRepositoryFile('.github/workflows/ci.yml')
 for (const expected of ['node: [22, 24]', 'npm run test:browser:cross', 'npm run check:package']) {
   if (!ci.includes(expected)) failures.push(`ci.yml must retain ${expected}.`)
 }
 
-const pluginCi = await readFile('.github/workflows/plugin-ci.yml', 'utf8')
+const pluginCi = await readRepositoryFile('.github/workflows/plugin-ci.yml')
 if (!pluginCi.includes('SignalK/signalk-server/.github/workflows/plugin-ci.yml@')) {
   failures.push('plugin-ci.yml must retain the official Signal K reusable workflow.')
 }
 
-const publish = await readFile('.github/workflows/publish.yml', 'utf8')
+const publish = await readRepositoryFile('.github/workflows/publish.yml')
 for (const expected of [
   'workflow_dispatch:',
   'release_tag:',
-  'npm@12.0.2',
+  'npm@12.1.0',
   'pack:release',
   'verify:release-tarball',
   "if: github.event_name == 'release'",
@@ -50,8 +54,10 @@ for (const expected of [
 ]) {
   if (!publish.includes(expected)) failures.push(`publish.yml must retain ${expected}.`)
 }
+const npmClients = new Set([...publish.matchAll(/npm install --global npm@(\S+)/g)].map((match) => match[1]))
+if (npmClients.size !== 1) failures.push('publish.yml must install the same npm client in every job.')
 
-const containerImage = await readFile('.github/workflows/container-image.yml', 'utf8')
+const containerImage = await readRepositoryFile('.github/workflows/container-image.yml')
 for (const [path, workflow] of [
   ['container-image.yml', containerImage],
   ['publish.yml', publish],
@@ -63,7 +69,17 @@ for (const [path, workflow] of [
   }
 }
 
-const dependabot = await readFile('.github/dependabot.yml', 'utf8')
+// The image workflow signs and attests what the publish workflow verifies, so the two must agree
+// on the Cosign release and on the SPDX version that names the SBOM predicate type.
+const cosignReleases = new Set(
+  [containerImage, publish].flatMap((workflow) => [...workflow.matchAll(/cosign-release:\s+(\S+)/g)].map((match) => match[1]))
+)
+if (cosignReleases.size !== 1) failures.push('container-image.yml and publish.yml must install the same Cosign release.')
+if (!containerImage.includes('spdx-json@2.3=') || !publish.includes('https://spdx.dev/Document/v2.3')) {
+  failures.push('container-image.yml must emit SPDX 2.3 SBOMs and publish.yml must verify that predicate type.')
+}
+
+const dependabot = await readRepositoryFile('.github/dependabot.yml')
 const ecosystemCount = dependabot.match(/package-ecosystem:/g)?.length ?? 0
 const cooldownCount = dependabot.match(/default-days:\s+7/g)?.length ?? 0
 if (ecosystemCount !== cooldownCount) {
@@ -77,7 +93,7 @@ if (
   failures.push('dependabot.yml must keep @types/node on the oldest supported Node major.')
 }
 
-const workflowSecurity = await readFile('.github/workflows/workflow-security.yml', 'utf8')
+const workflowSecurity = await readRepositoryFile('.github/workflows/workflow-security.yml')
 for (const expected of ['actionlint@v1.7.12', 'zizmor-action@']) {
   if (!workflowSecurity.includes(expected)) failures.push(`workflow-security.yml must include ${expected}.`)
 }

@@ -1,6 +1,6 @@
 # Rust Third-Party Licenses
 
-This report is generated from `container/Cargo.lock` by cargo-about 0.9.1. Do not edit it manually.
+This report is generated from `container/Cargo.lock` by cargo-about 0.9.2. Do not edit it manually.
 
 ## BSD Zero Clause License
 
@@ -231,7 +231,7 @@ OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 
 **Used by:**
-- `rustls-platform-verifier` 0.7.0
+- `rustls-platform-verifier` 0.7.1
 
                                          Apache License
                            Version 2.0, January 2004
@@ -437,7 +437,7 @@ OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 
 **Used by:**
-- `ipnet` 2.12.1
+- `ipnet` 2.12.2
 
                                          Apache License
                            Version 2.0, January 2004
@@ -643,7 +643,7 @@ OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 
 **Used by:**
-- `crc32fast` 1.5.0
+- `crc32fast` 1.5.2
 - `fallible-iterator` 0.3.0
 - `fallible-streaming-iterator` 0.1.9
 
@@ -1268,7 +1268,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 **Used by:**
-- `reqwest` 0.13.4
+- `reqwest` 0.13.5
 
                                       Apache License
                         Version 2.0, January 2004
@@ -1680,7 +1680,7 @@ limitations under the License.
 
 
 **Used by:**
-- `tokio-rustls` 0.26.4
+- `tokio-rustls` 0.26.6
 
                                       Apache License
                         Version 2.0, January 2004
@@ -2092,24 +2092,24 @@ limitations under the License.
 
 
 **Used by:**
-- `async-compression` 0.4.43
+- `async-compression` 0.4.50
 - `atomic-waker` 1.1.2
-- `base64` 0.22.1
-- `bitflags` 2.13.1
-- `cfg-if` 1.0.4
-- `compression-codecs` 0.4.38
-- `compression-core` 0.4.32
+- `base64` 0.23.1
+- `bitflags` 2.13.2
+- `cfg-if` 1.0.5
+- `compression-codecs` 0.4.45
+- `compression-core` 0.4.33
 - `displaydoc` 0.2.7
 - `errno` 0.3.14
-- `flate2` 1.1.9
+- `flate2` 1.1.10
 - `form_urlencoded` 1.2.2
 - `fs2` 0.4.3
 - `hashbrown` 0.17.1
 - `httparse` 1.10.1
-- `hyper-rustls` 0.27.9
+- `hyper-rustls` 0.27.10
 - `idna` 1.1.0
 - `idna_adapter` 1.2.2
-- `log` 0.4.33
+- `log` 0.4.34
 - `mime` 0.3.17
 - `once_cell` 1.21.4
 - `openssl-probe` 0.2.1
@@ -2117,11 +2117,11 @@ limitations under the License.
 - `rustls-native-certs` 0.8.4
 - `rustls` 0.23.45
 - `signal-hook-registry` 1.4.8
-- `smallvec` 1.15.2
+- `smallvec` 1.16.2
 - `socket2` 0.6.5
 - `stable_deref_trait` 1.2.1
 - `url` 2.5.8
-- `uuid` 1.26.0
+- `uuid` 1.27.0
 
                                       Apache License
                         Version 2.0, January 2004
@@ -2327,7 +2327,7 @@ limitations under the License.
 
 
 **Used by:**
-- `hashlink` 0.12.1
+- `hashlink` 0.12.2
 
                                       Apache License
                         Version 2.0, January 2004
@@ -2534,10 +2534,10 @@ limitations under the License.
 **Used by:**
 - `block-buffer` 0.12.1
 - `const-oid` 0.10.2
-- `cpufeatures` 0.3.0
+- `cpufeatures` 0.3.1
 - `crypto-common` 0.2.2
 - `digest` 0.11.3
-- `hybrid-array` 0.4.14
+- `hybrid-array` 0.4.15
 - `sha2` 0.11.0
 
                                       Apache License
@@ -3156,10 +3156,10 @@ limitations under the License.
 
 
 **Used by:**
-- `aws-lc-sys` 0.44.0
+- `aws-lc-sys` 0.45.0
 - `itoa` 1.0.18
-- `libc` 0.2.189
-- `miniz_oxide` 0.8.9
+- `libc` 0.2.190
+- `miniz_oxide` 0.9.1
 - `pin-project-lite` 0.2.17
 - `proc-macro2` 1.0.107
 - `quote` 1.0.47
@@ -3170,10 +3170,9 @@ limitations under the License.
 - `serde_json` 1.0.151
 - `serde_path_to_error` 0.1.20
 - `serde_urlencoded` 0.7.1
-- `syn` 2.0.119
-- `syn` 3.0.3
+- `syn` 3.0.6
 - `sync_wrapper` 1.0.2
-- `unicode-ident` 1.0.24
+- `unicode-ident` 1.0.26
 
         Apache License
 Version 2.0, January 2004
@@ -3286,9 +3285,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 **Used by:**
-- `alloc-no-stdlib` 2.0.4
-- `brotli-decompressor` 5.0.3
-- `brotli` 8.0.4
+- `alloc-no-stdlib` 3.0.0
+- `brotli-decompressor` 6.0.1
+- `brotli` 9.0.0
 
         Copyright (c) 2016 Dropbox, Inc.
 All rights reserved.
@@ -3339,8 +3338,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 **Used by:**
-- `alloc-stdlib` 0.2.4
-- `aws-lc-sys` 0.44.0
+- `alloc-stdlib` 0.3.0
+- `aws-lc-sys` 0.45.0
 
         Copyright (c) <year> <owner>.
 
@@ -3399,8 +3398,8 @@ third-party/chromium/LICENSE.
 
 
 **Used by:**
-- `aws-lc-rs` 1.18.0
-- `aws-lc-sys` 0.44.0
+- `aws-lc-rs` 1.18.1
+- `aws-lc-sys` 0.45.0
 
         ISC License:
 
@@ -3414,7 +3413,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND ISC DISCLAIMS ALL WARRANTIES WITH REGARD TO
 ## MIT License
 
 **Used by:**
-- `brotli` 8.0.4
+- `brotli` 9.0.0
 
         Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.
 
@@ -3438,7 +3437,7 @@ THE SOFTWARE.
 
 
 **Used by:**
-- `mio` 1.2.2
+- `mio` 1.2.4
 
         Copyright (c) 2014 Carl Lerche and other MIO contributors
 
@@ -3487,7 +3486,7 @@ THE SOFTWARE.
 
 
 **Used by:**
-- `hyper` 1.11.0
+- `hyper` 1.11.1
 
         Copyright (c) 2014-2026 Sean McArthur
 
@@ -3776,7 +3775,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 **Used by:**
-- `hyper-util` 0.1.20
+- `hyper-util` 0.1.21
 
         Copyright (c) 2023-2025 Sean McArthur
 
@@ -3800,7 +3799,7 @@ THE SOFTWARE.
 
 
 **Used by:**
-- `synstructure` 0.13.2
+- `synstructure` 0.14.0
 
         Copyright 2016 Nika Layzell
 
@@ -3897,7 +3896,7 @@ SOFTWARE.
 
 **Used by:**
 - `tokio-util` 0.7.19
-- `tokio` 1.53.1
+- `tokio` 1.53.2
 
         MIT License
 
@@ -3977,6 +3976,32 @@ DEALINGS IN THE SOFTWARE.
 
 
 **Used by:**
+- `tracing-core` 0.1.36
+
+        The MIT License (MIT)
+
+Copyright (c) 2014 Mathijs van de Nes
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+**Used by:**
 - `memchr` 2.8.3
 
         The MIT License (MIT)
@@ -4003,7 +4028,7 @@ THE SOFTWARE.
 
 
 **Used by:**
-- `aws-lc-sys` 0.44.0
+- `aws-lc-sys` 0.45.0
 
         The MIT License (MIT)
 
@@ -4031,7 +4056,7 @@ SOFTWARE.
 ## Unicode License v3
 
 **Used by:**
-- `unicode-ident` 1.0.24
+- `unicode-ident` 1.0.26
 
         UNICODE LICENSE V3
 
@@ -4086,9 +4111,9 @@ authorization of the copyright holder.
 - `potential_utf` 0.1.6
 - `tinystr` 0.8.4
 - `writeable` 0.6.4
-- `yoke-derive` 0.8.2
+- `yoke-derive` 0.8.4
 - `yoke` 0.8.3
-- `zerofrom-derive` 0.1.7
+- `zerofrom-derive` 0.1.8
 - `zerofrom` 0.1.8
 - `zerotrie` 0.2.5
 - `zerovec-derive` 0.11.6

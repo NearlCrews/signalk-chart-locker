@@ -45,6 +45,14 @@ export function assertPackageFiles (packageFiles) {
   }
 }
 
+// npm hands its own CLI to every script it runs as npm_execpath, and Node can execute that file on
+// every platform. A bare `npm` is a .cmd shim on Windows, which execFileSync cannot start without a
+// shell, so it is only the fallback for a script started directly with node.
+export function npmCommand (args) {
+  const cli = process.env.npm_execpath
+  return cli ? [process.execPath, [cli, ...args]] : ['npm', args]
+}
+
 export function parsePackReport (output) {
   const jsonStart = output.search(/^\s*(?:\[|{)/m)
   if (jsonStart === -1) throw new Error('npm pack did not return a JSON report')
