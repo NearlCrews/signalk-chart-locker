@@ -268,8 +268,11 @@ function PanelBody ({ configuration, save }: Props): React.ReactElement {
     setTtlDraft((current) => (lastServerTtl === null || current === lastServerTtl ? serverTtl : current))
   }, [stats?.ttlDays])
 
-  // Whether the plugin has received a save request. The admin UI does not re-pass configuration
-  // after a request, so this local state flips instead of deriving forever from the mount prop.
+  // Whether the panel has requested a save. The admin UI hands the object passed to `save` straight
+  // back as `configuration` without waiting for the request, and keeps it when the request fails
+  // (a failed request surfaces at most as the host's own alert). A non-null prop after a save is
+  // therefore the panel's own value, not confirmation that the server stored it, so this flag flips
+  // on the panel's own request rather than reading that echo as a reply.
   const [saveWasRequested, setSaveWasRequested] = useState(configuration != null)
 
   // The save bar shows "Save requested" for as long as the timestamp is set, so the panel owns the
