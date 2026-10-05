@@ -33,6 +33,17 @@ pub const STAGING_REGION_PREFIX: &str = "__warm_staging__";
 pub const POSITION_STAGING_REGION_PREFIX: &str = "__warm_staging__position-";
 const EVICTION_HYSTERESIS_BYTES: i64 = 64 * 1024 * 1024;
 
+/// Where an over-cap eviction stops. Evicting to the cap exactly would rerun the window scan over every
+/// unpinned row on the very next store; stopping one percent below it, at most 64 MiB, lets the
+/// following stores land without another scan. A small cap keeps the exact target.
+fn eviction_target(cap_bytes: i64) -> i64 {
+    if cap_bytes >= EVICTION_HYSTERESIS_BYTES.saturating_mul(2) {
+        cap_bytes.saturating_sub(EVICTION_HYSTERESIS_BYTES.min(cap_bytes / 100))
+    } else {
+        cap_bytes
+    }
+}
+
 /// A stored tile, or a negative-cache marker when `blob` is `None` (a 404 or 204 from upstream). The
 /// blob is a ref-counted `Bytes`, so serving a cache hit clones a handle, not the bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +86,21 @@ pub enum PutOutcome {
 /// Filesystem space kept outside the cache cap for SQLite WAL growth and other host writes.
 pub const MIN_FREE_HEADROOM_BYTES: u64 = 256 * 1024 * 1024;
 
+/// The one headroom rule for cache writes and for the reported disk-pressure flag: a write of
+/// `additional` bytes may proceed while filesystem free space plus the free pages SQLite reuses
+/// before growing the file still cover the protected headroom afterwards.
+pub fn has_headroom(available: u64, reusable: u64, additional: u64) -> bool {
+    available.saturating_add(reusable) >= MIN_FREE_HEADROOM_BYTES.saturating_add(additional)
+}
+
+/// True when SQLite failed for lack of disk space, which the write paths degrade on rather than fail.
+fn is_disk_full(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(failure, _) if failure.code == rusqlite::ErrorCode::DiskFull
+    )
+}
+
 /// A cache row key: the source id plus the z, x, and y tile coordinates. Passed by value (Copy) to the
 /// cache methods so the four fields travel together and cannot be transposed positionally.
 #[derive(Clone, Copy)]
@@ -106,6 +132,15 @@ pub struct PutManyOutcome {
     pub stored: usize,
     pub bytes_added: i64,
     pub capped: bool,
+}
+
+impl PutManyOutcome {
+    /// The outcome of a batch declined for disk space: nothing stored, reported as capped.
+    const DISK_PRESSURE: Self = Self {
+        stored: 0,
+        bytes_added: 0,
+        capped: true,
+    };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,10 +278,7 @@ impl TileCache {
         }
         let reusable = Self::reusable_bytes_conn(conn).unwrap_or(0);
         self.available_bytes()
-            .map(|available| {
-                available.saturating_add(reusable)
-                    >= MIN_FREE_HEADROOM_BYTES.saturating_add(additional_bytes as u64)
-            })
+            .map(|available| has_headroom(available, reusable, additional_bytes as u64))
             // If the platform cannot report free space, retain SQLite's existing DiskFull fallback.
             .unwrap_or(true)
     }
@@ -284,9 +316,24 @@ impl TileCache {
         self.operation_error_events.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn record_operation_error(&self, event: &str, error: &dyn std::fmt::Display) {
+    /// Count a failure toward `cacheOperationErrors` and log it as `event=<event> error=<error>`, with
+    /// the optional `<key>=<value>` context (a region id or an operation label) before the error.
+    pub fn record_operation_error(
+        &self,
+        event: &str,
+        context: Option<(&str, &str)>,
+        error: &dyn std::fmt::Display,
+    ) {
         self.operation_error_events.fetch_add(1, Ordering::Relaxed);
-        eprintln!("event={event} error={error}");
+        match context {
+            Some((key, value)) => eprintln!("event={event} {key}={value} error={error}"),
+            None => eprintln!("event={event} error={error}"),
+        }
+    }
+
+    /// Count a write declined for lack of disk space toward `diskPressureEvents`.
+    fn record_disk_pressure(&self) {
+        self.disk_pressure_events.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Take the connection lock, recovering the guard on a poisoned mutex so a single panic under the
@@ -450,9 +497,7 @@ impl TileCache {
         conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
         match vacuum(conn) {
             Ok(()) => {}
-            Err(rusqlite::Error::SqliteFailure(error, _))
-                if error.code == rusqlite::ErrorCode::DiskFull =>
-            {
+            Err(error) if is_disk_full(&error) => {
                 eprintln!("event=cache_auto_vacuum_deferred reason=disk_full");
                 return Ok(AutoVacuumState::Deferred);
             }
@@ -505,6 +550,16 @@ impl TileCache {
         Self::reusable_bytes_conn(&inner.conn)
     }
 
+    /// Return up to `pages` free pages to the filesystem. The pragma frees one page per result row,
+    /// so the statement is stepped until it finishes: `execute_batch` steps each statement once and
+    /// would free a single page per call however large the requested chunk.
+    fn incremental_vacuum_step(conn: &Connection, pages: i64) -> rusqlite::Result<()> {
+        let mut statement = conn.prepare(&format!("PRAGMA incremental_vacuum({pages})"))?;
+        let mut rows = statement.query([])?;
+        while rows.next()?.is_some() {}
+        Ok(())
+    }
+
     /// Checkpoint and truncate the WAL, then return every free page to the filesystem in bounded
     /// incremental-vacuum steps. The connection lock is released between steps so a large explicit
     /// clear or cap reduction does not monopolize all cache reads for the entire reclaim.
@@ -540,11 +595,10 @@ impl TileCache {
                 if before == 0 {
                     return Ok(());
                 }
+                Self::incremental_vacuum_step(&inner.conn, VACUUM_CHUNK_PAGES)?;
                 inner
                     .conn
-                    .execute_batch(&format!(
-                        "PRAGMA incremental_vacuum({VACUUM_CHUNK_PAGES}); PRAGMA wal_checkpoint(TRUNCATE)"
-                    ))?;
+                    .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
                 let after: i64 = inner
                     .conn
                     .pragma_query_value(None, "freelist_count", |row| row.get(0))?;
@@ -586,7 +640,7 @@ impl TileCache {
             )
             .optional();
         if let Err(ref error) = result {
-            self.record_operation_error("cache_read_failed", error);
+            self.record_operation_error("cache_read_failed", None, error);
         }
         result
     }
@@ -629,7 +683,7 @@ impl TileCache {
             None => (0, false),
         };
         if !self.has_disk_headroom_conn(&inner.conn, tile.bytes - old_bytes) {
-            self.disk_pressure_events.fetch_add(1, Ordering::Relaxed);
+            self.record_disk_pressure();
             return Ok(PutOutcome::Degraded);
         }
         // A live-proxy refresh passes pinned = false, but pinning is cleared only by delete_region, so a
@@ -657,10 +711,8 @@ impl TileCache {
                 }
                 Ok(PutOutcome::Stored)
             }
-            Err(rusqlite::Error::SqliteFailure(e, _))
-                if e.code == rusqlite::ErrorCode::DiskFull =>
-            {
-                self.disk_pressure_events.fetch_add(1, Ordering::Relaxed);
+            Err(e) if is_disk_full(&e) => {
+                self.record_disk_pressure();
                 Ok(PutOutcome::Degraded)
             }
             Err(e) => Err(e),
@@ -723,11 +775,7 @@ impl TileCache {
         if current <= cap_bytes {
             return Ok(());
         }
-        let target = if cap_bytes >= EVICTION_HYSTERESIS_BYTES.saturating_mul(2) {
-            cap_bytes.saturating_sub(EVICTION_HYSTERESIS_BYTES.min(cap_bytes / 100))
-        } else {
-            cap_bytes
-        };
+        let target = eviction_target(cap_bytes);
         let freed = {
             let tx = inner.conn.unchecked_transaction()?;
             let freed = Self::evict_unpinned_within(&tx, current, target)?;
@@ -737,11 +785,25 @@ impl TileCache {
         inner.total_bytes = current - freed;
         if inner.total_bytes > cap_bytes {
             eprintln!(
-                "tilecache: cap exceeded ({} bytes > {} limit); all remaining tiles are pinned",
-                inner.total_bytes, cap_bytes
+                "event=cache_cap_exceeded_by_pins total_bytes={} cap_bytes={cap_bytes}",
+                inner.total_bytes
             );
         }
         Ok(())
+    }
+
+    /// Make every write that needs a new database page fail as SQLite reports a full disk.
+    #[cfg(test)]
+    pub(crate) fn freeze_page_count_for_test(&self) {
+        let inner = self.lock();
+        let pages: i64 = inner
+            .conn
+            .pragma_query_value(None, "page_count", |row| row.get(0))
+            .expect("test database reports its page count");
+        inner
+            .conn
+            .pragma_update(None, "max_page_count", pages)
+            .expect("test database accepts a page ceiling");
     }
 
     #[cfg(test)]
@@ -822,7 +884,7 @@ impl TileCache {
     /// Store a batch of warm tiles pinned, in one transaction, with an explicit pre-store budget check.
     /// A warm never evicts a PINNED tile; it evicts unpinned scroll tiles to fit within the cap. When
     /// the next sized row would push the pinned set past `budget`, it stops and reports `capped`.
-    /// `budget` is the EFFECTIVE pinned budget the caller passes for this warm (R for the position-warm
+    /// `budget` is the EFFECTIVE pinned budget the caller passes for this warm (P for the position-warm
     /// pseudo-region, R - P for a real region, each cap-clamped). `cap` is the live cache byte cap.
     /// Negative-cache rows carry a conservative logical charge and use the same gates as positive
     /// rows. The gate is on the PINNED byte total, never the cache total: an unpinned scroll tile
@@ -850,12 +912,8 @@ impl TileCache {
         let mut inner = self.lock();
         let requested_growth = Self::batch_physical_growth_conn(&inner.conn, rows)?;
         if !self.has_disk_headroom_conn(&inner.conn, requested_growth) {
-            self.disk_pressure_events.fetch_add(1, Ordering::Relaxed);
-            return Ok(PutManyOutcome {
-                stored: 0,
-                bytes_added: 0,
-                capped: true,
-            });
+            self.record_disk_pressure();
+            return Ok(PutManyOutcome::DISK_PRESSURE);
         }
         let base = inner.total_bytes;
         let pinned_base = inner.pinned_bytes;
@@ -867,7 +925,7 @@ impl TileCache {
         let mut stored = 0usize;
         let mut capped = false;
         let mut freed = 0i64;
-        {
+        let applied = (|| {
             let tx = inner.conn.unchecked_transaction()?;
             for r in rows {
                 let prev: Option<(i64, i64)> = tx.query_row(
@@ -922,13 +980,26 @@ impl TileCache {
                 stored += 1;
             }
             // Make room: the inserts above flipped any re-pinned scroll row to pinned, so it is now
-            // eviction-exempt. Drop unpinned LRU rows down to the cap in one pass. Never deletes pinned
-            // rows, so the just-pinned batch and every other region's tiles survive.
+            // eviction-exempt. Drop unpinned LRU rows to the eviction target below the cap in one pass,
+            // as evict_to does, so a long warm at the cap does not rescan every scroll row per batch.
+            // Never deletes pinned rows, so the just-pinned batch and every other region's tiles
+            // survive.
             let new_total = base + added;
             if new_total > cap {
-                freed = Self::evict_unpinned_within(&tx, new_total, cap)?;
+                freed = Self::evict_unpinned_within(&tx, new_total, eviction_target(cap))?;
             }
-            tx.commit()?;
+            tx.commit()
+        })();
+        match applied {
+            Ok(()) => {}
+            // The headroom check estimates payload bytes only, so SQLite can still run out of space on
+            // record and index pages. The transaction rolled back, so degrade exactly as a headroom
+            // shortfall does instead of failing the warm on a write error.
+            Err(error) if is_disk_full(&error) => {
+                self.record_disk_pressure();
+                return Ok(PutManyOutcome::DISK_PRESSURE);
+            }
+            Err(error) => return Err(error),
         }
         inner.total_bytes = base + added - freed;
         inner.pinned_bytes = pinned_base + pinned_added;
@@ -1087,8 +1158,8 @@ impl TileCache {
     /// concurrent evict_to could delete the row between the two separate calls. Returns `true`
     /// when a fresh or negative-TTL row was found and pinned; `false` when absent, stale, or when
     /// the tile is not yet pinned and pinning it would push the pinned set past `budget`. `budget`
-    /// is the effective pinned budget for this warm (R for the pseudo-region, R - P for a real
-    /// region). `pinned_bytes` grows only when the tile newly enters the pinned set, so an
+    /// is the effective pinned budget for this warm (P for the position-warm pseudo-region, R - P
+    /// for a real region). `pinned_bytes` grows only when the tile newly enters the pinned set, so an
     /// already-pinned shared tile is never double-counted; when `region_id` is `Some`, the join row
     /// is recorded regardless so the tile is reference-counted for this region too.
     pub fn pin_if_fresh(
@@ -1124,15 +1195,15 @@ impl TileCache {
     ) -> rusqlite::Result<FreshPinOutcome> {
         let TileKey { source, z, x, y } = key;
         let mut inner = self.lock();
-        let row: Option<(i64, i64)> = inner
+        let row: Option<(i64, i64, i64, bool)> = inner
             .conn
             .query_row(
-                "SELECT status, fetched_at FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
+                "SELECT status, fetched_at, bytes, pinned FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
                 params![source, z, x, y],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? == 1)),
             )
             .optional()?;
-        let Some((status, fetched_at)) = row else {
+        let Some((status, fetched_at, tile_bytes, was_pinned)) = row else {
             return Ok(FreshPinOutcome::MissingOrStale);
         };
         let fresh = status == 200 && now - fetched_at < fresh_secs;
@@ -1140,10 +1211,6 @@ impl TileCache {
         if !fresh && !neg {
             return Ok(FreshPinOutcome::MissingOrStale);
         }
-        let (tile_bytes, was_pinned): (i64, bool) = inner.conn.query_row(
-            "SELECT bytes, pinned FROM tiles WHERE source = ?1 AND z = ?2 AND x = ?3 AND y = ?4",
-            params![source, z, x, y], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? == 1)),
-        ).optional()?.unwrap_or((0, false));
         let in_category = Self::key_in_category_conn(&inner.conn, key, region_id)?;
         let category_bytes = Self::category_bytes_conn(&inner.conn, region_id)?;
         if !in_category && tile_bytes > 0 && category_bytes + tile_bytes > budgets.category_bytes {
@@ -1392,6 +1459,12 @@ impl TileCache {
         rows.collect()
     }
 
+    /// The pinned byte total, maintained on every mutating call, without the row count `stats` scans
+    /// for.
+    pub fn pinned_bytes(&self) -> i64 {
+        self.lock().pinned_bytes
+    }
+
     /// Row count, total bytes, and pinned bytes. The totals are O(1) (maintained on every mutating
     /// call); the count is a `COUNT(*)`, O(n) in SQLite, but `/cache/stats` is called rarely.
     pub fn stats(&self) -> rusqlite::Result<(i64, i64, i64)> {
@@ -1421,7 +1494,7 @@ pub fn migrate_legacy_cache_dir(cache_dir: &Path) {
         // The current dir is already present, so the legacy one cannot be moved in. Leave it untouched
         // and warn, so a populated legacy cache stays recoverable rather than silently ignored.
         eprintln!(
-            "tilecache: legacy cache dir {} left in place; the current dir {} already exists",
+            "event=legacy_cache_dir_left_in_place legacy={} current={}",
             legacy.display(),
             cache_dir.display()
         );
@@ -1429,12 +1502,13 @@ pub fn migrate_legacy_cache_dir(cache_dir: &Path) {
     }
     match std::fs::rename(&legacy, cache_dir) {
         Ok(()) => eprintln!(
-            "tilecache: migrated legacy cache dir {} -> {}",
+            "event=legacy_cache_dir_migrated legacy={} current={}",
             legacy.display(),
             cache_dir.display()
         ),
+        // The cache then starts cold in the current directory.
         Err(e) => eprintln!(
-            "tilecache: could not migrate legacy cache dir {} -> {}: {e}; starting cold",
+            "event=legacy_cache_dir_migration_failed legacy={} current={} error={e}",
             legacy.display(),
             cache_dir.display()
         ),
@@ -1720,6 +1794,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.stats().unwrap(), (1, 2, 0));
+    }
+
+    // The batch path evicts to the same hysteresis target below the cap as evict_to, so a long warm at
+    // the cap does not rerun the window scan over every scroll row on every batch.
+    #[test]
+    fn a_pinned_batch_over_the_cap_evicts_to_the_hysteresis_target() {
+        const MIB: i64 = 1024 * 1024;
+        let (_f, c) = open();
+        // Logical sizes stand in for real payloads: the accounting reads `bytes`, not the blob.
+        for x in 0..1000 {
+            c.put(
+                TileKey::new("scroll", 10, x, 0),
+                &tile(MIB, 200, Some(vec![0])),
+                false,
+                i64::from(x),
+            )
+            .unwrap();
+        }
+        let cap = 1000 * MIB;
+        let row = WarmRow {
+            source: "region".into(),
+            z: 0,
+            x: 0,
+            y: 0,
+            tile: tile(MIB, 200, Some(vec![0])),
+        };
+        let outcome = c
+            .put_many_pinned(&[row], cap, cap, Some("r"), 2_000)
+            .unwrap();
+        assert_eq!(outcome.stored, 1);
+        let (_, total, pinned) = c.stats().unwrap();
+        assert_eq!(pinned, MIB);
+        assert_eq!(
+            total,
+            eviction_target(cap),
+            "evicted one percent below the cap"
+        );
+        assert!(total < cap);
     }
 
     #[test]
@@ -2790,6 +2902,67 @@ mod tests {
             "database shrank from {before} to {after}; pages={page_count} freelist={freelist}"
         );
         assert_eq!(freelist, 0);
+    }
+
+    // The headroom estimate counts payload bytes only, so SQLite can still run out of pages on record
+    // and index overhead. That full disk must degrade the batch like a headroom shortfall instead of
+    // failing the warm with a write error.
+    #[test]
+    fn a_full_disk_during_a_pinned_batch_degrades_to_capped() {
+        let (_f, c) = open();
+        c.freeze_page_count_for_test();
+        let outcome = c
+            .put_many_pinned(
+                &[warm_row("s", 0, 64 * 1024)],
+                i64::MAX,
+                i64::MAX,
+                Some("r"),
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            outcome,
+            PutManyOutcome {
+                stored: 0,
+                bytes_added: 0,
+                capped: true,
+            }
+        );
+        assert_eq!(c.disk_pressure_events(), 1);
+        assert_eq!(c.stats().unwrap(), (0, 0, 0), "the batch rolled back");
+        assert_eq!(c.region_bytes("r").unwrap(), 0);
+    }
+
+    // The incremental-vacuum pragma frees one page per step of its statement, so each reclaim step
+    // runs the statement to completion and returns a whole chunk of pages per WAL truncation.
+    #[test]
+    fn one_vacuum_step_returns_a_whole_chunk_of_free_pages() {
+        let (_file, cache) = open();
+        const BLOB_BYTES: usize = 256 * 1024;
+        for x in 0..8 {
+            cache
+                .put(
+                    TileKey::new("large", 0, x, 0),
+                    &tile(BLOB_BYTES as i64, 200, Some(vec![x as u8; BLOB_BYTES])),
+                    false,
+                    x as i64,
+                )
+                .unwrap();
+        }
+        assert_eq!(cache.sweep_aged_unpinned(1, 100).unwrap().1, 8);
+        let freelist = |cache: &TileCache| -> i64 {
+            cache
+                .lock()
+                .conn
+                .pragma_query_value(None, "freelist_count", |row| row.get(0))
+                .unwrap()
+        };
+        let before = freelist(&cache);
+        assert!(before > 64, "the sweep left free pages: {before}");
+
+        TileCache::incremental_vacuum_step(&cache.lock().conn, 32).unwrap();
+
+        assert_eq!(before - freelist(&cache), 32);
     }
 
     #[test]

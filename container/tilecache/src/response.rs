@@ -1,10 +1,30 @@
 //! One HTTP response builder for a served tile, shared by the raster tile route and the basemap
 //! vector-tile route so the status, ETag, Content-Type, Cache-Control, and stale-marker shape cannot
-//! drift between the two.
+//! drift between the two, plus the If-None-Match extractor those routes share.
 
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::extract::FromRequestParts;
+use axum::http::{header, request::Parts, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
+
+/// The client's If-None-Match, forwarded by the plugin proxy, so a revalidating browser gets a 304
+/// rather than the whole tile, glyph range, sprite, or style again. The extractor copies this one
+/// header, where a `HeaderMap` extractor would clone every request header.
+pub(crate) struct IfNoneMatch(pub(crate) Option<String>);
+
+impl<S: Send + Sync> FromRequestParts<S> for IfNoneMatch {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .headers
+                .get(header::IF_NONE_MATCH)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string),
+        ))
+    }
+}
 
 /// Cache-Control served for a cached tile (one day; the strong ETag drives revalidation).
 pub const TILE_CACHE_CONTROL: &str = "public, max-age=86400";
@@ -23,6 +43,15 @@ fn cache_control(stale: bool, max_age_secs: Option<u64>) -> HeaderValue {
             .unwrap_or_else(|_| HeaderValue::from_static(STALE_TILE_CACHE_CONTROL)),
         None => HeaderValue::from_static(TILE_CACHE_CONTROL),
     }
+}
+
+/// The browser lifetime left for a tile of a time-dynamic source: its declared TTL less the time
+/// since the container fetched the bytes. Granting the whole TTL to a tile served near the end of
+/// its window would let the browser hold it for almost twice the source's own limit. None for a
+/// static source, which keeps the fixed one-day lifetime.
+pub fn remaining_max_age(max_age_secs: Option<u64>, fetched_at: i64, now: i64) -> Option<u64> {
+    let age = u64::try_from(now.saturating_sub(fetched_at)).unwrap_or(0);
+    max_age_secs.map(|ttl| ttl.saturating_sub(age))
 }
 
 /// A Content-Type header value, falling back to a generic binary type when the string is not a legal
@@ -101,6 +130,16 @@ mod tests {
             STALE_TILE_CACHE_CONTROL,
         );
         assert_eq!(response.headers()["x-tilecache"], "stale");
+    }
+
+    #[test]
+    fn remaining_max_age_spends_the_window_from_the_fetch_time() {
+        assert_eq!(remaining_max_age(Some(300), 1_000, 1_000), Some(300));
+        assert_eq!(remaining_max_age(Some(300), 1_000, 1_200), Some(100));
+        assert_eq!(remaining_max_age(Some(300), 1_000, 5_000), Some(0));
+        // A clock step backwards never extends the window past the declared TTL.
+        assert_eq!(remaining_max_age(Some(300), 1_000, 900), Some(300));
+        assert_eq!(remaining_max_age(None, 1_000, 1_200), None);
     }
 
     #[test]

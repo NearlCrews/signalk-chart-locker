@@ -6,11 +6,13 @@
 //! generation-aware cache so the basemap remains coherent across configuration changes.
 
 use crate::cache::{CachedTile, StoredLearnedStyle, TileKey};
+use crate::fetcher::store_and_evict;
+use crate::response::IfNoneMatch;
 use crate::source::{ChartSource, UpstreamTemplate};
 use crate::state::{now_secs, AppState, StyleState};
 use axum::{
     extract::{Path, State},
-    http::{header, HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
     Router,
@@ -354,23 +356,13 @@ async fn persist_style_state(state: &AppState, source: &str, style: &StyleState)
             return;
         }
     };
-    let cache = state.cache.clone();
     let source = source.to_string();
     let fetched_at = style.fetched_at;
-    match tokio::task::spawn_blocking(move || {
-        cache.store_learned_style(&source, &signature, &encoded, fetched_at)
-    })
-    .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => state
-            .cache
-            .record_operation_error("learned_style_persist_failed", &error),
-        Err(error) => {
-            state.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
-            eprintln!("event=learned_style_persist_task_failed error={error}");
-        }
-    }
+    state
+        .cache_task("learned_style_persist", None, move |cache| {
+            cache.store_learned_style(&source, &signature, &encoded, fetched_at)
+        })
+        .await;
 }
 
 /// Rehydrate learned style state after a coherent catalog push. Exact source signatures invalidate
@@ -391,26 +383,14 @@ pub(crate) async fn rehydrate_style_state(state: &AppState, config_generation: u
             .collect();
         (signatures, style_sources)
     };
-    let cache = state.cache.clone();
-    let rows = match tokio::task::spawn_blocking(move || {
-        cache.reconcile_learned_styles(&signatures, MAX_PERSISTED_STYLE_BYTES)
-    })
-    .await
-    {
-        Ok(Ok(rows)) => rows,
-        Ok(Err(error)) => {
-            state
-                .cache
-                .record_operation_error("learned_style_reconcile_failed", &error);
-            state.style_state.write().await.clear();
-            return;
-        }
-        Err(error) => {
-            state.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
-            eprintln!("event=learned_style_reconcile_task_failed error={error}");
-            state.style_state.write().await.clear();
-            return;
-        }
+    let Some(rows) = state
+        .cache_task("learned_style_reconcile", None, move |cache| {
+            cache.reconcile_learned_styles(&signatures, MAX_PERSISTED_STYLE_BYTES)
+        })
+        .await
+    else {
+        state.style_state.write().await.clear();
+        return;
     };
     let mut restored = HashMap::with_capacity(rows.len());
     let mut invalid = Vec::new();
@@ -449,7 +429,7 @@ pub(crate) async fn rehydrate_style_state(state: &AppState, config_generation: u
         {
             state
                 .cache
-                .record_operation_error("invalid_learned_style_delete_failed", &error);
+                .record_operation_error("invalid_learned_style_delete_failed", None, &error);
         }
     }
     *state.style_state.write().await = restored;
@@ -496,24 +476,43 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
     if !generation.is_multiple_of(2) {
         return None;
     }
-    if let Some(existing) = state.style_state.read().await.get(source).cloned() {
-        if existing.config_generation == generation
-            && now_secs() - existing.fetched_at < state.knobs.fresh_secs
-        {
-            return Some(existing.document.clone());
-        }
+    if let Some(document) = fresh_learned_document(state, source, generation).await {
+        return Some(document);
     }
     let flight_key = format!("style-learn:{generation}:{source}");
     let flight = state.inflight_lock(&flight_key).await?;
     let _guard = flight.lock().await;
-    if let Some(existing) = state.style_state.read().await.get(source).cloned() {
-        if existing.config_generation == generation
-            && now_secs() - existing.fetched_at < state.knobs.fresh_secs
-        {
-            state.inflight_finish(&flight_key, &flight).await;
-            return Some(existing.document.clone());
-        }
-    }
+    // Re-check under the flight: the winner may have learned the style while this caller waited.
+    let learned = match fresh_learned_document(state, source, generation).await {
+        Some(document) => Some(document),
+        None => learn_style(state, source, generation).await,
+    };
+    state.inflight_finish(&flight_key, &flight).await;
+    learned
+}
+
+/// The learned document for a source when it belongs to this configuration generation and is still
+/// inside the freshness window.
+async fn fresh_learned_document(
+    state: &AppState,
+    source: &str,
+    generation: u64,
+) -> Option<Arc<Value>> {
+    state
+        .style_state
+        .read()
+        .await
+        .get(source)
+        .filter(|existing| {
+            existing.config_generation == generation
+                && now_secs() - existing.fetched_at < state.knobs.fresh_secs
+        })
+        .map(|existing| existing.document.clone())
+}
+
+/// The body of `fetch_and_learn`, run under its single-flight lock. Every exit returns straight to
+/// the caller, which releases the flight once.
+async fn learn_style(state: &AppState, source: &str, generation: u64) -> Option<Arc<Value>> {
     let (style_url, allowed) = {
         let map = state.sources.read().await;
         match map.get(source).map(|s| s.upstream.clone()) {
@@ -521,14 +520,10 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
                 style_url,
                 allowed_hosts,
             }) => (style_url, allowed_hosts),
-            _ => {
-                state.inflight_finish(&flight_key, &flight).await;
-                return None;
-            }
+            _ => return None,
         }
     };
     if !style_url_allowed(&style_url, &allowed, state.knobs.allow_private_egress) {
-        state.inflight_finish(&flight_key, &flight).await;
         return None;
     }
     let existing = state.style_state.read().await.get(source).cloned();
@@ -551,20 +546,13 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
         Ok(None) => {
             let _config_guard = state.config_update.lock().await;
             if state.config_generation.load(Ordering::Acquire) != generation {
-                state.inflight_finish(&flight_key, &flight).await;
                 return None;
             }
             let mut styles = state.style_state.write().await;
-            let Some(existing) = styles.get(source).cloned() else {
-                drop(styles);
-                state.inflight_finish(&flight_key, &flight).await;
-                return None;
-            };
-            if existing.config_generation != generation {
-                drop(styles);
-                state.inflight_finish(&flight_key, &flight).await;
-                return None;
-            }
+            let existing = styles
+                .get(source)
+                .filter(|existing| existing.config_generation == generation)
+                .cloned()?;
             let mut refreshed = (*existing).clone();
             refreshed.fetched_at = now_secs();
             let document = existing.document.clone();
@@ -572,29 +560,20 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
             styles.insert(source.to_string(), refreshed.clone());
             drop(styles);
             persist_style_state(state, source, &refreshed).await;
-            state.inflight_finish(&flight_key, &flight).await;
             return Some(document);
         }
         Err(()) => {
             let stale = existing.filter(|entry| entry.config_generation == generation);
-            state.inflight_finish(&flight_key, &flight).await;
             return stale.map(|entry| entry.document.clone());
         }
     };
     let style = Arc::new(style);
-    let Some(layers) = style.get("layers").and_then(Value::as_array) else {
-        state.inflight_finish(&flight_key, &flight).await;
-        return None;
-    };
-    let Some(source_object) = style.get("sources").and_then(Value::as_object) else {
-        state.inflight_finish(&flight_key, &flight).await;
-        return None;
-    };
+    let layers = style.get("layers").and_then(Value::as_array)?;
+    let source_object = style.get("sources").and_then(Value::as_object)?;
     if layers.len() > MAX_STYLE_LAYERS
         || source_object.is_empty()
         || source_object.len() > MAX_STYLE_SOURCES
     {
-        state.inflight_finish(&flight_key, &flight).await;
         return None;
     }
     let glyphs = style
@@ -613,32 +592,27 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
         .as_ref()
         .is_some_and(|url| !style_url_allowed(url, &allowed, state.knobs.allow_private_egress))
     {
-        state.inflight_finish(&flight_key, &flight).await;
         return None;
     }
     // The distinct fontstacks the style references, in the canonical decoded comma-joined form the
     // glyph route keys on. A data-driven (non-array) text-font is skipped rather than panicking.
     let mut fontstacks: Vec<String> = Vec::new();
     let mut fontstack_set = HashSet::new();
-    {
-        for layer in layers {
-            if let Some(arr) = layer
-                .get("layout")
-                .and_then(|l| l.get("text-font"))
-                .and_then(|v| v.as_array())
-            {
-                let joined: String = arr
-                    .iter()
-                    .filter_map(|x| x.as_str())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                if !joined.is_empty() && joined.len() <= 512 && fontstack_set.insert(joined.clone())
-                {
-                    fontstacks.push(joined);
-                    if fontstacks.len() > MAX_FONTSTACKS {
-                        state.inflight_finish(&flight_key, &flight).await;
-                        return None;
-                    }
+    for layer in layers {
+        if let Some(arr) = layer
+            .get("layout")
+            .and_then(|l| l.get("text-font"))
+            .and_then(|v| v.as_array())
+        {
+            let joined: String = arr
+                .iter()
+                .filter_map(|x| x.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            if !joined.is_empty() && joined.len() <= 512 && fontstack_set.insert(joined.clone()) {
+                fontstacks.push(joined);
+                if fontstacks.len() > MAX_FONTSTACKS {
+                    return None;
                 }
             }
         }
@@ -650,7 +624,6 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
     let names: Vec<String> = source_object.keys().cloned().collect();
     for name in &names {
         if !valid_style_source_name(name) {
-            state.inflight_finish(&flight_key, &flight).await;
             return None;
         }
         let src = &style["sources"][name];
@@ -662,69 +635,33 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
         }
         let declared_tile_source = src.get("tiles").is_some() || src.get("url").is_some();
         // maxzoom can be inline on the source, or in the source's TileJSON (fetched below).
-        let inline_max = match optional_maxzoom(src.get("maxzoom")) {
-            Ok(value) => value,
-            Err(()) => {
-                state.inflight_finish(&flight_key, &flight).await;
+        let inline_max = optional_maxzoom(src.get("maxzoom")).ok()?;
+        let (tiles, tj_max): (Vec<String>, Option<u32>) = if src.get("tiles").is_some() {
+            (tile_templates(src.get("tiles")).ok().flatten()?, None)
+        } else if let Some(url) = src.get("url").and_then(Value::as_str) {
+            if !style_url_allowed(url, &allowed, state.knobs.allow_private_egress) {
                 return None;
             }
+            let (tilejson, _) = fetch_json(state, url, None, MAX_TILEJSON_BYTES)
+                .await
+                .ok()
+                .flatten()?;
+            (
+                tile_templates(tilejson.get("tiles")).ok().flatten()?,
+                optional_maxzoom(tilejson.get("maxzoom")).ok()?,
+            )
+        } else {
+            (Vec::new(), None)
         };
-        let (tiles, tj_max): (Vec<String>, Option<u32>) =
-            if let Ok(Some(tiles)) = tile_templates(src.get("tiles")) {
-                // Reject the whole style when any inline template is unusable, so an apparently
-                // successful style response never contains a source that only fails later at serve time.
-                if tiles.iter().any(|template| {
-                    !style_url_allowed(template, &allowed, state.knobs.allow_private_egress)
-                        || !["{z}", "{x}", "{y}"]
-                            .iter()
-                            .all(|token| template.contains(token))
-                }) {
-                    state.inflight_finish(&flight_key, &flight).await;
-                    return None;
-                }
-                (tiles, None)
-            } else if src.get("tiles").is_some() {
-                state.inflight_finish(&flight_key, &flight).await;
-                return None;
-            } else if let Some(url) = src.get("url").and_then(|v| v.as_str()) {
-                if style_url_allowed(url, &allowed, state.knobs.allow_private_egress) {
-                    match fetch_json(state, url, None, MAX_TILEJSON_BYTES).await {
-                        Ok(Some((tj, _))) => {
-                            let tiles = match tile_templates(tj.get("tiles")) {
-                                Ok(Some(tiles)) => tiles,
-                                _ => {
-                                    state.inflight_finish(&flight_key, &flight).await;
-                                    return None;
-                                }
-                            };
-                            let maxzoom = match optional_maxzoom(tj.get("maxzoom")) {
-                                Ok(value) => value,
-                                Err(()) => {
-                                    state.inflight_finish(&flight_key, &flight).await;
-                                    return None;
-                                }
-                            };
-                            (tiles, maxzoom)
-                        }
-                        _ => {
-                            state.inflight_finish(&flight_key, &flight).await;
-                            return None;
-                        }
-                    }
-                } else {
-                    state.inflight_finish(&flight_key, &flight).await;
-                    return None;
-                }
-            } else {
-                (Vec::new(), None)
-            };
         if tiles.is_empty() {
             if declared_tile_source {
-                state.inflight_finish(&flight_key, &flight).await;
                 return None;
             }
             continue;
         }
+        // Reject the whole style when any template, inline or from TileJSON, is unusable, so an
+        // apparently successful style response never contains a source that only fails later at
+        // serve time.
         if tiles.len() > MAX_TEMPLATES_PER_SOURCE
             || tiles.iter().any(|template| {
                 !style_url_allowed(template, &allowed, state.knobs.allow_private_egress)
@@ -733,7 +670,6 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
                         .all(|token| template.contains(token))
             })
         {
-            state.inflight_finish(&flight_key, &flight).await;
             return None;
         }
         if let Some(m) = inline_max.or(tj_max) {
@@ -742,18 +678,14 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
         source_tiles.insert(name.clone(), tiles);
     }
     if source_tiles.is_empty() {
-        state.inflight_finish(&flight_key, &flight).await;
         return None;
     }
     let _config_guard = state.config_update.lock().await;
     if state.config_generation.load(Ordering::Acquire) != generation {
-        state.inflight_finish(&flight_key, &flight).await;
         return None;
     }
     let mut styles = state.style_state.write().await;
     if !styles.contains_key(source) && styles.len() >= MAX_LEARNED_STYLE_ENTRIES {
-        drop(styles);
-        state.inflight_finish(&flight_key, &flight).await;
         return None;
     }
     let learned = Arc::new(StyleState {
@@ -772,7 +704,6 @@ async fn fetch_and_learn(state: &AppState, source: &str) -> Option<Arc<Value>> {
     styles.insert(source.to_string(), learned.clone());
     drop(styles);
     persist_style_state(state, source, &learned).await;
-    state.inflight_finish(&flight_key, &flight).await;
     Some(style)
 }
 
@@ -800,7 +731,7 @@ pub async fn ensure_style_learned(state: &AppState, source: &str) -> bool {
 async fn style_doc(
     State(state): State<AppState>,
     Path(source): Path<String>,
-    headers: HeaderMap,
+    IfNoneMatch(if_none_match): IfNoneMatch,
 ) -> Response {
     // Preserve the 404 for an unknown or non-style source; a fetch failure is a 502 below.
     {
@@ -864,9 +795,7 @@ async fn style_doc(
         &etag,
         stale,
         body.into(),
-        headers
-            .get(header::IF_NONE_MATCH)
-            .and_then(|value| value.to_str().ok()),
+        if_none_match.as_deref(),
     )
 }
 
@@ -875,6 +804,7 @@ async fn style_doc(
 async fn glyphs(
     State(state): State<AppState>,
     Path((source, fontstack, range)): Path<(String, String, String)>,
+    IfNoneMatch(if_none_match): IfNoneMatch,
 ) -> Response {
     let Some((range_start, canonical_range)) = glyph_range(&range) else {
         return StatusCode::NOT_FOUND.into_response();
@@ -890,6 +820,7 @@ async fn glyphs(
         return StatusCode::NOT_FOUND.into_response();
     }
     let cache_source = glyph_cache_source_at(&source, &fontstack, learned.generation);
+    let if_none_match = if_none_match.as_deref();
     // A cached negative glyph row always serves as a 404 so MapLibre treats the range as
     // absent rather than an error; a 200 is served offline-first.
     let serve_cached = |tile: &CachedTile| -> Option<Response> {
@@ -904,7 +835,7 @@ async fn glyphs(
             if now_secs() - tile.last_access >= crate::fetcher::TOUCH_THROTTLE_SECS {
                 touch_detached(&state, &cache_source, 0, range_start, 0, now_secs());
             }
-            Some(raw_asset_response(tile))
+            Some(tile_response(tile, if_none_match))
         } else if tile.status != 200 && now_secs() - tile.fetched_at < state.knobs.negative_ttl_secs
         {
             Some(StatusCode::NOT_FOUND.into_response())
@@ -940,23 +871,12 @@ async fn glyphs(
                     kind: StyleAssetKind::Glyph,
                 },
                 &upstream,
-                None,
+                if_none_match,
             )
             .await
         },
     )
     .await
-}
-
-/// A raw (content-type plus body, no ETag or Range) response for a cached glyph or sprite asset.
-fn raw_asset_response(tile: &CachedTile) -> Response {
-    crate::response::tile_http_response(
-        &tile.content_type,
-        &tile.strong_etag,
-        false,
-        tile.blob.clone().unwrap_or_default(),
-        None,
-    )
 }
 
 fn touch_detached(state: &AppState, source: &str, z: u32, x: u32, y: u32, now: i64) {
@@ -988,6 +908,9 @@ fn new_asset_tile(f: crate::fetcher::Fetched, now: i64) -> CachedTile {
         blob: Some(f.body),
     }
 }
+
+/// The operation label a failed style asset store task is logged under.
+const STYLE_ASSET_STORE: &str = "style asset store";
 
 struct AssetFetchKey<'a> {
     health_source: &'a str,
@@ -1024,6 +947,7 @@ async fn fetch_asset_response(
     let validator = valid_stale
         .as_ref()
         .and_then(|tile| tile.upstream_validator.as_deref());
+    let store_key = TileKey::new(cache_source, z, x, y);
     match crate::fetcher::fetch_upstream(state, health_source, upstream, validator).await {
         Ok((304, _)) => {
             let Some(mut tile) = valid_stale else {
@@ -1033,7 +957,7 @@ async fn fetch_asset_response(
             tile.fetched_at = now;
             tile.last_access = now;
             let response = tile_response(&tile, if_none_match);
-            store_and_evict(state, cache_source, z, x, y, tile, now).await;
+            store_and_evict(state, store_key, tile, now, STYLE_ASSET_STORE).await;
             response
         }
         Ok((200, fetched)) => {
@@ -1043,21 +967,13 @@ async fn fetch_asset_response(
             let now = now_secs();
             let tile = new_asset_tile(fetched, now);
             let response = tile_response(&tile, if_none_match);
-            store_and_evict(state, cache_source, z, x, y, tile, now).await;
+            store_and_evict(state, store_key, tile, now, STYLE_ASSET_STORE).await;
             response
         }
         Ok((404 | 204, _)) => {
             let now = now_secs();
-            store_and_evict(
-                state,
-                cache_source,
-                z,
-                x,
-                y,
-                CachedTile::negative(404, now),
-                now,
-            )
-            .await;
+            let negative = CachedTile::negative(404, now);
+            store_and_evict(state, store_key, negative, now, STYLE_ASSET_STORE).await;
             StatusCode::NOT_FOUND.into_response()
         }
         _ => {
@@ -1085,22 +1001,28 @@ async fn fetch_asset_response(
 
 // The sprite variants. MapLibre appends the suffix to the sprite base with no slash, so each is an
 // explicit route. The variant index is the synthetic cache x.
-async fn sprite_json(s: State<AppState>, p: Path<String>) -> Response {
-    sprite_variant(s.0, p.0, 0, ".json").await
+async fn sprite_json(s: State<AppState>, p: Path<String>, h: IfNoneMatch) -> Response {
+    sprite_variant(s.0, p.0, h.0, 0, ".json").await
 }
-async fn sprite_png(s: State<AppState>, p: Path<String>) -> Response {
-    sprite_variant(s.0, p.0, 1, ".png").await
+async fn sprite_png(s: State<AppState>, p: Path<String>, h: IfNoneMatch) -> Response {
+    sprite_variant(s.0, p.0, h.0, 1, ".png").await
 }
-async fn sprite_2x_json(s: State<AppState>, p: Path<String>) -> Response {
-    sprite_variant(s.0, p.0, 2, "@2x.json").await
+async fn sprite_2x_json(s: State<AppState>, p: Path<String>, h: IfNoneMatch) -> Response {
+    sprite_variant(s.0, p.0, h.0, 2, "@2x.json").await
 }
-async fn sprite_2x_png(s: State<AppState>, p: Path<String>) -> Response {
-    sprite_variant(s.0, p.0, 3, "@2x.png").await
+async fn sprite_2x_png(s: State<AppState>, p: Path<String>, h: IfNoneMatch) -> Response {
+    sprite_variant(s.0, p.0, h.0, 3, "@2x.png").await
 }
 
 /// Serve a sprite variant cache-first under sprite_cache_source at x = variant, reconstructing the
 /// upstream from the learned sprite base plus the suffix.
-async fn sprite_variant(state: AppState, source: String, variant: u32, suffix: &str) -> Response {
+async fn sprite_variant(
+    state: AppState,
+    source: String,
+    if_none_match: Option<String>,
+    variant: u32,
+    suffix: &str,
+) -> Response {
     if !ensure_style_learned(&state, &source).await {
         return StatusCode::BAD_GATEWAY.into_response();
     }
@@ -1115,6 +1037,7 @@ async fn sprite_variant(state: AppState, source: String, variant: u32, suffix: &
     } else {
         StyleAssetKind::SpritePng
     };
+    let if_none_match = if_none_match.as_deref();
     // A cached sprite negative serves as a 404; a 200 is served offline-first (no last_access touch,
     // matching the prior behavior).
     let serve_cached = |tile: &CachedTile| -> Option<Response> {
@@ -1126,7 +1049,7 @@ async fn sprite_variant(state: AppState, source: String, variant: u32, suffix: &
             )
             && now_secs() - tile.fetched_at < state.knobs.fresh_secs
         {
-            Some(raw_asset_response(tile))
+            Some(tile_response(tile, if_none_match))
         } else if tile.status != 200 && now_secs() - tile.fetched_at < state.knobs.negative_ttl_secs
         {
             Some(StatusCode::NOT_FOUND.into_response())
@@ -1162,7 +1085,7 @@ async fn sprite_variant(state: AppState, source: String, variant: u32, suffix: &
                     kind,
                 },
                 &upstream,
-                None,
+                if_none_match,
             )
             .await
         },
@@ -1176,7 +1099,7 @@ async fn sprite_variant(state: AppState, source: String, variant: u32, suffix: &
 async fn vector_tile(
     State(state): State<AppState>,
     Path((source, name, z, x, y)): Path<(String, String, u32, u32, u32)>,
-    headers: HeaderMap,
+    IfNoneMatch(if_none_match): IfNoneMatch,
 ) -> Response {
     if !ensure_style_learned(&state, &source).await {
         return StatusCode::BAD_GATEWAY.into_response();
@@ -1204,10 +1127,7 @@ async fn vector_tile(
         StyleAssetKind::VectorTile
     };
     let cache_source = vector_cache_source_at(&source, &name, learned.generation);
-    let if_none_match = headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
+    let if_none_match = if_none_match.as_deref();
     // Cache-first serves a 200 (last_access touch-throttled), serves a cached negative within the
     // negative TTL as a 404 (a warm-pinned 404 or 204), and otherwise falls through to a refetch so an
     // expired negative refetches.
@@ -1223,7 +1143,7 @@ async fn vector_tile(
             if now_secs() - tile.last_access >= crate::fetcher::TOUCH_THROTTLE_SECS {
                 touch_detached(&state, &cache_source, z, x, y, now_secs());
             }
-            Some(tile_response(tile, if_none_match.as_deref()))
+            Some(tile_response(tile, if_none_match))
         } else if tile.status != 200 && now_secs() - tile.fetched_at < state.knobs.negative_ttl_secs
         {
             Some(StatusCode::NOT_FOUND.into_response())
@@ -1251,7 +1171,7 @@ async fn vector_tile(
                 kind,
             },
             &upstream,
-            if_none_match.as_deref(),
+            if_none_match,
         )
         .await
     })
@@ -1281,35 +1201,6 @@ fn tile_response(tile: &CachedTile, if_none_match: Option<&str>) -> Response {
     )
 }
 
-/// Store a fetched style sub-resource (glyph, sprite, or vector tile) and evict to the cap on the
-/// blocking pool, so the window-function eviction scan never runs on the async reactor. Mirrors
-/// the raster store path in `fetcher::store_200`.
-async fn store_and_evict(
-    state: &AppState,
-    cache_source: &str,
-    z: u32,
-    x: u32,
-    y: u32,
-    tile: CachedTile,
-    now: i64,
-) {
-    let cache = state.cache.clone();
-    let cap = state.live_cap_bytes.load(Ordering::Relaxed);
-    let cache_source = cache_source.to_string();
-    if let Err(e) = tokio::task::spawn_blocking(move || {
-        crate::fetcher::log_cache_err(
-            &cache,
-            "cache_write_failed",
-            cache.put(TileKey::new(&cache_source, z, x, y), &tile, false, now),
-        );
-        crate::fetcher::log_cache_err(&cache, "cache_eviction_failed", cache.evict_to(cap));
-    })
-    .await
-    {
-        eprintln!("tilecache: style sub-resource store task failed: {e}");
-    }
-}
-
 /// The cache-first plus single-flight scaffold shared by the glyph, sprite, and vector-tile routes.
 /// `serve_cached` decides whether a cached row is servable now (returning Some, encapsulating each
 /// route's 200-serve and its own negative-cache policy) or should fall through to a fetch (None).
@@ -1334,8 +1225,9 @@ where
             return resp;
         }
     }
-    // Single-flight the miss so a first-load burst of identical requests makes one upstream fetch.
-    let key = format!("{cache_source}/{z}/{x}/{y}");
+    // Single-flight the miss so a first-load burst of identical requests makes one upstream fetch. The
+    // warm engine takes the same key for a style sub-source tile, so a warm and a live read coalesce.
+    let key = crate::fetcher::inflight_key(cache_source, z, x, y);
     let Some(lock) = state.inflight_lock(&key).await else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
@@ -1984,6 +1876,51 @@ mod tests {
                     .is_none(),
                 "unsafe subresource was not cached: {source}/{x}"
             );
+        }
+    }
+
+    // The plugin forwards the browser's If-None-Match on every style subpath. Glyph ranges and sprites
+    // honor it on the cached and the upstream fetch paths alike, so a browser revalidation gets a 304
+    // rather than pulling the whole asset through the proxy again.
+    #[tokio::test]
+    async fn glyph_and_sprite_revalidation_answers_not_modified() {
+        let addr = spawn_upstream().await;
+        let db = NamedTempFile::new().unwrap();
+        let router = app(dev_state(&db));
+        router
+            .clone()
+            .oneshot(
+                Request::post("/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(config_json(addr, "127.0.0.1")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        for uri in [
+            "/style/basemap/glyphs/Noto%20Sans%20Regular/0-255.pbf",
+            "/style/basemap/sprite.json",
+            "/style/basemap/sprite@2x.png",
+        ] {
+            let first = router
+                .clone()
+                .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(first.status(), StatusCode::OK, "{uri}");
+            let etag = first.headers()[header::ETAG].to_str().unwrap().to_string();
+            let revalidated = router
+                .clone()
+                .oneshot(
+                    Request::get(uri)
+                        .header(header::IF_NONE_MATCH, &etag)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(revalidated.status(), StatusCode::NOT_MODIFIED, "{uri}");
+            assert_eq!(revalidated.headers()[header::ETAG], etag.as_str());
         }
     }
 

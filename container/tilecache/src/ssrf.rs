@@ -43,8 +43,9 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
                 // offset varies by prefix length, so reject the whole /48 rather than decode it. The
                 // prefix is reserved and not globally routable, so no real public upstream falls in it.
                 || is_local_use_nat64(v6)
-                // Egress accepts ordinary global-unicast IPv6 only. This excludes documentation,
-                // benchmarking, discard-only, and other special-purpose ranges outside 2000::/3.
+                // Egress accepts ordinary global-unicast IPv6 only. This excludes discard-only and the
+                // other special-purpose ranges outside 2000::/3, and documentation plus the IETF
+                // protocol-assignment block inside it.
                 || !is_global_unicast_v6(v6)
         }
     }
@@ -127,9 +128,12 @@ fn is_site_local_v6(ip: Ipv6Addr) -> bool {
     (ip.segments()[0] & 0xffc0) == 0xfec0
 }
 
+/// 2000::/3 less 2001:db8::/32 documentation and 2001::/23, the IANA block of IETF protocol
+/// assignments (Teredo at 2001::/32, benchmarking at 2001:2::/48, ORCHID, and the like). Registry
+/// allocations to real networks begin at 2001:200::/23, so no tile provider lives in that block.
 fn is_global_unicast_v6(ip: Ipv6Addr) -> bool {
-    (ip.segments()[0] & 0xe000) == 0x2000
-        && (ip.segments()[0] != 0x2001 || ip.segments()[1] != 0x0db8)
+    let s = ip.segments();
+    (s[0] & 0xe000) == 0x2000 && (s[0] != 0x2001 || (s[1] != 0x0db8 && s[1] >= 0x0200))
 }
 
 #[cfg(test)]
@@ -158,6 +162,11 @@ mod tests {
         assert!(is_forbidden_ip(IpAddr::V6("fe80::1".parse().unwrap())));
         assert!(is_forbidden_ip(IpAddr::V6("fec0::1".parse().unwrap())));
         assert!(is_forbidden_ip(IpAddr::V6("2001:db8::1".parse().unwrap())));
+        // The IETF protocol-assignment block: Teredo, which relays to an embedded IPv4 peer, and the
+        // benchmarking range sit inside 2000::/3 but are not ordinary upstream hosts.
+        assert!(is_forbidden_ip(IpAddr::V6("2001::1".parse().unwrap())));
+        assert!(is_forbidden_ip(IpAddr::V6("2001:2::1".parse().unwrap())));
+        assert!(is_forbidden_ip(IpAddr::V6("2001:1ff::1".parse().unwrap())));
         assert!(is_forbidden_ip(IpAddr::V6(
             "::ffff:127.0.0.1".parse().unwrap()
         )));
@@ -183,5 +192,10 @@ mod tests {
         assert!(!is_forbidden_ip(IpAddr::V6(
             "2606:4700::1".parse().unwrap()
         ))); // a public IPv6
+             // The first registry allocations sit just past the IETF block.
+        assert!(!is_forbidden_ip(IpAddr::V6("2001:200::1".parse().unwrap())));
+        assert!(!is_forbidden_ip(IpAddr::V6(
+            "2001:4860:4860::8888".parse().unwrap()
+        )));
     }
 }

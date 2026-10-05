@@ -92,8 +92,8 @@ pub struct Knobs {
     /// Dev and test only: when true, the SSRF guard does not reject private or loopback targets, so a
     /// loopback stub upstream can be exercised. Production leaves this false.
     pub allow_private_egress: bool,
-    /// The scroll-tile TTL in seconds, seeded from the env at construction so the startup sweep has a
-    /// value before the plugin's first /config push. Zero disables the age sweep.
+    /// The scroll-tile TTL in seconds, seeded from the env at construction for a configuration push that
+    /// omits it. The sweeper waits for the first push before using it. Zero disables the age sweep.
     pub scroll_ttl_secs: i64,
     /// The base (streak-zero) egress timeout in milliseconds. Both the client-level default timeout and
     /// the per-source adaptive schedule in `UpstreamHealth` derive from this, so the two cannot diverge.
@@ -233,6 +233,8 @@ pub struct AppState {
     pub live_scroll_ttl_secs: Arc<AtomicI64>,
     /// True after the plugin has pushed the source allowlist and live budgets at least once.
     pub configured: Arc<AtomicBool>,
+    /// Signaled by `mark_configured`, so a task can wait for the first configuration push.
+    pub configured_notify: Arc<Notify>,
     pub config_generation: Arc<AtomicU64>,
     pub config_update: Arc<Mutex<()>>,
     pub control_token: Option<Arc<str>>,
@@ -241,7 +243,6 @@ pub struct AppState {
     /// Operator-facing counters for rejected warm requests and accepted config pushes.
     pub warm_rejections: Arc<AtomicU64>,
     pub config_pushes: Arc<AtomicU64>,
-    pub cache_operation_errors: Arc<AtomicU64>,
     /// Single-flight guard for the one-time global basemap assets warm, so two concurrent basemap
     /// downloads do not both fetch the full glyph and sprite set.
     pub assets_warming: Arc<AtomicBool>,
@@ -295,6 +296,7 @@ impl AppState {
             live_position_warm_budget: Arc::new(AtomicI64::new(0)),
             live_scroll_ttl_secs: Arc::new(AtomicI64::new(scroll_ttl_secs)),
             configured: Arc::new(AtomicBool::new(false)),
+            configured_notify: Arc::new(Notify::new()),
             config_generation: Arc::new(AtomicU64::new(0)),
             config_update: Arc::new(Mutex::new(())),
             control_token: std::env::var("TILECACHE_CONTROL_TOKEN")
@@ -307,7 +309,6 @@ impl AppState {
             geocode_state: Arc::new(Mutex::new(crate::geocode::GeocodeState::default())),
             warm_rejections: Arc::new(AtomicU64::new(0)),
             config_pushes: Arc::new(AtomicU64::new(0)),
-            cache_operation_errors: Arc::new(AtomicU64::new(0)),
             assets_warming: Arc::new(AtomicBool::new(false)),
             upstream_health: Arc::new(UpstreamHealth::new(base_timeout_ms)),
         }
@@ -394,8 +395,9 @@ impl AppState {
 
     /// Read a response body with a hard cap, streaming chunks so a gzip or brotli decompression bomb or
     /// a chunked body with no Content-Length cannot be read unbounded into memory. Returns None when the
-    /// body exceeds `max_blob_bytes` (the pre-read Content-Length check is None after decompression, so
-    /// this is the real bound).
+    /// body exceeds `max_blob_bytes`. A declared Content-Length past the cap is refused before any body
+    /// byte is read; reqwest reports no length after transparent decompression, so the streaming cap is
+    /// the real bound.
     pub async fn read_capped(&self, resp: GuardedResponse) -> Option<Bytes> {
         self.read_capped_to(resp, self.knobs.max_blob_bytes).await
     }
@@ -405,9 +407,16 @@ impl AppState {
         mut resp: GuardedResponse,
         max_bytes: usize,
     ) -> Option<Bytes> {
-        // Pre-size from Content-Length when the upstream sent one, clamped to the cap so a lying length
-        // cannot force a large up-front allocation. The streaming cap below is the real bound.
-        let hint = resp.content_length().unwrap_or(0).min(max_bytes as u64) as usize;
+        // Refusing a declared oversize body up front saves downloading up to the whole cap on a metered
+        // link only to discard it.
+        let declared = resp.content_length().unwrap_or(0);
+        if declared > max_bytes as u64 {
+            return None;
+        }
+        // Pre-size from Content-Length when the upstream sent one. A lying length cannot force a large
+        // up-front allocation because it is already within the cap, and the streaming cap below is the
+        // real bound.
+        let hint = declared as usize;
         let mut buf: Vec<u8> = Vec::with_capacity(hint);
         while let Some(chunk) = resp.response.chunk().await.ok()? {
             if buf.len().checked_add(chunk.len())? > max_bytes {
@@ -475,6 +484,55 @@ impl AppState {
         self.touch_semaphore.clone().try_acquire_owned().ok()
     }
 
+    /// Publish the first accepted configuration push and wake every task waiting for it. Release
+    /// pairs with the Acquire load in `wait_until_configured`, so the live state published before
+    /// this call is visible to a woken waiter.
+    pub fn mark_configured(&self) {
+        self.configured
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.configured_notify.notify_waiters();
+    }
+
+    /// Wait until `mark_configured` has run. The waiter registers before it checks the flag, so a
+    /// push that lands between the check and the wait still wakes it.
+    pub async fn wait_until_configured(&self) {
+        loop {
+            let notified = self.configured_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.configured.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Run synchronous cache work on the blocking pool, away from Tokio's reactor threads. A SQLite
+    /// error is recorded as `{event}_failed` and a task that did not return as `{event}_task_failed`,
+    /// each with the optional key=value context and each counted toward `cacheOperationErrors`, and
+    /// both return None.
+    pub(crate) async fn cache_task<T: Send + 'static>(
+        &self,
+        event: &str,
+        context: Option<(&str, &str)>,
+        work: impl FnOnce(&TileCache) -> rusqlite::Result<T> + Send + 'static,
+    ) -> Option<T> {
+        let cache = self.cache.clone();
+        match tokio::task::spawn_blocking(move || work(&cache)).await {
+            Ok(Ok(value)) => Some(value),
+            Ok(Err(error)) => {
+                self.cache
+                    .record_operation_error(&format!("{event}_failed"), context, &error);
+                None
+            }
+            Err(error) => {
+                self.cache
+                    .record_operation_error(&format!("{event}_task_failed"), context, &error);
+                None
+            }
+        }
+    }
+
     /// Execute a synchronous SQLite lookup away from Tokio's reactor threads.
     pub async fn cache_get(
         &self,
@@ -523,21 +581,6 @@ impl AppState {
         .ok()
         .and_then(Result::ok)
         .unwrap_or(false)
-    }
-
-    pub fn control_authorized(&self, supplied: Option<&str>) -> bool {
-        let Some(expected) = self.control_token.as_deref() else {
-            return false;
-        };
-        let supplied = supplied.unwrap_or_default().as_bytes();
-        let expected = expected.as_bytes();
-        let max_len = supplied.len().max(expected.len());
-        let mut diff = supplied.len() ^ expected.len();
-        for index in 0..max_len {
-            diff |= supplied.get(index).copied().unwrap_or_default() as usize
-                ^ expected.get(index).copied().unwrap_or_default() as usize;
-        }
-        diff == 0
     }
 }
 
@@ -748,6 +791,44 @@ mod tests {
             .unwrap();
         assert_eq!(state.read_capped(response).await.unwrap(), "ok");
         assert_eq!(seen.lock().unwrap().as_deref(), Some("etag:\"v1\""));
+    }
+
+    // The upstream declares a body larger than the cap and then stalls. Refusing on the declared length
+    // returns at once; reading toward the cap would wait on a body that is discarded anyway.
+    #[tokio::test]
+    async fn a_declared_length_past_the_cap_is_refused_before_the_body_is_read() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: 1048576\r\n\r\n")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let db = NamedTempFile::new().unwrap();
+        let cache = Arc::new(TileCache::open(db.path()).unwrap());
+        let state = AppState::new(
+            cache,
+            Knobs {
+                allow_private_egress: true,
+                ..Default::default()
+            },
+        );
+        let response = state
+            .guarded_get(&format!("http://{address}/"), None, None)
+            .await
+            .unwrap();
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            state.read_capped_to(response, 16),
+        )
+        .await;
+        assert_eq!(read.expect("refused without waiting for the body"), None);
     }
 
     #[tokio::test]

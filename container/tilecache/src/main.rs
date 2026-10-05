@@ -1,6 +1,5 @@
-//! The tilecache binary entrypoint. Mirrors the router binary: a `healthcheck` subcommand for the
-//! container HEALTHCHECK, env-driven port, DB path, and cap, and a graceful SIGTERM and SIGINT
-//! shutdown. The cache DB lives on the mounted volume the plugin configures.
+//! The tilecache binary entrypoint: a `healthcheck` subcommand for the container HEALTHCHECK,
+//! env-driven port, DB path, and cap, and a graceful SIGTERM and SIGINT shutdown. The cache DB lives on the mounted volume the plugin configures.
 
 use chart_locker_tilecache::cache::TileCache;
 use chart_locker_tilecache::routes::app;
@@ -40,14 +39,14 @@ async fn main() {
         chart_locker_tilecache::cache::migrate_legacy_cache_dir(parent);
         if let Err(e) = std::fs::create_dir_all(parent) {
             eprintln!(
-                "tilecache: could not create cache directory {}: {e}",
+                "event=cache_directory_create_failed path={} error={e}",
                 parent.display()
             );
         }
     }
     let cache = Arc::new(open_or_recreate(Path::new(&db)));
     if let Err(error) = cache.evict_to(cap) {
-        eprintln!("event=startup_cache_eviction_failed error={error}");
+        cache.record_operation_error("startup_cache_eviction_failed", None, &error);
     }
     let knobs = Knobs {
         cap_bytes: cap,

@@ -1,5 +1,5 @@
 //! Reverse-geocode proxy. Targets the hardcoded allowlisted host nominatim.openstreetmap.org
-//! only, via the v2 SSRF guards (IP literal check, guarded DNS resolver, redirects off, body cap).
+//! only, via the shared egress guards (IP literal check, guarded DNS resolver, redirects off, body cap).
 //! The User-Agent is identifiable and contactable per the Nominatim usage policy. The server enforces
 //! the provider's application-wide one-request-per-second limit and caches rounded
 //! coordinate lookups, so multiple clients cannot bypass the policy.

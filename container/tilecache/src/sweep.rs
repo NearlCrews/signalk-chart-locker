@@ -1,6 +1,7 @@
 //! The background scroll-tile TTL sweeper: an interval task whose immediate first tick is the startup
-//! sweep, then a fixed period. It logs on error and never panics, so a transient SQLite error cannot
-//! end the interval or wedge the TTL until the next container restart.
+//! sweep, run once the first configuration push has landed, then a fixed period. It logs on error and
+//! never panics, so a transient SQLite error cannot end the interval or wedge the TTL until the next
+//! container restart.
 
 use crate::state::{now_secs, AppState};
 use std::sync::atomic::Ordering;
@@ -14,20 +15,24 @@ const SWEEP_INTERVAL_SECS: u64 = 3600;
 pub async fn run_sweep_once(state: &AppState) {
     let ttl = state.live_scroll_ttl_secs.load(Ordering::Relaxed);
     let now = now_secs();
-    let cache = state.cache.clone();
-    match tokio::task::spawn_blocking(move || cache.sweep_aged_unpinned(ttl, now)).await {
-        Ok(Ok((bytes, rows))) => {
-            if rows > 0 {
-                eprintln!("event=scroll_ttl_swept rows={rows} bytes={bytes}");
-            }
+    if let Some((bytes, rows)) = state
+        .cache_task("scroll_ttl_sweep", None, move |cache| {
+            cache.sweep_aged_unpinned(ttl, now)
+        })
+        .await
+    {
+        if rows > 0 {
+            eprintln!("event=scroll_ttl_swept rows={rows} bytes={bytes}");
         }
-        Ok(Err(e)) => eprintln!("event=scroll_ttl_sweep_failed error={e}"),
-        Err(e) => eprintln!("event=scroll_ttl_sweep_task_failed error={e}"),
     }
 }
 
-/// The interval loop. The first `tick()` returns immediately, so it is the startup sweep.
+/// The interval loop. The first `tick()` returns immediately, so it is the startup sweep. It waits for
+/// the first accepted configuration push: the live TTL is authoritative only from then on, and a
+/// process the runtime restarted outside the plugin lifecycle still carries the TTL its container was
+/// created with, which can predate an operator's change.
 pub async fn run_sweeper(state: AppState) {
+    state.wait_until_configured().await;
     let mut ticker = tokio::time::interval(Duration::from_secs(SWEEP_INTERVAL_SECS));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -73,6 +78,42 @@ mod tests {
         assert!(
             cache.get(TileKey::new("s", 0, 0, 0)).unwrap().is_none(),
             "the aged unpinned tile is swept"
+        );
+    }
+
+    // A process restarted outside the plugin lifecycle carries the TTL its container was created with,
+    // and the operator may have lengthened or disabled it since. Nothing is swept until a configuration
+    // push has made the live TTL authoritative.
+    #[tokio::test]
+    async fn the_startup_sweep_waits_for_the_first_configuration() {
+        let db = NamedTempFile::new().unwrap();
+        let cache = Arc::new(TileCache::open(db.path()).unwrap());
+        let key = TileKey::new("s", 0, 0, 0);
+        cache.put(key, &scroll_tile(10, 0), false, 0).unwrap();
+        let knobs = Knobs {
+            scroll_ttl_secs: 1,
+            ..Default::default()
+        };
+        let state = AppState::new(cache.clone(), knobs);
+        let sweeper = tokio::spawn(run_sweeper(state.clone()));
+        // Long enough for a startup sweep that did not wait to have deleted the aged tile.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            cache.get(key).unwrap().is_some(),
+            "nothing is swept before the first configuration push"
+        );
+
+        state.mark_configured();
+        for _ in 0..50 {
+            if cache.get(key).unwrap().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        sweeper.abort();
+        assert!(
+            cache.get(key).unwrap().is_none(),
+            "the startup sweep runs once the configuration lands"
         );
     }
 

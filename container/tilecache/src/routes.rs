@@ -3,13 +3,14 @@
 //! pushes the source allowlist, and /health and /cache/stats report status. The basemap /style routes
 //! live in `style.rs`.
 
-use crate::fetcher::{get_tile, FetchOutcome};
+use crate::fetcher::{get_tile, FetchOutcome, TileLookup};
+use crate::response::IfNoneMatch;
 use crate::source::ChartSource;
 use crate::state::AppState;
 use axum::{
     body::{Body, Bytes, HttpBody},
     extract::{DefaultBodyLimit, Path, Request, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -20,11 +21,17 @@ use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-/// Build the router. The style routes are added by `crate::style::style_routes`.
+/// Build the router. The style routes are added by `crate::style::style_routes`. The two middleware
+/// layers take only the fields they read, because axum clones a layer's state on every request.
 pub fn app(state: AppState) -> Router {
-    let admission_state = state.clone();
+    let admission = Admission {
+        requests: state.request_semaphore.clone(),
+        health: state.health_request_semaphore.clone(),
+        wait_ms: state.knobs.admission_wait_ms,
+    };
+    let control_token = state.control_token.clone();
     Router::new()
         .route("/health", get(health))
         .route("/cache/stats", get(stats))
@@ -46,9 +53,35 @@ pub fn app(state: AppState) -> Router {
         .with_state(state)
         .layer(DefaultBodyLimit::max(crate::state::MAX_REQUEST_BODY_BYTES))
         .layer(middleware::from_fn_with_state(
-            admission_state,
-            request_admission,
+            control_token,
+            require_control_token,
         ))
+        .layer(middleware::from_fn_with_state(admission, request_admission))
+}
+
+/// Require the control token on every request that is not a read, before any handler or body
+/// extractor runs. Every GET and HEAD route is a read, and every POST and DELETE route mutates cache
+/// or configuration state, so the method decides. Checking here rather than in each handler keeps an
+/// unauthenticated caller from making the container parse up to the full control body budget, and a
+/// mutating route added later is covered without anyone having to remember the check.
+async fn require_control_token(
+    State(control_token): State<Option<Arc<str>>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let read = matches!(*request.method(), Method::GET | Method::HEAD);
+    if !read && !mutation_authorized(control_token.as_deref(), request.headers()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    next.run(request).await
+}
+
+/// The admission semaphores and wait bound, the only service state `request_admission` reads.
+#[derive(Clone)]
+struct Admission {
+    requests: Arc<Semaphore>,
+    health: Arc<Semaphore>,
+    wait_ms: u64,
 }
 
 /// Bound concurrent work before a handler can enqueue a SQLite blocking task. Health uses a
@@ -61,16 +94,16 @@ pub fn app(state: AppState) -> Router {
 /// stream limits bound the parked set. The permit spans both the handler and the response body's
 /// final frame or drop.
 async fn request_admission(
-    State(state): State<AppState>,
+    State(admission): State<Admission>,
     request: Request,
     next: Next,
 ) -> Response {
     let is_health = request.uri().path() == "/health";
-    let wait_ms = state.knobs.admission_wait_ms;
+    let wait_ms = admission.wait_ms;
     let semaphore = if is_health {
-        state.health_request_semaphore.clone()
+        admission.health
     } else {
-        state.request_semaphore.clone()
+        admission.requests
     };
     let permit = if is_health || wait_ms == 0 {
         semaphore.try_acquire_owned().ok()
@@ -133,12 +166,30 @@ impl HttpBody for AdmissionBody {
 
 pub(crate) const CONTROL_TOKEN_HEADER: &str = "x-tilecache-token";
 
-fn mutation_authorized(state: &AppState, headers: &HeaderMap) -> bool {
-    state.control_authorized(
+fn mutation_authorized(expected: Option<&str>, headers: &HeaderMap) -> bool {
+    control_authorized(
+        expected,
         headers
             .get(CONTROL_TOKEN_HEADER)
             .and_then(|value| value.to_str().ok()),
     )
+}
+
+/// Compare the supplied control token against the expected one in time independent of where they
+/// differ. No configured token authorizes nothing.
+fn control_authorized(expected: Option<&str>, supplied: Option<&str>) -> bool {
+    let Some(expected) = expected else {
+        return false;
+    };
+    let supplied = supplied.unwrap_or_default().as_bytes();
+    let expected = expected.as_bytes();
+    let max_len = supplied.len().max(expected.len());
+    let mut diff = supplied.len() ^ expected.len();
+    for index in 0..max_len {
+        diff |= supplied.get(index).copied().unwrap_or_default() as usize
+            ^ expected.get(index).copied().unwrap_or_default() as usize;
+    }
+    diff == 0
 }
 
 async fn health(State(st): State<AppState>) -> Response {
@@ -171,44 +222,43 @@ async fn stats(State(st): State<AppState>) -> Response {
     // also performs a filesystem query. Keeping both off the async runtime stops one stats call from
     // wedging the async reactor. Any database or task failure returns 500 so callers never mistake
     // fabricated zero totals for a healthy empty cache.
-    let cache = st.cache.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let available_bytes = cache.available_bytes().ok();
-        let (rows, bytes, pinned_bytes) = cache.stats()?;
-        // The position-warm pseudo-region's pinned bytes, reported as positionWarmBytes.
-        let pw = cache.region_bytes(crate::state::POSITION_WARM_REGION_ID)?;
-        // The exact real-region pinned bytes: a tile shared between a real region and the position-warm
-        // pseudo-region counts once here, so the regions budget gate is not under-counted by subtracting
-        // a shared tile fully.
-        let real_pinned = cache.real_region_pinned_bytes(crate::state::POSITION_WARM_REGION_ID)?;
-        let source_rows = cache.per_source_stats()?;
-        let reusable_bytes = cache.reusable_bytes()?;
-        Ok::<_, rusqlite::Error>((
-            rows,
-            bytes,
-            pinned_bytes,
-            pw,
-            real_pinned,
-            source_rows,
-            reusable_bytes,
-            available_bytes,
-        ))
-    })
-    .await;
-    let (rows, bytes, pinned_bytes, pw, real_pinned, source_rows, reusable_bytes, available_bytes) =
-        match result {
-            Ok(Ok(values)) => values,
-            Ok(Err(error)) => {
-                st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
-                eprintln!("event=cache_stats_failed error={error}");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-            Err(error) => {
-                st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
-                eprintln!("event=cache_stats_task_failed error={error}");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        };
+    let Some((
+        rows,
+        bytes,
+        pinned_bytes,
+        pw,
+        real_pinned,
+        source_rows,
+        reusable_bytes,
+        available_bytes,
+    )) = st
+        .cache_task("cache_stats", None, |cache| {
+            let available_bytes = cache.available_bytes().ok();
+            let (rows, bytes, pinned_bytes) = cache.stats()?;
+            // The position-warm pseudo-region's pinned bytes, reported as positionWarmBytes.
+            let pw = cache.region_bytes(crate::state::POSITION_WARM_REGION_ID)?;
+            // The exact real-region pinned bytes: a tile shared between a real region and the
+            // position-warm pseudo-region counts once here, so the regions budget gate is not
+            // under-counted by subtracting a shared tile fully.
+            let real_pinned =
+                cache.real_region_pinned_bytes(crate::state::POSITION_WARM_REGION_ID)?;
+            let source_rows = cache.per_source_stats()?;
+            let reusable_bytes = cache.reusable_bytes()?;
+            Ok((
+                rows,
+                bytes,
+                pinned_bytes,
+                pw,
+                real_pinned,
+                source_rows,
+                reusable_bytes,
+                available_bytes,
+            ))
+        })
+        .await
+    else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
     let avg: serde_json::Map<String, serde_json::Value> = source_rows
         .iter()
         .filter_map(|stats| {
@@ -267,15 +317,21 @@ async fn stats(State(st): State<AppState>) -> Response {
         "sqliteReusableBytes": reusable_bytes,
         "effectiveAvailableBytes": available_bytes.map(|bytes| bytes.saturating_add(reusable_bytes)),
         "minimumHeadroomBytes": crate::cache::MIN_FREE_HEADROOM_BYTES,
-        "diskPressure": available_bytes.map(|bytes| bytes < crate::cache::MIN_FREE_HEADROOM_BYTES),
+        "diskPressure": disk_pressure(available_bytes, reusable_bytes),
         "diagnostics": {
             "diskPressureEvents": st.cache.disk_pressure_events(),
             "warmRejections": st.warm_rejections.load(Ordering::Relaxed),
             "configPushes": st.config_pushes.load(Ordering::Relaxed),
-            "cacheOperationErrors": st.cache.operation_error_events()
-                + st.cache_operation_errors.load(Ordering::Relaxed),
+            "cacheOperationErrors": st.cache.operation_error_events(),
         },
     })).into_response()
+}
+
+/// True when the cache is declining writes for lack of headroom, judged by the same rule the store
+/// paths apply. Free SQLite pages count: the cache reuses them before it grows the file, so a full
+/// filesystem with a populated freelist is still storing tiles. None when free space is unknown.
+fn disk_pressure(available_bytes: Option<u64>, reusable_bytes: u64) -> Option<bool> {
+    available_bytes.map(|available| !crate::cache::has_headroom(available, reusable_bytes, 0))
 }
 
 #[derive(Deserialize)]
@@ -347,14 +403,7 @@ enum CapEnforcement {
 /// evicts unpinned scroll tiles, so the pinned set can sit above the new R until a re-download or a
 /// per-region delete converges it. The physical total stays at or below the cap throughout. This is
 /// documented and acceptable, not a bug.
-async fn config(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<ConfigBody>,
-) -> Response {
-    if !mutation_authorized(&st, &headers) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+async fn config(State(st): State<AppState>, Json(body): Json<ConfigBody>) -> Response {
     // Serialize the fallback reads as well as publication. Two partial config pushes must derive their
     // omitted fields from one coherent predecessor rather than racing on independently loaded atomics.
     let _config_guard = st.config_update.lock().await;
@@ -422,7 +471,7 @@ async fn config(
     st.config_generation.fetch_add(1, Ordering::AcqRel);
     let cache = st.cache.clone();
     match tokio::task::spawn_blocking(move || {
-        let (_, _, pinned_bytes) = cache.stats()?;
+        let pinned_bytes = cache.pinned_bytes();
         if pinned_bytes > cap {
             return Ok::<CapEnforcement, rusqlite::Error>(CapEnforcement::Irreducible {
                 pinned_bytes,
@@ -449,14 +498,14 @@ async fn config(
         }
         Ok(Err(error)) => {
             st.config_generation.fetch_add(1, Ordering::Release);
-            st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
-            eprintln!("event=config_cap_enforcement_failed error={error}");
+            st.cache
+                .record_operation_error("config_cap_enforcement_failed", None, &error);
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
         Err(error) => {
             st.config_generation.fetch_add(1, Ordering::Release);
-            st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
-            eprintln!("event=config_cap_task_failed error={error}");
+            st.cache
+                .record_operation_error("config_cap_task_failed", None, &error);
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     }
@@ -495,7 +544,8 @@ async fn config(
         st.geocoding_enabled.store(enabled, Ordering::Release);
     }
     st.config_generation.fetch_add(1, Ordering::Release);
-    st.configured.store(true, Ordering::Relaxed);
+    // Wakes the sweeper, which then sees the TTL published above.
+    st.mark_configured();
     st.config_pushes.fetch_add(1, Ordering::Relaxed);
     eprintln!("event=config_push_applied sources={source_count}");
     StatusCode::NO_CONTENT.into_response()
@@ -509,14 +559,7 @@ struct ScrollTtlBody {
 
 /// POST /cache/scroll-ttl: set only the live scroll TTL. A dedicated route so a live TTL edit does
 /// not re-push the source allowlist or clear the learned style state, which POST /config does.
-async fn set_scroll_ttl(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<ScrollTtlBody>,
-) -> StatusCode {
-    if !mutation_authorized(&st, &headers) {
-        return StatusCode::UNAUTHORIZED;
-    }
+async fn set_scroll_ttl(State(st): State<AppState>, Json(body): Json<ScrollTtlBody>) -> StatusCode {
     if !(0..=MAX_SCROLL_TTL_SECS).contains(&body.ttl_secs) {
         return StatusCode::BAD_REQUEST;
     }
@@ -527,25 +570,15 @@ async fn set_scroll_ttl(
 
 /// POST /cache/clear-scroll: delete every unpinned scroll tile, keeping pinned region and
 /// position-warm tiles. Runs on a blocking thread because the chunked delete is synchronous.
-async fn clear_scroll(State(st): State<AppState>, headers: HeaderMap) -> Response {
-    if !mutation_authorized(&st, &headers) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let cache = st.cache.clone();
-    match tokio::task::spawn_blocking(move || cache.clear_unpinned()).await {
-        Ok(Ok((bytes, rows))) => {
+async fn clear_scroll(State(st): State<AppState>) -> Response {
+    match st
+        .cache_task("cache_clear_unpinned", None, |cache| cache.clear_unpinned())
+        .await
+    {
+        Some((bytes, rows)) => {
             Json(serde_json::json!({ "freedBytes": bytes, "freedRows": rows })).into_response()
         }
-        Ok(Err(e)) => {
-            st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
-            eprintln!("event=cache_clear_unpinned_failed error={e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-        Err(e) => {
-            st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
-            eprintln!("event=cache_clear_unpinned_task_failed error={e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+        None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -554,43 +587,33 @@ async fn region_bytes_route(State(st): State<AppState>, Path(region_id): Path<St
     if !crate::warm::valid_region_id(&region_id) {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let cache = st.cache.clone();
-    match tokio::task::spawn_blocking(move || cache.region_bytes(&region_id)).await {
-        Ok(Ok(bytes)) => Json(serde_json::json!({ "bytes": bytes })).into_response(),
-        Ok(Err(e)) => {
-            st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
-            eprintln!("event=cache_region_bytes_failed error={e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-        Err(e) => {
-            st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
-            eprintln!("event=cache_region_bytes_task_failed error={e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+    match st
+        .cache_task("cache_region_bytes", None, move |cache| {
+            cache.region_bytes(&region_id)
+        })
+        .await
+    {
+        Some(bytes) => Json(serde_json::json!({ "bytes": bytes })).into_response(),
+        None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
 /// GET /cache/regions: all region byte totals in one SQLite query.
 async fn all_region_bytes_route(State(st): State<AppState>) -> Response {
-    let cache = st.cache.clone();
-    match tokio::task::spawn_blocking(move || cache.all_region_bytes()).await {
-        Ok(Ok(rows)) => {
+    match st
+        .cache_task("cache_region_totals", None, |cache| {
+            cache.all_region_bytes()
+        })
+        .await
+    {
+        Some(rows) => {
             let regions: serde_json::Map<String, serde_json::Value> = rows
                 .into_iter()
                 .map(|(id, bytes)| (id, serde_json::json!(bytes)))
                 .collect();
             Json(serde_json::json!({ "regions": regions })).into_response()
         }
-        Ok(Err(e)) => {
-            st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
-            eprintln!("event=cache_region_totals_failed error={e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-        Err(e) => {
-            st.cache_operation_errors.fetch_add(1, Ordering::Relaxed);
-            eprintln!("event=cache_region_totals_task_failed error={e}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
+        None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -598,11 +621,7 @@ async fn all_region_bytes_route(State(st): State<AppState>) -> Response {
 async fn delete_region_route(
     State(st): State<AppState>,
     Path(region_id): Path<String>,
-    headers: HeaderMap,
 ) -> StatusCode {
-    if !mutation_authorized(&st, &headers) {
-        return StatusCode::UNAUTHORIZED;
-    }
     // The reserved pseudo-regions (position-warm and basemap assets) are managed by the warm engine, not
     // by the region API, so refuse to let a caller unpin them out from under it.
     if !crate::warm::valid_region_id(&region_id)
@@ -615,75 +634,71 @@ async fn delete_region_route(
         eprintln!("event=region_delete_cancel_timeout region_id={region_id}");
         return StatusCode::CONFLICT;
     }
-    let cache = st.cache.clone();
     let cap = st.live_cap_bytes.load(Ordering::Relaxed);
     // The blocking task takes ownership of the id, and both failure events name the region an
     // operator needs to know did not go away, so the two share one allocation by reference count
     // rather than the success path copying a string it then drops untouched.
     let region_id: Arc<str> = region_id.into();
-    let region_id_for_log = Arc::clone(&region_id);
+    let task_region_id = Arc::clone(&region_id);
     // delete_region walks region_tiles and can demote many pinned rows, so run it and the follow-up
     // evict_to on a blocking thread rather than on the async runtime.
-    let result = tokio::task::spawn_blocking(move || {
-        cache.delete_region(&region_id)?;
-        // delete_region demotes refcount-zero tiles from pinned to unpinned without changing
-        // total_bytes, so the total is already at or below the cap and this evict_to is effectively a
-        // no-op. Kept for safety: it cannot exceed the cap and trims nothing it should keep.
-        crate::fetcher::log_cache_err(&cache, "cache_eviction_failed", cache.evict_to(cap));
-        Ok::<(), rusqlite::Error>(())
-    })
-    .await;
-    match result {
-        Ok(Ok(())) => StatusCode::NO_CONTENT,
-        Ok(Err(e)) => {
-            eprintln!("event=cache_region_delete_failed region_id={region_id_for_log} error={e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-        Err(e) => {
-            eprintln!(
-                "event=cache_region_delete_task_failed region_id={region_id_for_log} error={e}"
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
+    let deleted = st
+        .cache_task(
+            "cache_region_delete",
+            Some(("region_id", &*region_id)),
+            move |cache| {
+                cache.delete_region(&task_region_id)?;
+                // delete_region demotes refcount-zero tiles from pinned to unpinned without changing
+                // total_bytes, so the total is already at or below the cap and this evict_to is
+                // effectively a no-op. Kept for safety: it cannot exceed the cap and trims nothing it
+                // should keep.
+                crate::fetcher::log_cache_err(cache, "cache_eviction_failed", cache.evict_to(cap));
+                Ok(())
+            },
+        )
+        .await;
+    if deleted.is_some() {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
     }
 }
 
 async fn tile(
     State(st): State<AppState>,
     Path((source, z, x, y)): Path<(String, u32, u32, u32)>,
-    headers: HeaderMap,
+    IfNoneMatch(if_none_match): IfNoneMatch,
 ) -> Response {
-    let if_none_match = headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
+    let TileLookup {
+        outcome,
+        max_age_seconds,
+    } = get_tile(&st, &source, z, x, y, if_none_match).await;
     // A time-dynamic source declares how long one of its tiles stays usable, and the browser is a
-    // cache as much as the container is, so the same window is what it gets told.
-    let max_age = st
-        .sources
-        .read()
-        .await
-        .get(&source)
-        .and_then(|s| s.max_age_seconds);
-    match get_tile(&st, &source, z, x, y, if_none_match).await {
+    // cache as much as the container is, so it is told what is left of that same window.
+    let remaining = |fetched_at| {
+        crate::response::remaining_max_age(max_age_seconds, fetched_at, crate::state::now_secs())
+    };
+    match outcome {
         FetchOutcome::Hit(t) => crate::response::tile_http_response_with_max_age(
             &t.content_type,
             &t.etag,
             t.stale,
             t.body,
             None,
-            max_age,
+            remaining(t.fetched_at),
         ),
-        FetchOutcome::NotModified { etag, stale } => {
-            crate::response::tile_http_response_with_max_age(
-                "",
-                &etag,
-                stale,
-                bytes::Bytes::new(),
-                Some(&etag),
-                max_age,
-            )
-        }
+        FetchOutcome::NotModified {
+            etag,
+            stale,
+            fetched_at,
+        } => crate::response::tile_http_response_with_max_age(
+            "",
+            &etag,
+            stale,
+            bytes::Bytes::new(),
+            Some(&etag),
+            remaining(fetched_at),
+        ),
         FetchOutcome::Empty { status } => StatusCode::from_u16(status)
             .unwrap_or(StatusCode::NOT_FOUND)
             .into_response(),
@@ -709,14 +724,7 @@ struct WarmBody {
 // Build placeholder ChartSource values keyed only by id; start_warm resolves each against the
 // allowlist and expands style sources from their validated learned templates. The placeholder
 // fields beyond `id` are unused after resolution.
-async fn warm_start(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<WarmBody>,
-) -> Response {
-    if !mutation_authorized(&st, &headers) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+async fn warm_start(State(st): State<AppState>, Json(body): Json<WarmBody>) -> Response {
     if body.sources.is_empty() || body.sources.len() > crate::warm::MAX_WARM_SOURCES {
         return StatusCode::BAD_REQUEST.into_response();
     }
@@ -801,6 +809,7 @@ async fn warm_start(
         }
         Err(crate::warm::StartError::BadRegion(message)) => {
             st.warm_rejections.fetch_add(1, Ordering::Relaxed);
+            eprintln!("event=warm_rejected reason=invalid_region");
             (StatusCode::BAD_REQUEST, message).into_response()
         }
         Err(crate::warm::StartError::ShuttingDown) => {
@@ -832,14 +841,7 @@ async fn warm_status_for_region(
     }
 }
 
-async fn warm_cancel(
-    State(st): State<AppState>,
-    Path(job_id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    if !mutation_authorized(&st, &headers) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
+async fn warm_cancel(State(st): State<AppState>, Path(job_id): Path<String>) -> Response {
     if !crate::warm::valid_job_id(&job_id) {
         return StatusCode::BAD_REQUEST.into_response();
     }
@@ -925,6 +927,22 @@ mod tests {
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    // Writes reuse free SQLite pages before growing the file, so the pressure flag counts reusable
+    // pages as the write gate does and reports pressure only while new tiles go uncached.
+    #[test]
+    fn disk_pressure_follows_the_write_gate_including_reusable_pages() {
+        let headroom = crate::cache::MIN_FREE_HEADROOM_BYTES;
+        assert_eq!(disk_pressure(None, headroom), None);
+        assert_eq!(disk_pressure(Some(headroom), 0), Some(false));
+        assert_eq!(disk_pressure(Some(headroom - 1), 0), Some(true));
+        assert_eq!(
+            disk_pressure(Some(headroom / 2), headroom / 2),
+            Some(false),
+            "reusable pages cover the shortfall, so writes are still stored"
+        );
+        assert_eq!(disk_pressure(Some(headroom / 2), headroom / 4), Some(true));
     }
 
     // The plugin folds this body into the operator-visible Signal K status line without stripping
@@ -1057,6 +1075,42 @@ mod tests {
         holding.into_body().collect().await.unwrap();
         let queued = queued.await.unwrap();
         assert_eq!(queued.status(), StatusCode::OK);
+    }
+
+    // The token is checked before any extractor reads the body, so an unauthenticated caller learns
+    // nothing about the body grammar and cannot make the container buffer and parse a large payload.
+    #[tokio::test]
+    async fn an_unauthenticated_mutation_is_refused_before_its_body_is_read() {
+        let db = NamedTempFile::new().unwrap();
+        let router = app(dev_state(&db));
+        for body in [
+            Body::from("{not json"),
+            Body::from(vec![b' '; crate::state::MAX_REQUEST_BODY_BYTES + 1]),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    HttpRequest::post("/config")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(body)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        for request in [
+            HttpRequest::post("/warm/warm-0-0/cancel"),
+            HttpRequest::post("/cache/scroll-ttl"),
+            HttpRequest::delete("/cache/region/r1"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
     }
 
     #[tokio::test]
@@ -1368,6 +1422,26 @@ mod tests {
         assert!(state.sources.read().await.contains_key("s"));
     }
 
+    // A region delete that fails in SQLite leaves its pins behind, so the failure is counted toward
+    // the diagnostics counter as well as logged.
+    #[tokio::test]
+    async fn a_failed_region_delete_counts_as_a_cache_operation_error() {
+        let db = NamedTempFile::new().unwrap();
+        let state = dev_state(&db);
+        state.cache.set_query_only_for_test();
+        let response = app(state.clone())
+            .oneshot(
+                HttpRequest::delete("/cache/region/r1")
+                    .header(CONTROL_TOKEN_HEADER, TEST_CONTROL_TOKEN)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(state.cache.operation_error_events(), 1);
+    }
+
     #[tokio::test]
     async fn a_failed_cap_eviction_does_not_publish_the_candidate_config() {
         let db = NamedTempFile::new().unwrap();
@@ -1553,6 +1627,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(oob.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // A cached radar frame already 200 seconds into its 300 second window has 100 seconds left. The
+    // browser holds whatever lifetime it is told, so it is told only the remaining window and never
+    // keeps the frame on the chart past the source's own limit.
+    #[tokio::test]
+    async fn a_cached_time_dynamic_tile_tells_the_browser_only_its_remaining_window() {
+        let db = NamedTempFile::new().unwrap();
+        let state = dev_state(&db);
+        let source: ChartSource = serde_json::from_value(serde_json::json!({
+            "id": "radar", "title": "Radar", "tileSize": 256, "minzoom": 0, "maxzoom": 18,
+            "attribution": "", "maxAgeSeconds": 300,
+            "upstream": {"mode": "xyz", "urlTemplate": "http://127.0.0.1:1/{z}/{x}/{y}"}
+        }))
+        .unwrap();
+        state.sources.write().await.insert("radar".into(), source);
+        let fetched_at = crate::state::now_secs() - 200;
+        state
+            .cache
+            .put(
+                TileKey::new("radar", 1, 0, 0),
+                &CachedTile {
+                    content_type: "image/png".into(),
+                    strong_etag: "\"frame\"".into(),
+                    upstream_validator: None,
+                    status: 200,
+                    fetched_at,
+                    last_access: fetched_at,
+                    bytes: 3,
+                    blob: Some(Bytes::from_static(&[1, 2, 3])),
+                },
+                false,
+                fetched_at,
+            )
+            .unwrap();
+
+        let response = app(state)
+            .oneshot(
+                Request::get("/tile/radar/1/0/0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cache_control = response.headers()[header::CACHE_CONTROL].to_str().unwrap();
+        assert!(
+            matches!(cache_control, "public, max-age=100" | "public, max-age=99"),
+            "{cache_control}"
+        );
     }
 
     #[tokio::test]

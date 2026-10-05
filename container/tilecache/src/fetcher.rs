@@ -26,6 +26,9 @@ pub struct TileResponse {
     pub etag: String,
     pub stale: bool,
     pub body: Bytes,
+    /// When the container fetched or last revalidated these bytes, so the route can tell the browser
+    /// how much of a time-dynamic source's window is left rather than granting a whole new one.
+    pub fetched_at: i64,
 }
 
 /// The outcome of a tile request, mapped to HTTP by the route layer.
@@ -34,6 +37,7 @@ pub enum FetchOutcome {
     NotModified {
         etag: String,
         stale: bool,
+        fetched_at: i64,
     },
     /// A negatively cached or upstream sparse-coverage response (status without a body).
     Empty {
@@ -44,6 +48,13 @@ pub enum FetchOutcome {
     BadRequest(String),
     /// Offline (or a bad upstream) and nothing cacheable to serve.
     Unavailable,
+}
+
+/// A tile request's outcome and its source's declared TTL, resolved under the same allowlist read so
+/// the route can tell the browser what is left of that window without a second read.
+pub struct TileLookup {
+    pub outcome: FetchOutcome,
+    pub max_age_seconds: Option<u64>,
 }
 
 pub(crate) fn acceptable_content_type(ct: &str) -> bool {
@@ -62,6 +73,12 @@ pub(crate) fn acceptable_content_type(ct: &str) -> bool {
             | "application/x-protobuf"
             | "application/vnd.mapbox-vector-tile"
     )
+}
+
+/// True for a cached 200 whose payload is safe to serve from the plugin origin. A legacy row of an
+/// active media type such as SVG fails this and is treated as a miss.
+fn is_safe_cached_200(tile: &CachedTile) -> bool {
+    tile.status == 200 && acceptable_content_type(&tile.content_type)
 }
 
 /// At most one last_access write per tile per hour, so a pan does not turn every warm-tile read into a
@@ -93,20 +110,49 @@ pub(crate) fn log_cache_err<T>(
     result: rusqlite::Result<T>,
 ) {
     if let Err(e) = result {
-        cache.record_operation_error(event, &e);
+        cache.record_operation_error(event, None, &e);
     }
 }
 
 /// Run a cache write off the reactor on the blocking pool and await its completion.
-async fn run_cache_write(label: &str, f: impl FnOnce() + Send + 'static) {
-    let handle = tokio::task::spawn_blocking(f);
-    if let Err(e) = handle.await {
-        eprintln!("event=cache_task_failed operation={label} error={e}");
+async fn run_cache_write(state: &AppState, label: &str, f: impl FnOnce() + Send + 'static) {
+    if let Err(e) = tokio::task::spawn_blocking(f).await {
+        state
+            .cache
+            .record_operation_error("cache_task_failed", Some(("operation", label)), &e);
     }
 }
 
-/// The single-flight key for a tile, shared by `fill` and `get_tile` so the stale-while-revalidate
-/// spawn guard keys on exactly the string `fill` registers under.
+/// Store one tile, then evict unpinned rows back to the live cap, on the blocking pool: once the cache
+/// sits at the cap, evict_to runs a window-function scan over the unpinned rows, so keeping it off the
+/// reactor stops a steady-state miss-store from stalling live tile reads. Soft reserve: evict_to drops
+/// only unpinned rows, so the scroll cache fills the cap minus the bytes actually pinned by saved
+/// regions (the full cap when nothing is pinned). Shared by the raster, negative, and style stores.
+pub(crate) async fn store_and_evict(
+    state: &AppState,
+    key: TileKey<'_>,
+    tile: CachedTile,
+    now: i64,
+    label: &str,
+) {
+    let cache = state.cache.clone();
+    let cap = state.live_cap_bytes.load(Ordering::Relaxed);
+    let TileKey { source, z, x, y } = key;
+    let source = source.to_string();
+    run_cache_write(state, label, move || {
+        log_cache_err(
+            &cache,
+            "cache_write_failed",
+            cache.put(TileKey::new(&source, z, x, y), &tile, false, now),
+        );
+        log_cache_err(&cache, "cache_eviction_failed", cache.evict_to(cap));
+    })
+    .await;
+}
+
+/// The single-flight key for a tile, shared by `fill`, `get_tile`, the style sub-resource routes, and
+/// the warm engine, so the stale-while-revalidate spawn guard keys on exactly the string `fill`
+/// registers under and a warm coalesces with a live read of the same tile.
 pub(crate) fn inflight_key(source_id: &str, z: u32, x: u32, y: u32) -> String {
     format!("{source_id}/{z}/{x}/{y}")
 }
@@ -118,6 +164,7 @@ fn to_response(tile: &CachedTile, stale: bool) -> TileResponse {
         etag: tile.strong_etag.clone(),
         stale,
         body: tile.blob.clone().unwrap_or_default(),
+        fetched_at: tile.fetched_at,
     }
 }
 
@@ -128,6 +175,7 @@ fn respond_cached(tile: &CachedTile, if_none_match: Option<&str>, stale: bool) -
         FetchOutcome::NotModified {
             etag: tile.strong_etag.clone(),
             stale,
+            fetched_at: tile.fetched_at,
         }
     } else {
         FetchOutcome::Hit(to_response(tile, stale))
@@ -239,25 +287,20 @@ async fn store_200(
         bytes: fetched.body.len() as i64,
         blob: Some(fetched.body.clone()),
     };
-    // Store and evict on the blocking pool: once the cache sits at the cap, evict_to runs a window-function
-    // scan over the unpinned rows, so keeping it off the async reactor stops a steady-state
-    // miss-store from stalling live tile reads. Soft reserve: evict_to(cap) drops only unpinned rows, so the
-    // scroll cache fills the cap minus the bytes actually pinned by saved regions (the full cap when nothing
-    // is pinned).
-    let cache = state.cache.clone();
-    let cap = state.live_cap_bytes.load(Ordering::Relaxed);
-    let source_owned = source_id.to_string();
-    run_cache_write("tile store", move || {
-        log_cache_err(
-            &cache,
-            "cache_write_failed",
-            cache.put(TileKey::new(&source_owned, z, x, y), &tile, false, now),
-        );
-        log_cache_err(&cache, "cache_eviction_failed", cache.evict_to(cap));
-    })
+    store_and_evict(
+        state,
+        TileKey::new(source_id, z, x, y),
+        tile,
+        now,
+        "tile store",
+    )
     .await;
     if if_none_match.is_some_and(|value| etag_matches(value, &etag)) {
-        return FetchOutcome::NotModified { etag, stale: false };
+        return FetchOutcome::NotModified {
+            etag,
+            stale: false,
+            fetched_at: now,
+        };
     }
     FetchOutcome::Hit(TileResponse {
         status: 200,
@@ -265,6 +308,7 @@ async fn store_200(
         etag,
         stale: false,
         body: fetched.body,
+        fetched_at: now,
     })
 }
 
@@ -277,18 +321,13 @@ async fn negative_cache(
     status: u16,
 ) -> FetchOutcome {
     let now = now_secs();
-    let tile = CachedTile::negative(status as i64, now);
-    let cache = state.cache.clone();
-    let state_cap = state.live_cap_bytes.load(Ordering::Relaxed);
-    let source_owned = source_id.to_string();
-    run_cache_write("negative-cache store", move || {
-        log_cache_err(
-            &cache,
-            "cache_write_failed",
-            cache.put(TileKey::new(&source_owned, z, x, y), &tile, false, now),
-        );
-        log_cache_err(&cache, "cache_eviction_failed", cache.evict_to(state_cap));
-    })
+    store_and_evict(
+        state,
+        TileKey::new(source_id, z, x, y),
+        CachedTile::negative(status as i64, now),
+        now,
+        "negative-cache store",
+    )
     .await;
     FetchOutcome::Empty { status }
 }
@@ -307,81 +346,98 @@ pub async fn get_tile(
     x: u32,
     y: u32,
     if_none_match: Option<String>,
-) -> FetchOutcome {
-    let source = {
-        let map = state.sources.read().await;
-        match map.get(source_id) {
-            Some(s) => s.clone(),
-            None => return FetchOutcome::NotAllowed,
-        }
+) -> TileLookup {
+    let rejected = |outcome| TileLookup {
+        outcome,
+        max_age_seconds: None,
     };
-    if matches!(source.upstream, UpstreamTemplate::Style { .. }) {
-        return FetchOutcome::NotAllowed;
-    }
-    let url = match expand_upstream(&source, z, x, y) {
-        Ok(u) => u,
-        Err(e) => return FetchOutcome::BadRequest(e.0),
+    // Resolve everything the request needs under one read guard instead of cloning the whole source,
+    // whose attribution and coverage boxes would otherwise be copied on every tile request.
+    let (url, fresh_secs, max_stale_secs, max_age_seconds) = {
+        let map = state.sources.read().await;
+        let Some(source) = map.get(source_id) else {
+            return rejected(FetchOutcome::NotAllowed);
+        };
+        if matches!(source.upstream, UpstreamTemplate::Style { .. }) {
+            return rejected(FetchOutcome::NotAllowed);
+        }
+        match expand_upstream(source, z, x, y) {
+            Ok(url) => (
+                url,
+                source.fresh_secs(state.knobs.fresh_secs),
+                source.max_stale_secs(state.knobs.max_stale_secs),
+                source.max_age_seconds,
+            ),
+            Err(e) => return rejected(FetchOutcome::BadRequest(e.0)),
+        }
     };
     let now = now_secs();
 
-    // Cache-first: the paths served inline (no upstream fetch, so no spawn).
-    if let Ok(Some(tile)) = state.cache_get(source_id, z, x, y).await {
-        if tile.status != 200 {
-            if now - tile.fetched_at < state.knobs.negative_ttl_secs {
-                return FetchOutcome::Empty {
-                    status: tile.status as u16,
-                };
-            }
-            // An expired negative falls through to a fresh fill.
-        } else if !acceptable_content_type(&tile.content_type) {
-            // Older versions admitted every image/* media type. Never serve a legacy active payload
-            // such as SVG from the authenticated plugin origin; treat it as a miss so a safe upstream
-            // response can replace the row while preserving any region pins.
-            eprintln!(
-                "event=unsafe_cached_tile_ignored source={source_id} z={z} x={x} y={y} content_type={}",
-                tile.content_type
-            );
-        } else if now - tile.fetched_at < source.fresh_secs(state.knobs.fresh_secs) {
-            // Throttle the LRU write so a pan does not write to the microSD on every warm-tile read, and
-            // run it detached on the blocking pool so the best-effort last_access bump never delays the
-            // cache hit or blocks the reactor on a SQLite write.
-            if now - tile.last_access >= TOUCH_THROTTLE_SECS {
-                if let Some(permit) = state.try_touch_permit() {
-                    let cache = state.cache.clone();
-                    let source_owned = source_id.to_string();
-                    tokio::task::spawn_blocking(move || {
-                        let _permit = permit;
-                        log_cache_err(
-                            &cache,
-                            "cache_touch_failed",
-                            cache.touch(TileKey::new(&source_owned, z, x, y), now),
-                        );
-                    });
+    let outcome = 'serve: {
+        // Cache-first: the paths served inline (no upstream fetch, so no spawn).
+        if let Ok(Some(tile)) = state.cache_get(source_id, z, x, y).await {
+            if tile.status != 200 {
+                if now - tile.fetched_at < state.knobs.negative_ttl_secs {
+                    break 'serve FetchOutcome::Empty {
+                        status: tile.status as u16,
+                    };
                 }
+                // An expired negative falls through to a fresh fill.
+            } else if !is_safe_cached_200(&tile) {
+                // Older versions admitted every image/* media type. Never serve a legacy active
+                // payload such as SVG from the authenticated plugin origin; treat it as a miss so a
+                // safe upstream response can replace the row while preserving any region pins.
+                eprintln!(
+                    "event=unsafe_cached_tile_ignored source={source_id} z={z} x={x} y={y} content_type={}",
+                    tile.content_type
+                );
+            } else if now - tile.fetched_at < fresh_secs {
+                // Throttle the LRU write so a pan does not write to the microSD on every warm-tile
+                // read, and run it detached on the blocking pool so the best-effort last_access bump
+                // never delays the cache hit or blocks the reactor on a SQLite write.
+                if now - tile.last_access >= TOUCH_THROTTLE_SECS {
+                    if let Some(permit) = state.try_touch_permit() {
+                        let cache = state.cache.clone();
+                        let source_owned = source_id.to_string();
+                        tokio::task::spawn_blocking(move || {
+                            let _permit = permit;
+                            log_cache_err(
+                                &cache,
+                                "cache_touch_failed",
+                                cache.touch(TileKey::new(&source_owned, z, x, y), now),
+                            );
+                        });
+                    }
+                }
+                break 'serve respond_cached(&tile, if_none_match.as_deref(), false);
+            } else if state.upstream_health.is_slow(source_id)
+                && now - tile.fetched_at < max_stale_secs
+            {
+                // Stale-while-revalidate for a slow source: serve the stale tile now and revalidate
+                // in the background, so a pan does not block on a multi-second revalidation. Spawn at
+                // most one fill per hot key: a failed revalidation stores nothing, so without the
+                // guard each queued stale read refetches at the escalated timeout while holding an
+                // egress permit, and the tasks pile up. The tiny race where a second read spawns
+                // before the first fill registers the key is bounded, because the tasks serialize on
+                // the single-flight lock. The detached task outlives this handler, so a client
+                // disconnect cannot cancel it.
+                let key = inflight_key(source_id, z, x, y);
+                if !state.inflight_contains(&key).await {
+                    let _ = spawn_fill(state, source_id, z, x, y, url, if_none_match.clone());
+                }
+                // A matching validator answers 304 with the stale etag rather than shipping the
+                // stale body.
+                break 'serve respond_cached(&tile, if_none_match.as_deref(), true);
             }
-            return respond_cached(&tile, if_none_match.as_deref(), false);
-        } else if state.upstream_health.is_slow(source_id)
-            && now - tile.fetched_at < source.max_stale_secs(state.knobs.max_stale_secs)
-        {
-            // Stale-while-revalidate for a slow source: serve the stale tile now and revalidate in the
-            // background, so a pan does not block on a multi-second revalidation. Spawn at most one fill
-            // per hot key: a failed revalidation stores nothing, so without the guard each queued stale
-            // read refetches at the escalated timeout while holding an egress permit, and the tasks pile
-            // up. The tiny race where a second read spawns before the first fill registers the key is
-            // bounded, because the tasks serialize on the single-flight lock. The detached task outlives
-            // this handler, so a client disconnect cannot cancel it.
-            let key = inflight_key(source_id, z, x, y);
-            if !state.inflight_contains(&key).await {
-                let _ = spawn_fill(state, source_id, z, x, y, url, if_none_match.clone());
-            }
-            // A matching validator answers 304 with the stale etag rather than shipping the stale body.
-            return respond_cached(&tile, if_none_match.as_deref(), true);
+            // A stale tile on a source that is not slow (or one past the stale bound) falls through
+            // to an awaited fill, so the revalidation and its 304 or 200 outcome are observed inline.
         }
-        // A stale tile on a source that is not slow (or one past the stale bound) falls through to an
-        // awaited fill, so the revalidation and its 304 or 200 outcome are observed inline.
+        fill_and_await(state, source_id, z, x, y, url, if_none_match).await
+    };
+    TileLookup {
+        outcome,
+        max_age_seconds,
     }
-
-    fill_and_await(state, source_id, z, x, y, url, if_none_match).await
 }
 
 /// Spawn a detached `fill` task, so a browser or proxy disconnect that drops the caller cannot cancel
@@ -476,7 +532,9 @@ async fn fill_and_await(
     match handle.await {
         Ok(outcome) => outcome,
         Err(e) => {
-            eprintln!("event=cache_fill_task_failed error={e}");
+            state
+                .cache
+                .record_operation_error("cache_fill_task_failed", None, &e);
             FetchOutcome::Unavailable
         }
     }
@@ -522,10 +580,7 @@ async fn fill(
     let windows = state.tile_windows_for(&source_id).await;
     let existing = state.cache_get(&source_id, z, x, y).await.ok().flatten();
     if let Some(tile) = &existing {
-        if tile.status == 200
-            && acceptable_content_type(&tile.content_type)
-            && now - tile.fetched_at < windows.fresh_secs
-        {
+        if is_safe_cached_200(tile) && now - tile.fetched_at < windows.fresh_secs {
             state.inflight_finish(&key, &lock).await;
             return respond_cached(tile, if_none_match.as_deref(), false);
         }
@@ -536,9 +591,7 @@ async fn fill(
             };
         }
     }
-    let outcome = if let Some(tile) =
-        existing.filter(|t| t.status == 200 && acceptable_content_type(&t.content_type))
-    {
+    let outcome = if let Some(tile) = existing.filter(is_safe_cached_200) {
         // A stale 200: revalidate with the stored validator, else serve stale within the max-stale bound.
         match fetch_upstream(&state, &source_id, &url, tile.upstream_validator.as_deref()).await {
             Ok((304, _)) => {
@@ -546,10 +599,13 @@ async fn fill(
                 let mut refreshed = tile.clone();
                 refreshed.fetched_at = refreshed_at;
                 refreshed.last_access = refreshed_at;
+                // Answer with the refreshed copy: the upstream just confirmed these bytes, so their
+                // remaining lifetime restarts now.
+                let outcome = respond_cached(&refreshed, if_none_match.as_deref(), false);
                 // Off the reactor like store_200: the freshness-bump write is a SQLite write.
                 let cache = state.cache.clone();
                 let source_owned = source_id.clone();
-                run_cache_write("revalidation refresh", move || {
+                run_cache_write(&state, "revalidation refresh", move || {
                     log_cache_err(
                         &cache,
                         "cache_write_failed",
@@ -562,7 +618,7 @@ async fn fill(
                     )
                 })
                 .await;
-                respond_cached(&tile, if_none_match.as_deref(), false)
+                outcome
             }
             Ok((200, fetched)) => {
                 store_200(
@@ -608,10 +664,11 @@ async fn fill(
             Err(_) => {
                 // Offline or timed out: serve any cached 200 that is still servable. The single-flight
                 // lock does not cover the warm engine's batch flush, so a concurrent region or position warm
-                // can have stored a 200 for this key since the re-check.
+                // can have stored a 200 for this key since the re-check. A legacy active payload that
+                // routed this fill here as a miss stays unservable when the replacement fetch fails.
                 match state.cache_get(&source_id, z, x, y).await {
                     Ok(Some(tile))
-                        if tile.status == 200
+                        if is_safe_cached_200(&tile)
                             && may_serve_stale(
                                 &state,
                                 &source_id,
@@ -854,9 +911,9 @@ mod tests {
             get_tile(&st, "s", 1, 0, 0, None),
             get_tile(&st, "s", 1, 0, 0, None)
         );
-        assert!(matches!(a, FetchOutcome::Hit(_)));
-        assert!(matches!(b, FetchOutcome::Hit(_)));
-        let c = get_tile(&st, "s", 1, 0, 0, None).await;
+        assert!(matches!(a.outcome, FetchOutcome::Hit(_)));
+        assert!(matches!(b.outcome, FetchOutcome::Hit(_)));
+        let c = get_tile(&st, "s", 1, 0, 0, None).await.outcome;
         assert!(matches!(c, FetchOutcome::Hit(_)));
         assert_eq!(
             hits.load(Ordering::SeqCst),
@@ -878,7 +935,7 @@ mod tests {
             )
             .await;
             assert!(matches!(
-                get_tile(&st, "s", 0, 0, 0, None).await,
+                get_tile(&st, "s", 0, 0, 0, None).await.outcome,
                 FetchOutcome::Unavailable
             ));
             assert!(
@@ -919,7 +976,7 @@ mod tests {
             )
             .unwrap();
 
-        let FetchOutcome::Hit(response) = get_tile(&st, "s", 0, 0, 0, None).await else {
+        let FetchOutcome::Hit(response) = get_tile(&st, "s", 0, 0, 0, None).await.outcome else {
             panic!("the safe upstream replacement should be served");
         };
         assert_eq!(response.content_type, "image/png");
@@ -937,6 +994,38 @@ mod tests {
 
     // Nothing listens here, so every fetch fails as a transport error: the offline boat.
     const OFFLINE_TEMPLATE: &str = "http://127.0.0.1:1/img/{z}/{x}/{y}";
+
+    // The unsafe row reaches the fill as a miss. When the replacement fetch then fails, the offline
+    // fallback must not hand the same row back as a servable stale tile.
+    #[tokio::test]
+    async fn a_legacy_cached_svg_is_not_served_stale_when_the_upstream_is_offline() {
+        let db = NamedTempFile::new().unwrap();
+        let st = state_with(&db, dev_knobs(), xyz_source(OFFLINE_TEMPLATE.into())).await;
+        let now = now_secs();
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>"#;
+        st.cache
+            .put(
+                TileKey::new("s", 0, 0, 0),
+                &CachedTile {
+                    content_type: "image/svg+xml".into(),
+                    strong_etag: strong_etag(svg),
+                    upstream_validator: None,
+                    status: 200,
+                    fetched_at: now,
+                    last_access: now,
+                    bytes: svg.len() as i64,
+                    blob: Some(Bytes::copy_from_slice(svg)),
+                },
+                false,
+                now,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            get_tile(&st, "s", 0, 0, 0, None).await.outcome,
+            FetchOutcome::Unavailable
+        ));
+    }
 
     fn store_aged_tile(st: &AppState, age_secs: i64, pinned: bool) -> i64 {
         let stored_at = now_secs() - age_secs;
@@ -969,7 +1058,7 @@ mod tests {
         let st = state_with(&db, dev_knobs(), xyz_source(OFFLINE_TEMPLATE.into())).await;
         store_aged_tile(&st, st.knobs.max_stale_secs + 86_400, true);
 
-        let FetchOutcome::Hit(response) = get_tile(&st, "s", 1, 0, 0, None).await else {
+        let FetchOutcome::Hit(response) = get_tile(&st, "s", 1, 0, 0, None).await.outcome else {
             panic!("a pinned saved-region tile must still serve while the upstream is unreachable");
         };
         assert!(response.stale, "it is served as stale, not as current");
@@ -984,7 +1073,7 @@ mod tests {
         let st = state_with(&db, dev_knobs(), xyz_source(OFFLINE_TEMPLATE.into())).await;
         store_aged_tile(&st, st.knobs.max_stale_secs + 86_400, false);
         assert!(matches!(
-            get_tile(&st, "s", 1, 0, 0, None).await,
+            get_tile(&st, "s", 1, 0, 0, None).await.outcome,
             FetchOutcome::Unavailable
         ));
     }
@@ -1000,14 +1089,14 @@ mod tests {
         let st = state_with(&db, dev_knobs(), source).await;
         store_aged_tile(&st, 3_600, false);
         assert!(matches!(
-            get_tile(&st, "s", 1, 0, 0, None).await,
+            get_tile(&st, "s", 1, 0, 0, None).await.outcome,
             FetchOutcome::Unavailable
         ));
 
         // Pinning it changes nothing: the TTL is the point, whatever put the row there.
         store_aged_tile(&st, 3_600, true);
         assert!(matches!(
-            get_tile(&st, "s", 1, 0, 0, None).await,
+            get_tile(&st, "s", 1, 0, 0, None).await.outcome,
             FetchOutcome::Unavailable
         ));
 
@@ -1018,7 +1107,7 @@ mod tests {
             state_with(&static_db, dev_knobs(), xyz_source(OFFLINE_TEMPLATE.into())).await;
         store_aged_tile(&static_st, 3_600, false);
         assert!(matches!(
-            get_tile(&static_st, "s", 1, 0, 0, None).await,
+            get_tile(&static_st, "s", 1, 0, 0, None).await.outcome,
             FetchOutcome::Hit(_)
         ));
     }
@@ -1035,14 +1124,14 @@ mod tests {
         )
         .await;
         assert!(matches!(
-            get_tile(&st, "s", 0, 0, 0, None).await,
+            get_tile(&st, "s", 0, 0, 0, None).await.outcome,
             FetchOutcome::Empty { status: 404 }
         ));
         let row = st.cache.get(TileKey::new("s", 0, 0, 0)).unwrap().unwrap();
         assert_eq!(row.status, 404);
         // A second request within the negative TTL serves from the negative cache.
         assert!(matches!(
-            get_tile(&st, "s", 0, 0, 0, None).await,
+            get_tile(&st, "s", 0, 0, 0, None).await.outcome,
             FetchOutcome::Empty { status: 404 }
         ));
     }
@@ -1058,13 +1147,13 @@ mod tests {
             xyz_source(format!("http://{addr}/img/{{z}}/{{x}}/{{y}}")),
         )
         .await;
-        let first = get_tile(&st, "s", 2, 1, 1, None).await;
+        let first = get_tile(&st, "s", 2, 1, 1, None).await.outcome;
         let etag = match first {
             FetchOutcome::Hit(r) => r.etag,
             _ => panic!("expected a hit"),
         };
         assert!(matches!(
-            get_tile(&st, "s", 2, 1, 1, Some(etag)).await,
+            get_tile(&st, "s", 2, 1, 1, Some(etag)).await.outcome,
             FetchOutcome::NotModified { .. }
         ));
     }
@@ -1086,7 +1175,7 @@ mod tests {
         )
         .await;
         assert!(matches!(
-            get_tile(&st, "s", 1, 0, 0, None).await,
+            get_tile(&st, "s", 1, 0, 0, None).await.outcome,
             FetchOutcome::Hit(_)
         ));
         // Point the source at a dead port so the revalidation fetch fails (offline).
@@ -1094,7 +1183,7 @@ mod tests {
             "s".into(),
             xyz_source("http://127.0.0.1:1/img/{z}/{x}/{y}".into()),
         );
-        match get_tile(&st, "s", 1, 0, 0, None).await {
+        match get_tile(&st, "s", 1, 0, 0, None).await.outcome {
             FetchOutcome::Hit(r) => {
                 assert!(r.stale, "the offline read serves the stale cached tile")
             }
@@ -1107,7 +1196,7 @@ mod tests {
         let db = NamedTempFile::new().unwrap();
         let st = state_with(&db, dev_knobs(), xyz_source("http://x/{z}/{x}/{y}".into())).await;
         assert!(matches!(
-            get_tile(&st, "nope", 0, 0, 0, None).await,
+            get_tile(&st, "nope", 0, 0, 0, None).await.outcome,
             FetchOutcome::NotAllowed
         ));
     }
@@ -1126,7 +1215,7 @@ mod tests {
         .await;
         assert!(
             matches!(
-                get_tile(&st, "s", 1, 0, 0, None).await,
+                get_tile(&st, "s", 1, 0, 0, None).await.outcome,
                 FetchOutcome::Hit(_)
             ),
             "the single retry at the escalated timeout succeeds"
@@ -1151,7 +1240,7 @@ mod tests {
         )
         .await;
         assert!(matches!(
-            get_tile(&st, "s", 1, 0, 0, None).await,
+            get_tile(&st, "s", 1, 0, 0, None).await.outcome,
             FetchOutcome::Unavailable
         ));
         assert!(
@@ -1174,7 +1263,7 @@ mod tests {
         .await;
         // The first request times out twice, so the streak reaches 2 and the schedule reads base << 2.
         assert!(matches!(
-            get_tile(&st, "s", 1, 0, 0, None).await,
+            get_tile(&st, "s", 1, 0, 0, None).await.outcome,
             FetchOutcome::Unavailable
         ));
         assert_eq!(
@@ -1184,7 +1273,7 @@ mod tests {
         );
         // The next request answers instantly and caches; the escalation stays sticky within the window.
         assert!(matches!(
-            get_tile(&st, "s", 1, 0, 0, None).await,
+            get_tile(&st, "s", 1, 0, 0, None).await.outcome,
             FetchOutcome::Hit(_)
         ));
         assert_eq!(
@@ -1250,7 +1339,8 @@ mod tests {
             std::time::Duration::from_millis(500),
             get_tile(&st, "s", 1, 0, 0, None),
         )
-        .await;
+        .await
+        .map(|lookup| lookup.outcome);
         match outcome {
             Ok(FetchOutcome::Hit(r)) => {
                 assert!(r.stale, "the slow source serves the stale tile immediately")
@@ -1281,7 +1371,8 @@ mod tests {
             std::time::Duration::from_millis(500),
             get_tile(&st, "s", 1, 0, 0, Some("e".into())),
         )
-        .await;
+        .await
+        .map(|lookup| lookup.outcome);
         match outcome {
             Ok(FetchOutcome::NotModified { etag, .. }) => {
                 assert_eq!(
@@ -1313,8 +1404,8 @@ mod tests {
         prime_stale_slow_tile(&st);
         // Both reads return the stale tile immediately; the spawn guard and the single-flight lock keep
         // the concurrent stale reads to a single in-flight upstream fetch.
-        let a = get_tile(&st, "s", 1, 0, 0, None).await;
-        let b = get_tile(&st, "s", 1, 0, 0, None).await;
+        let a = get_tile(&st, "s", 1, 0, 0, None).await.outcome;
+        let b = get_tile(&st, "s", 1, 0, 0, None).await.outcome;
         assert!(matches!(a, FetchOutcome::Hit(_)));
         assert!(matches!(b, FetchOutcome::Hit(_)));
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
