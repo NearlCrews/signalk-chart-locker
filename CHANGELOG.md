@@ -6,6 +6,166 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+<a id="v0100"></a>
+
+## [0.10.0] - 2026-10-05
+
+This release moves the configuration panel to `signalk-nearlcrews-ui` 0.13.0, rebuilds the tile
+cache on Rust 1.99.0 over Debian 13, and corrects faults in the plugin and the container. The panel
+compares edits with the configuration the Signal K Admin holds, announces each condition on its own,
+reads sizes as words, and warns when its status readout goes stale. The plugin keeps a scroll-tile
+retention changed since startup through every container recovery and restart, applies a
+`signalk-pmtiles-plugin` toggle made during startup, and answers 503 rather than a misleading 409
+while it is stopped. The container returns cleared space to the filesystem in large steps instead of
+one page at a time, checks the control token before it reads a request body, and reports disk
+pressure the way its write gate measures it. Every dependency, workflow action, and release tool is
+current, and the full `npm audit` reports nothing. No configuration migration is required.
+
+### Changed
+
+- The configuration panel targets `signalk-nearlcrews-ui` 0.13.0 and follows its repainted sections,
+  borders, tone glyphs, and Night theme. The three App Store screenshots are refreshed.
+- The panel compares its edits with the configuration the Signal K Admin holds now, by value, instead
+  of with a copy it kept. An edit undone by hand reads as no change, text is validated and saved
+  trimmed the way the plugin reads it, and the configuration the Admin hands back after a save leaves
+  the panel clean.
+- A plugin nobody has configured opens with Save offered as the way to enable it, with the cache cap
+  sized from the detected free space. A package that arrives with an empty configuration counts as
+  configured.
+- Each condition banner announces itself from a region mounted empty with the panel, replacing two
+  combined announcers that reread every condition at once. Errors interrupt; the other conditions
+  wait.
+- The plugin status note reads "Checked N minutes ago" and turns into an "Out of date" warning with
+  the warning mark once status polls stop succeeding for a minute.
+- Byte sizes are read as words: the cache cap slider speaks "8 gibibytes" as its value, and the
+  metrics, the per-source usage table, the free-space note, and the saved-regions budget read their
+  unit names rather than spelling out GiB, MiB, or KiB.
+- A maintenance button blocked while another action runs says what it is waiting for, and Apply
+  retention says when the retention is already in force. Discard also drops a number box's text that
+  is still being typed.
+- Validation messages say how to fix the field, and a failed maintenance action names the action,
+  such as "Applying the retention change failed: HTTP 503. Try again."
+- The scroll-cache retention and saved-regions budget boxes are sized for the few digits they hold,
+  matching the cache cap's exact-value box, rather than stretching across the row. A cache size in
+  the per-source table stays on one line on a narrow panel, where the table scrolls instead.
+- The panel build runs `snui-check-consumer` in runtime mode with the Webpack stats. It renders the
+  built remote under the host's share scope with an absent and an empty configuration and checks the
+  module graph, so the repository's own bundle script keeps only its package inventory and notices
+  check. The browser suite loads the remote through the shared UI's host harness. The panel remote
+  measures 53,729 gzip bytes, the new recorded baseline.
+- An unavailable external cache path error includes `signalk-container`'s reason, which tells a
+  missing path from one a containerized Signal K could not see.
+- The recovery cooldown, the position-warm backoff, and the saved-region cache refresh measure
+  intervals on a monotonic clock, so a system clock set from GPS after boot cannot stretch or skip
+  them.
+- Every PMTiles conflict message names `signalk-pmtiles-plugin`, the package an operator installs.
+- The plugin loads the chart-source catalog through one shared loader and keeps one definition each
+  of its manager-operation bound, its retry delays, and its saved-region and position-warm validation
+  limits.
+- The tile cache checks the control token before reading a request body, so an unauthenticated
+  change is refused with 401 without parsing its payload.
+- The tile cache refuses an upstream response whose declared length exceeds the body limit before
+  downloading it.
+- Egress no longer connects to the IPv6 IETF protocol assignment block (2001::/23), which includes
+  Teredo and the benchmarking range.
+- A large region download at the cache cap evicts scroll tiles to the same margin below the cap as
+  live browsing, so it no longer rescans every scroll tile on each batch.
+- Container log lines use the structured `event=` form throughout, and basemap download failures
+  name the cache source rather than the upstream URL, which can carry a provider key.
+- Development dependencies move to their current releases: Babel 8.0.6, the Signal K server API types
+  2.33, `@types/node` 22.20.5, the Vite React plugin 6.1.2, cspell 10.3.6, knip 6.39, tsx 4.23.15,
+  Vite 8.3.2, and webpack 5.111.1, with every transitive package refreshed inside its range. ESLint
+  stays on 9.x because eslint-plugin-react and stable neostandard still declare an ESLint 9 peer, and
+  `@types/node` stays on 22 to match the runtime floor.
+- The Markdown linter calls the `markdownlint` library directly instead of running
+  `markdownlint-cli2`, with the same rules over the same 13 maintained guides. The wrapper's glob
+  stack carried an unpatched `braces` advisory, so the full `npm audit`, development dependencies
+  included, now reports nothing at any severity. The `minimatch` and `smol-toml` overrides are gone,
+  because ESLint's own range now floors at the patched `minimatch` 3.1.5 and nothing pins `smol-toml`
+  once the wrapper is removed.
+- The container builds on Rust 1.99.0 over Debian 13: the builder is `rust:1.99.0-trixie` and the
+  runtime is `distroless/cc-debian13`, both digest pinned, because Debian 12 left regular security
+  support in June 2026. `container/rust-toolchain.toml` and the toolchain inputs in the CI, container
+  image, and publish workflows advance with them. Every Rust dependency is refreshed inside its range.
+- The reusable Signal K plugin CI workflow moves to its 2026-10-04 master commit, which retires the
+  armv7 lane upstream and replaces npm 10.9 on Node 22 runners, so the caller no longer passes the
+  retired `enable-armv7` input.
+- Workflow actions move to CodeQL 4.38.2, setup-qemu 4.4.0, setup-buildx 4.4.1, build-push 7.4.0,
+  zizmor-action 0.6.4, and the Rust toolchain action's 2026-10-01 commit, which retries toolchain
+  downloads that fail their checksum.
+- Release tooling moves to Cosign 3.1.3, which fixes a signature verification bypass
+  (GHSA-fx35-mq7g-6g98), Syft 1.52.0, npm 12.1.0 for trusted publishing, and cargo-about 0.9.2, which
+  no longer discards detected license files. The image workflow names SPDX 2.3 explicitly, and
+  `npm run ci:workflows` requires the image and publish workflows to agree on the Cosign release and
+  the SBOM version, and every publish job to install the same npm client.
+- `npm run check:package` and `npm run pack:release` start npm through the CLI path npm gives its
+  scripts, so they also run on Windows. The notices generator works from a checkout path containing
+  spaces, a stale Rust license report names its first differing line, the staging cleanup workflow
+  grants package write access only to its job, and the package check leaves the shared UI
+  dependency-field rule to the library's consumer check, which now enforces it.
+
+### Fixed
+
+- Host-side recovery restores the scroll-tile retention currently saved instead of the value from the
+  plugin start, and the container waits for its first configuration before its first age sweep, so a
+  retention raised or disabled from the panel survives both a recovery recreate and a container
+  restart outside Chart Locker. Either sweep would otherwise remove scroll tiles the operator chose
+  to keep.
+- A scroll-tile retention saved while the tile cache is receiving its configuration now reaches the
+  container last, so the container always applies the most recent save rather than keeping the
+  older value that configuration carried until the next restart.
+- Enabling or disabling `signalk-pmtiles-plugin` while the tile cache is starting is applied once
+  startup finishes, instead of leaving both providers publishing the same charts, or neither, until
+  the next restart.
+- A stopped or starting Chart Locker answers PMTiles archive and chart-management requests with 503
+  rather than a 409 blaming `signalk-pmtiles-plugin`, and its v1 chart routes pass the request on, so
+  that plugin's own v1 routes keep answering after a live switch.
+- A host-side recovery that leaves the container without a resolvable address is reported as a
+  plugin error that names the cause and asks for a restart, since nothing is left to retry it. A more
+  specific cause found during the recovery, such as a missing external cache drive, keeps its own
+  remedy in the status instead.
+- A saved-region bookkeeping write that fails at startup, for example on a full disk, is logged and
+  retried at the next start instead of failing the whole start and stopping the tile cache and the
+  PMTiles provider with it.
+- A saved-region, cache, or geocode route that fails unexpectedly answers 500 instead of leaving the
+  request open.
+- The status line shows "Starting..." again after a stop during startup, rather than keeping the
+  server's "Stopped".
+- The style route reports a successful container response without a style document as 502, rather
+  than relaying an empty success MapLibre cannot parse.
+- Reverse geocoding refuses a repeated or nested `lat` or `lon` query value with 400 instead of
+  forwarding its string form.
+- A refused saved-region delete returns the container's explanation in the usual JSON error shape,
+  and an unreachable container returns `{ "error": "tilecache unreachable" }`.
+- Clearing the scroll cache or lowering the cache cap returns free space to the filesystem in 16 MiB
+  steps. It previously returned one 4 KiB page per step, so a multi-gigabyte clear ran hundreds of
+  thousands of WAL truncations.
+- A legacy cached SVG or other active payload is no longer served as a stale tile while the upstream
+  is unreachable.
+- The cache statistics disk-pressure flag counts free pages inside the cache database, as the write
+  gate does, so the panel no longer reports tiles going uncached while SQLite is still reusing space
+  for them.
+- A saved-region download that runs out of disk inside SQLite ends `capped` and keeps the previous
+  pins instead of failing with a write error.
+- A region download whose basemap glyphs and sprite exceed the saved-regions budget ends `capped`
+  rather than `error`, and an already cached glyph range or sprite is measured against the same
+  replacement allowance as a fetched one.
+- Time-dynamic overlay tiles tell the browser only what remains of their source's freshness window,
+  so a cached radar frame is no longer held for up to twice its declared lifetime.
+- Glyph ranges and sprites answer a browser revalidation with 304 Not Modified instead of resending
+  the whole asset.
+- Upstream timeouts during a basemap download are tracked under the basemap's catalog id, so the
+  slow source escalation reaches the live basemap routes and cache statistics no longer list internal
+  cache keys as sources.
+- Failed region deletions, warm writes, region promotions, staging cleanup, and scroll retention
+  sweeps count toward `cacheOperationErrors` instead of only being logged.
+- The panel's diagnostics line pluralizes each count ("1 cache error"), and the restart notice joins
+  what it reapplies with a serial comma.
+- A failure that already ended in a full stop, such as Firefox's network error, no longer reads with
+  two.
+- The empty charts hint names the saved directory the scan read rather than an unsaved edit, and the
+  free-space note rounds to one decimal place like the metrics above it.
+
 <a id="v090"></a>
 
 ## [0.9.0] - 2026-09-14
@@ -896,7 +1056,8 @@ All tile-cache compute lives in the container.
   recreating rather than crash-looping; and the egress SSRF guard also rejects the IPv6 6to4 and
   NAT64 transition ranges.
 
-[Unreleased]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/NearlCrews/signalk-chart-locker/compare/v0.8.1...v0.8.3

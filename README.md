@@ -14,26 +14,22 @@ and local PMTiles chart serving.
 > safety-of-life navigation: always cross-check against official charts and your primary
 > instruments.
 
-## What's new in 0.9.0
+## What's new in 0.10.0
 
-Version 0.9.0 rebuilds the configuration panel on `signalk-nearlcrews-ui` 0.11.1. A render failure
-inside the panel now offers "Try again" and "Reload page" in place, instead of the Signal K Admin
-host replacing the whole panel with its generic unavailable notice. A save blocked by an invalid
-field refuses in place and names the field to fix, rather than leaving a keyboard operator standing
-on a control that vanished. Fields show their unit beside the input and read it with the value, the
-theme selector labels its group and its two automatic choices, and a maintenance action that runs
-past its budget still reports the words the button that started it used.
+Version 0.10.0 moves the configuration panel to `signalk-nearlcrews-ui` 0.13.0. The panel compares
+your edits with the configuration the Signal K Admin holds, so an edit undone by hand reads as no
+change, and a plugin nobody has configured opens with Save offered as the way to enable it. Each
+warning banner announces itself on its own, the status note warns when its readout is out of date,
+sizes are read aloud as words, and short number boxes are sized for the digits they hold.
 
-The plugin keeps an actionable startup problem, a missing `signalk-container` or an unmounted
-external cache path, in the status line instead of overwriting it with the generic line that says
-tile caching is disabled, and it says so when a server leaves the management API unmounted. A charts
-directory that was rejected at start is polled like any other, so repairing it serves the archives
-in it without a plugin restart, and the poll rescans only when that directory has actually changed.
-`signalk-container` is no longer a peer dependency, so installing this plugin no longer installs a
-second plugin under it. The tile-cache container reports its log lines as `event=` key value pairs,
-which the operations guide lists.
+The plugin keeps a scroll-tile retention you changed since startup through every container recovery
+and restart, applies a `signalk-pmtiles-plugin` toggle made while the tile cache was starting, and
+answers 503 rather than a misleading conflict while it is stopped. The tile-cache container now
+builds on Rust 1.99.0 over Debian 13. It returns cleared space to the filesystem in large steps
+rather than one page at a time, checks its control token before it reads a request body, and reports
+disk pressure the way its write gate measures it.
 
-See the [0.9.0 changelog](https://github.com/NearlCrews/signalk-chart-locker/blob/main/CHANGELOG.md#v090)
+See the [0.10.0 changelog](https://github.com/NearlCrews/signalk-chart-locker/blob/main/CHANGELOG.md#v0100)
 for the full list.
 
 ## What it does
@@ -87,9 +83,9 @@ tiles. A standalone install of Binnacle is unaffected.
   clear only unpinned scroll tiles, refresh live state, and request a chart rescan from the same panel.
   The panel uses the accessible, theme-aware
   [`signalk-nearlcrews-ui`](https://github.com/NearlCrews/signalk-nearlcrews-ui) primitives and shares
-  its Auto, System, Light, Dark, and Night preference with other NearlCrews plugin panels. Auto
-  follows an explicit host theme and otherwise uses Light, while System follows the operating-system
-  color scheme.
+  its Match Admin, Match device, Light, Dark, and Night preference with other NearlCrews plugin
+  panels. Match Admin follows a theme the Signal K Admin shares and otherwise uses Light, while
+  Match device follows the operating-system color scheme.
 
 ## Requirements
 
@@ -237,7 +233,7 @@ routes and validation limits.
 ## Development
 
 This project targets Node.js 22 or newer. The Rust container is a Cargo workspace under
-`container/` and uses the pinned Rust 1.98.0 toolchain. TypeScript compilation uses the 7.0 native
+`container/` and uses the pinned Rust 1.99.0 toolchain. TypeScript compilation uses the 7.0 native
 compiler, while ESLint's type-aware parser uses the TypeScript 6 compiler API compatibility package.
 ESLint remains on the latest 9.x release until neostandard and eslint-plugin-react support ESLint 10.
 
