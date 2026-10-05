@@ -8,6 +8,7 @@ import type { Position } from '../shared/types.js'
 import { MAX_WARM_ZOOM, type RegionsStore } from './regions-store.js'
 import type { WarmResult } from './tilecache-client.js'
 import { shouldWarm, bboxesAround, isValidPosition, type WarmTrigger } from './position-warm.js'
+import { monotonicNowMs } from '../shared/time.js'
 
 export interface PositionWarmer {
   onPosition (pos: Position): void
@@ -31,7 +32,7 @@ const ZOOM_SPREAD = 1
 const DEFAULT_BACKOFF_SECS = 600
 
 export function createPositionWarmer (deps: Deps): PositionWarmer {
-  const now = deps.now ?? Date.now
+  const now = deps.now ?? monotonicNowMs
   const selectWarmable = deps.selectWarmable ?? ((ids: readonly string[]) => [...ids])
   const backoffSecs = deps.backoffSecs ?? DEFAULT_BACKOFF_SECS
   const trigger: WarmTrigger = { lastPos: null, lastWarmMs: 0, backoffUntilMs: 0 }

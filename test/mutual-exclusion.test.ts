@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { isThirdPartyPmtilesEnabled, watchThirdPartyPmtilesEnabled } from '../src/charts/mutual-exclusion.js'
+import { settleWithin, waitUntil } from './helpers.js'
 
 async function configDir (contents?: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'cfg-'))
@@ -12,20 +13,6 @@ async function configDir (contents?: string): Promise<string> {
     await writeFile(join(dir, 'plugin-config-data', 'pmtiles-chart-provider.json'), contents)
   }
   return dir
-}
-
-async function settleWithin<T> (promise: Promise<T>, timeoutMs = 2000): Promise<T> {
-  let timer: NodeJS.Timeout | undefined
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error('promise did not settle before the deadline')), timeoutMs)
-      })
-    ])
-  } finally {
-    if (timer !== undefined) clearTimeout(timer)
-  }
 }
 
 test('reports true when the third-party plugin config is present and enabled', async () => {
@@ -106,10 +93,7 @@ test('watcher retries a failed async transition without another configuration ch
   }, { intervalMs: 10, retryBaseMs: 5, onError: (error) => errors.push(error) })
   try {
     await writeFile(file, JSON.stringify({ enabled: true }))
-    const deadline = Date.now() + 1000
-    const isApplied = (): boolean => applied
-    while (!isApplied() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5))
-    assert.equal(applied, true)
+    await waitUntil(() => applied)
     assert.equal(attempts, 2)
     assert.equal(errors.length, 1)
   } finally {
@@ -144,6 +128,34 @@ test('stop drains the active transition and prevents a queued state from applyin
     assert.deepEqual(applied, [true])
   } finally {
     release?.()
+    await watcher.stop()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('watcher reconciles a state that changed before it started against the state the caller applied', async () => {
+  // The caller applied "disabled", then the third-party plugin was enabled before the watcher was
+  // installed. Adopting the file as already applied would leave both providers serving charts.
+  const dir = await configDir(JSON.stringify({ enabled: true }))
+  const transitions: boolean[] = []
+  const watcher = watchThirdPartyPmtilesEnabled(dir, (enabled) => transitions.push(enabled), { intervalMs: 10, applied: false })
+  try {
+    await waitUntil(() => transitions.length > 0)
+    assert.deepEqual(transitions, [true])
+  } finally {
+    await watcher.stop()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('watcher applies nothing when the state the caller applied still matches the file', async () => {
+  const dir = await configDir(JSON.stringify({ enabled: true }))
+  const transitions: boolean[] = []
+  const watcher = watchThirdPartyPmtilesEnabled(dir, (enabled) => transitions.push(enabled), { intervalMs: 10, applied: true })
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.deepEqual(transitions, [])
+  } finally {
     await watcher.stop()
     await rm(dir, { recursive: true, force: true })
   }

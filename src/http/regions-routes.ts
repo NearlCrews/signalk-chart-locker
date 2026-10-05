@@ -1,16 +1,18 @@
-/** The admin-gated tile, region, and geocode routes. They persist the position-warm settings
- * and the saved regions through the regions store, and forward warm and cache operations to the tilecache
- * container. Mounted only when the admin gate holds, so an ungatable server leaves them unmounted (fail closed). */
+/** The admin-gated position-warm, cache, saved-region, and geocode routes. They persist the
+ * position-warm settings, the scroll retention, and the saved regions through the regions store, and
+ * forward warm and cache operations to the tilecache container. Mounted only when the admin gate
+ * holds, so an ungatable server leaves them unmounted (fail closed). */
 
 import { randomUUID } from 'node:crypto'
 import type { ServerAPI } from '@signalk/server-api'
-import type { ChartSource, LngLatBbox } from 'signalk-chart-sources'
+import type { ChartSource } from 'signalk-chart-sources'
 import { ensureApiAdminGate } from '../shared/admin-gate.js'
 import { CONTAINER_FETCH_TIMEOUT_MS } from '../runtime/container-fetch.js'
 import {
   loadRegionsStore, mutateRegionsStore, type PositionWarmSettings,
-  addRegion, updateRegion, removeRegion, listRegions,
-  reconcilePositionWarmSources, MAX_SAVED_REGIONS, MAX_WARM_ZOOM, type SavedRegion, type RegionStatus
+  addRegion, updateRegion, removeRegion, listRegions, isValidRegionBbox, inPositionWarmRange,
+  reconcilePositionWarmSources, MAX_REGION_NAME_LENGTH, MAX_SAVED_REGIONS, MAX_SOURCE_ID_LENGTH, MAX_SOURCE_IDS,
+  MAX_WARM_ZOOM, POSITION_WARM_RANGES, scrollTtlSecsFromDays, type SavedRegion, type RegionStatus
 } from '../runtime/regions-store.js'
 import { nowUnixSecs } from '../shared/time.js'
 import { controlHeaders } from '../runtime/control-token.js'
@@ -25,16 +27,16 @@ import {
 } from '../runtime/warm-contract.js'
 import { MAX_MANAGED_CONTAINER_ERROR_BYTES, readBoundedResponseJson, readBoundedResponseText } from '../runtime/bounded-response.js'
 import { isRecord } from '../shared/record.js'
-import { MIN_WARM_INTERVAL_SECS } from '../runtime/position-warm.js'
+import { isNonnegativeSafeInteger } from '../shared/number.js'
 import { isWarmableSource, timeDynamicSourceIds, warmableSourceIds } from '../charts/source-policy.js'
-
-// The plugin compiles to CommonJS, while chart-sources exposes an ESM-only runtime.
-const chartSources = import('signalk-chart-sources')
+import { loadChartSources } from '../charts/chart-sources.js'
+import type { RetentionPushQueue } from '../runtime/tilecache-config-push.js'
 
 export interface RegionsRequest {
   params: Record<string, string>
   body: unknown
-  query?: Record<string, string>
+  /** Express parses a repeated or bracketed key into an array or an object, so values are untrusted. */
+  query?: Record<string, unknown>
 }
 
 export interface RegionsResponse {
@@ -45,10 +47,12 @@ export interface RegionsResponse {
   setHeader?: (name: string, value: string) => void
 }
 
+type RegionsHandler = (req: RegionsRequest, res: RegionsResponse) => void | Promise<void>
+
 export interface RegionsRouter {
-  get (path: string, handler: (req: RegionsRequest, res: RegionsResponse) => void | Promise<void>): void
-  post (path: string, handler: (req: RegionsRequest, res: RegionsResponse) => void | Promise<void>): void
-  delete (path: string, handler: (req: RegionsRequest, res: RegionsResponse) => void | Promise<void>): void
+  get (path: string, handler: RegionsHandler): void
+  post (path: string, handler: RegionsHandler): void
+  delete (path: string, handler: RegionsHandler): void
 }
 
 /** Stats the budget re-validation reads from the container. */
@@ -67,18 +71,14 @@ interface Deps {
   pollIntervalMs?: number
   reconciliationRequestSpacingMs?: number
   updateRegion?: typeof updateRegion
+  /** The queue the plugin's configuration push shares, so retention pushes reach the container in order. */
+  retentionPushes: RetentionPushQueue
 }
 
 export interface RegionsRoutesHandle {
   start: () => void
   stop: () => Promise<void>
 }
-
-const MAX_WARM_INTERVAL_SECS = 86_400
-const MAX_WARM_DISTANCE_METERS = 100_000
-const MAX_SOURCE_IDS = 64
-const MAX_SOURCE_ID_LENGTH = 256
-const MAX_REGION_NAME_LENGTH = 120
 
 /** The one wording for a selection the container will never store, so the region route, the
  * position-warm route, and the re-download route all explain the refusal the same way. */
@@ -93,23 +93,6 @@ const CONTAINER_REGION_PATH = '/cache/region'
 const CONTAINER_REGIONS_PATH = '/cache/regions'
 const CONTAINER_WARM_PATH = '/warm'
 
-/** A finite lon/lat bbox. West greater than east means the box crosses the antimeridian. */
-function isValidBbox (value: unknown): value is LngLatBbox {
-  return Array.isArray(value) && value.length === 4 &&
-    value.every((n) => typeof n === 'number' && Number.isFinite(n)) &&
-    value[0] >= -180 && value[0] <= 180 && value[2] >= -180 && value[2] <= 180 &&
-    value[1] >= -90 && value[1] <= 90 && value[3] >= -90 && value[3] <= 90 &&
-    value[0] !== value[2] && !(value[0] > value[2] && Math.abs(value[0] - value[2]) === 360) && value[1] < value[3]
-}
-
-function isNonnegativeFinite (value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0
-}
-
-function isNonnegativeInteger (value: unknown): value is number {
-  return isNonnegativeFinite(value) && Number.isSafeInteger(value)
-}
-
 function conservativeAverage (value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > Number.MAX_SAFE_INTEGER) {
     return undefined
@@ -118,7 +101,7 @@ function conservativeAverage (value: unknown): number | undefined {
 }
 
 function readContainerStats (value: unknown): ContainerStats | undefined {
-  if (!isRecord(value) || !isNonnegativeInteger(value.regionsFreeBytes)) return undefined
+  if (!isRecord(value) || !isNonnegativeSafeInteger(value.regionsFreeBytes)) return undefined
   const averages = Object.create(null) as Record<string, number>
   if (value.perSourceAvgBytes !== undefined) {
     if (!isRecord(value.perSourceAvgBytes)) return undefined
@@ -212,14 +195,11 @@ function readPositionWarmPatch (value: unknown, sourceById: (id: string) => Char
     if (typeof value.enabled !== 'boolean') return 'enabled must be a boolean'
     patch.enabled = value.enabled
   }
-  for (const [key, min, max] of [
-    ['radiusMeters', 1, MAX_WARM_DISTANCE_METERS],
-    ['moveThresholdMeters', 0, MAX_WARM_DISTANCE_METERS],
-    ['intervalSecs', MIN_WARM_INTERVAL_SECS, MAX_WARM_INTERVAL_SECS]
-  ] as const) {
+  for (const key of ['radiusMeters', 'moveThresholdMeters', 'intervalSecs'] as const) {
     if (key in value) {
       const candidate = value[key]
-      if (typeof candidate !== 'number' || !Number.isFinite(candidate) || candidate < min || candidate > max) {
+      if (!inPositionWarmRange(key, candidate)) {
+        const [min, max] = POSITION_WARM_RANGES[key]
         return `${key} must be a finite number between ${min} and ${max}`
       }
       patch[key] = candidate
@@ -244,7 +224,7 @@ function readPositionWarmPatch (value: unknown, sourceById: (id: string) => Char
 }
 
 /** Mount the regions routes behind the admin gate. Returns whether they were mounted. */
-export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, getAddress: () => string | null, deps: Deps = {}): false | RegionsRoutesHandle {
+export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, getAddress: () => string | null, deps: Deps): false | RegionsRoutesHandle {
   if (!ensureApiAdminGate(app)) return false
   const dataDir = deps.dataDir ?? app.getDataDirPath()
   const rawFetch: FetchImpl = deps.fetchImpl ?? ((url, init) => fetch(url, init))
@@ -275,6 +255,12 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     return address
   }
 
+  // The container did not answer at all. The region delete answers 503, because the region stays saved
+  // for a retry, and every other route answers 502.
+  const unreachable = (res: RegionsResponse, status: 502 | 503): void => {
+    res.status(status).json({ error: 'tilecache unreachable' })
+  }
+
   // The container answers a rejected or failed control request with a bare status and no body, so an
   // unparseable body means a malformed response only when the container claimed success. Every other
   // status is relayed as-is, so the caller sees the real failure (the documented 400, 404, and 502 on
@@ -284,7 +270,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     try {
       response = await upstream
     } catch {
-      res.status(502).json({ error: 'tilecache unreachable' })
+      unreachable(res, 502)
       return
     }
     let body: unknown
@@ -345,7 +331,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
       const r = await fetchImpl(`http://${address}${CONTAINER_REGION_PATH}/${encodeURIComponent(regionId)}`)
       if (!r.ok) return { bytes: fallback, authoritative: false }
       const data = (await readBoundedResponseJson(r)) as { bytes?: number }
-      return isNonnegativeInteger(data.bytes)
+      return isNonnegativeSafeInteger(data.bytes)
         ? { bytes: data.bytes, authoritative: true }
         : { bytes: fallback, authoritative: false }
     } catch {
@@ -514,7 +500,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     if (!isRecord(req.body) || !('positionWarm' in req.body)) {
       res.status(400).json({ error: 'positionWarm is required' }); return
     }
-    const { chartSourceById } = await chartSources
+    const { chartSourceById } = await loadChartSources()
     const patch = readPositionWarmPatch(req.body.positionWarm, chartSourceById)
     if (typeof patch === 'string') { res.status(400).json({ error: patch }); return }
     try {
@@ -540,15 +526,19 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     } catch (error) {
       storageFailure(res, error); return
     }
+    deps.retentionPushes.saved(scrollTtlSecsFromDays(ttlDays))
     const address = withAddress(res); if (address === null) return
     try {
-      const upstream = await fetchImpl(`http://${address}/cache/scroll-ttl`, warmInit({ ttlSecs: ttlDays * 86_400 }))
+      // The queue hands this push what the store holds once it owns the queue, so a later save, or a
+      // configuration push queued ahead of this one, cannot leave the container on an older value.
+      const upstream = await deps.retentionPushes(async (ttlSecs) =>
+        await fetchImpl(`http://${address}/cache/scroll-ttl`, warmInit({ ttlSecs })))
       if (!upstream.ok) {
         reportContainerStatus(res, upstream).json({ error: 'tilecache rejected cache configuration' }); return
       }
       res.status(204).end()
     } catch {
-      res.status(502).json({ error: 'tilecache unreachable' })
+      unreachable(res, 502)
     }
   })
 
@@ -565,7 +555,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     try {
       response = await fetchImpl(`http://${address}${CONTAINER_STATS_PATH}`)
     } catch {
-      res.status(502).json({ error: 'tilecache unreachable' })
+      unreachable(res, 502)
       return
     }
     let body: Record<string, unknown>
@@ -590,9 +580,10 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
       res.status(404).json({ error: 'reverse geocoding is disabled' }); return
     }
     const address = withAddress(res); if (address === null) return
-    const query = (req.query ?? {})
-    const { lat, lon } = query
-    if (!lat || !lon) { res.status(400).json({ error: 'lat and lon are required' }); return }
+    const { lat, lon } = req.query ?? {}
+    if (typeof lat !== 'string' || lat === '' || typeof lon !== 'string' || lon === '') {
+      res.status(400).json({ error: 'lat and lon are required' }); return
+    }
     return relay(res, fetchImpl(`http://${address}/geocode?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`))
   })
 
@@ -600,7 +591,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     const address = getAddress()
     let regions: SavedRegion[]
     try {
-      const { chartSourceById } = await chartSources
+      const { chartSourceById } = await loadChartSources()
       // The same rule the plugin start applies, so a time-dynamic id cannot linger in the saved
       // selection when a failed start meant the startup reconcile never ran.
       reconcilePositionWarmSources(dataDir, (id) => {
@@ -624,12 +615,12 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
   })
 
   router.post('/api/regions', async (req, res) => {
-    const { chartSourceById, estimateBytes } = await chartSources
+    const { chartSourceById, estimateBytes } = await loadChartSources()
     const b = (req.body ?? {}) as { bbox?: unknown, sourceIds?: unknown, minzoom?: unknown, maxzoom?: unknown, name?: unknown }
     const { bbox, sourceIds, minzoom, maxzoom, name } = b
     const normalizedName = normalizePrintableText(name, MAX_REGION_NAME_LENGTH)
     // Validate BEFORE touching the container so an invalid body is a 400 even with no address.
-    if (!isValidBbox(bbox) ||
+    if (!isValidRegionBbox(bbox) ||
         !validSourceIds(sourceIds, false, chartSourceById) ||
         typeof minzoom !== 'number' || !Number.isInteger(minzoom) || minzoom < 0 || minzoom > MAX_WARM_ZOOM ||
         typeof maxzoom !== 'number' || !Number.isInteger(maxzoom) || maxzoom < 0 || maxzoom > MAX_WARM_ZOOM || minzoom > maxzoom ||
@@ -650,7 +641,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     try {
       statsResponse = await fetchImpl(`http://${address}${CONTAINER_STATS_PATH}`)
     } catch {
-      res.status(502).json({ error: 'tilecache unreachable' }); return
+      unreachable(res, 502); return
     }
     if (!statsResponse.ok) {
       reportContainerStatus(res, statsResponse).json({ error: 'tilecache statistics unavailable' }); return
@@ -749,9 +740,11 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     const address = withAddress(res); if (address === null) return
     try {
       const r = await fetchImpl(`http://${address}${CONTAINER_REGION_PATH}/${encodeURIComponent(id)}`, { method: 'DELETE', headers: mutationHeaders() })
-      if (!r.ok) { reportContainerStatus(res, r).end(); return }
+      if (!r.ok) {
+        reportContainerStatus(res, r).json(await containerErrorBody(r, 'tilecache could not delete the region')); return
+      }
     } catch {
-      res.status(503).end(); return
+      unreachable(res, 503); return
     }
     try {
       removeRegion(dataDir, id)
@@ -818,7 +811,7 @@ export function registerRegionsRoutes (router: RegionsRouter, app: ServerAPI, ge
     // A region saved before a source became time-dynamic still lists it. Unlike POST /api/regions this
     // is not a selection the caller is making now, so send the storable subset rather than refuse a
     // retry, and refuse only when nothing in the region can be stored at all.
-    const { chartSourceById } = await chartSources
+    const { chartSourceById } = await loadChartSources()
     const warmable = warmableSourceIds(region.sourceIds, chartSourceById)
     if (warmable.length === 0) {
       const timeDynamic = timeDynamicSourceIds(region.sourceIds, chartSourceById)

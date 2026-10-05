@@ -57,6 +57,12 @@ at `/plugins/signalk-chart-locker/pmtiles/<file>`. Writes are refused: the provi
 Vector (MVT) and raster (PNG, JPEG, WebP, and AVIF) archives are accepted. An archive with any other
 tile type is reported as invalid and is not published.
 
+While `signalk-pmtiles-plugin` is enabled, `/pmtiles/:file` and the chart-management routes return 409
+because that plugin owns the charts. While Chart Locker itself is stopped, or still starting before
+discovery has answered, they return 503 instead, since no provider conflict exists. In both states the
+v1 chart routes pass the request on to the next handler, so the other plugin's v1 routes at the same
+paths keep answering.
+
 ## Cache management
 
 | Method | Route | Request | Response |
@@ -67,7 +73,9 @@ tile type is reported as invalid and is not published.
 | POST | `/api/cache/clear-scroll` | None | Container totals for freed rows and bytes |
 
 `ttlDays` must be an integer. A value of 0 disables age-based removal. The setting is persisted before
-the container call, so a 503 or 502 still leaves it ready for the next plugin start. A non-success
+the container call, so a 503 or 502 still leaves it ready for the next plugin start. The container
+call waits for any configuration push already in flight and then sends the stored value, so the
+container always ends on the most recent save. A non-success
 container response is reported rather than converted to success: a status describing the request is
 relayed, as is a retryable 503, while a container control-token rejection or outright server fault
 becomes 502.
@@ -224,7 +232,7 @@ false, the private container endpoint and this proxy return 404 without contacti
 | 404 | Unknown chart, region, source, or warm job, or reverse geocoding is disabled |
 | 409 | PMTiles management is disabled by a provider conflict, the saved-region limit is reached, a region warm is already active, or deletion could not stop an active warm |
 | 429 | The container warm-job limit is active |
-| 500 | The plugin could not persist saved-region, position-warm, or chart-override state, or a chart rescan failed |
+| 500 | The plugin could not persist saved-region, position-warm, or chart-override state, a chart rescan failed, or a route failed unexpectedly |
 | 502 | The container request failed, returned an invalid response, rejected the plugin's control token, or reported an outright server fault |
-| 503 | The tile-cache container, its address, or a required internal service is temporarily unavailable, or the container shed the request while busy. Retryable, and carries `Retry-After` when the container supplied one |
+| 503 | The tile-cache container, its address, or a required internal service is temporarily unavailable, the container shed the request while busy, or the PMTiles provider is not running because Chart Locker is stopped or starting. Retryable, and carries `Retry-After` when the container supplied one |
 | 507 | The plugin could not persist state because the filesystem is full or over quota (`ENOSPC` or `EDQUOT`). Free disk space and retry |

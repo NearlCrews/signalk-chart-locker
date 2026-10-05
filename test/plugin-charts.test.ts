@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createPlugin } from '../src/plugin/plugin.js'
-import { fakeApp, fakeManager, setContainerManager, clearGlobals, statusSlot } from './helpers.js'
+import { fakeApp, fakeManager, setContainerManager, clearGlobals, statusSlot, waitUntil } from './helpers.js'
 import { buildPmtilesFixture } from './pmtiles-fixture.js'
 
 interface ChartApp extends ReturnType<typeof fakeApp> {
@@ -33,6 +33,12 @@ function chartApp (configPath: string): { app: ChartApp, providers: unknown[], r
     get: (path: string, handler: unknown) => { routes[path] = handler }
   }) as ChartApp
   return { app, providers, routes }
+}
+
+/** How many chart resources the first registered provider lists. */
+async function chartResourceCount (providers: unknown[]): Promise<number> {
+  const provider = providers[0] as { methods: { listResources: () => Promise<Record<string, unknown>> } }
+  return Object.keys(await provider.methods.listResources()).length
 }
 
 test('doStart discovers charts and registers the provider when the third-party plugin is absent', async () => {
@@ -235,23 +241,93 @@ test('live third-party enable and disable transitions clear and restore chart re
   setContainerManager(fakeManager())
   const { app, providers } = chartApp(root)
   const plugin = createPlugin(app as never, { mutualExclusionPollIntervalMs: 10 })
-  const resources = async (): Promise<Record<string, unknown>> => {
-    const provider = providers[0] as { methods: { listResources: () => Promise<Record<string, unknown>> } }
-    return provider.methods.listResources()
+  try {
+    await plugin.start({}, () => {})
+    assert.equal(await chartResourceCount(providers), 1)
+    await writeFile(configFile, JSON.stringify({ enabled: true }))
+    await waitUntil(async () => await chartResourceCount(providers) === 0, 3000)
+    await writeFile(configFile, JSON.stringify({ enabled: false }))
+    await waitUntil(async () => await chartResourceCount(providers) === 1, 3000)
+    assert.equal(providers.length, 1, 'the resource provider is registered only once')
+  } finally {
+    await plugin.stop()
+    clearGlobals()
+    await rm(root, { recursive: true, force: true })
   }
-  const waitUntil = async (predicate: () => Promise<boolean>): Promise<void> => {
-    const deadline = Date.now() + 3000
-    while (!(await predicate()) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))
-    assert.equal(await predicate(), true)
+})
+
+test('a third-party enable during the container start is applied once the watcher starts', async () => {
+  const root = await configRoot()
+  const configFile = join(root, 'plugin-config-data', 'pmtiles-chart-provider.json')
+  await mkdir(join(root, 'plugin-config-data'), { recursive: true })
+  await writeFile(join(root, 'charts', 'pmtiles', 'good.pmtiles'), buildPmtilesFixture())
+  await writeFile(configFile, JSON.stringify({ enabled: false }))
+  const manager = fakeManager()
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let launching!: () => void
+  const launchStarted = new Promise<void>((resolve) => { launching = resolve })
+  // The chart provider is set up before the container work, and the watcher only after it, so a
+  // change made while the launch is pending falls between the two.
+  manager.ensureRunning = async () => {
+    launching()
+    await gate
+  }
+  setContainerManager(manager)
+  const { app, providers } = chartApp(root)
+  const plugin = createPlugin(app as never, { mutualExclusionPollIntervalMs: 10 })
+  try {
+    const started = plugin.start({}, () => {})
+    await launchStarted
+    // Discovery runs alongside the container work, so let it publish before the change lands.
+    await waitUntil(async () => await chartResourceCount(providers) === 1, 3000)
+    await writeFile(configFile, JSON.stringify({ enabled: true }))
+    release()
+    await started
+    // The provider must stand down for the third-party plugin.
+    await waitUntil(async () => await chartResourceCount(providers) === 0, 3000)
+    assert.match(statusSlot(app)?.message ?? '', /signalk-pmtiles-plugin is enabled/)
+  } finally {
+    release()
+    await plugin.stop()
+    clearGlobals()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a stopped plugin answers PMTiles requests as unavailable rather than as a provider conflict', async () => {
+  const root = await configRoot()
+  await writeFile(join(root, 'charts', 'pmtiles', 'good.pmtiles'), buildPmtilesFixture())
+  clearGlobals()
+  const { app } = chartApp(root)
+  const plugin = createPlugin(app as never)
+  const readRoutes: Record<string, (req: unknown, res: unknown) => void> = {}
+  const adminRoutes: Record<string, (req: unknown, res: unknown) => unknown> = {}
+  plugin.registerWithRouter?.({
+    get: (p: string, h: (req: unknown, res: unknown) => unknown) => { adminRoutes[p] = h; readRoutes[p] = h as never },
+    post: (p: string, h: (req: unknown, res: unknown) => unknown) => { adminRoutes[p] = h },
+    delete: (p: string, h: (req: unknown, res: unknown) => unknown) => { adminRoutes[p] = h }
+  } as never)
+  const respond = (): { statusCode: number, body: unknown, res: unknown } => {
+    const result = { statusCode: 0, body: undefined as unknown, res: undefined as unknown }
+    result.res = {
+      setHeader () {},
+      status (code: number) { result.statusCode = code; return result.res },
+      end (body?: unknown) { result.body = body },
+      json (body: unknown) { result.body = body }
+    }
+    return result
   }
   try {
     await plugin.start({}, () => {})
-    assert.equal(Object.keys(await resources()).length, 1)
-    await writeFile(configFile, JSON.stringify({ enabled: true }))
-    await waitUntil(async () => Object.keys(await resources()).length === 0)
-    await writeFile(configFile, JSON.stringify({ enabled: false }))
-    await waitUntil(async () => Object.keys(await resources()).length === 1)
-    assert.equal(providers.length, 1, 'the resource provider is registered only once')
+    await plugin.stop()
+    const serve = respond()
+    readRoutes['/pmtiles/:file']!({ params: { file: 'good.pmtiles' }, headers: {} }, serve.res)
+    assert.equal(serve.statusCode, 503)
+    assert.doesNotMatch(String(serve.body), /enabled/)
+    const list = respond()
+    await adminRoutes['/api/charts']!({ params: {}, body: null }, list.res)
+    assert.equal(list.statusCode, 503)
   } finally {
     await plugin.stop()
     clearGlobals()

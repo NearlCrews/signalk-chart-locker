@@ -4,9 +4,10 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ServerAPI } from '@signalk/server-api'
-import { registerRegionsRoutes } from '../src/http/regions-routes.js'
 import { loadRegionsStore, saveRegionsStore, DEFAULT_REGIONS_STORE } from '../src/runtime/regions-store.js'
-import { fakeApp, makeRegionsRouter, fakeRegionsRes } from './helpers.js'
+import type { RegionsRouter } from '../src/http/regions-routes.js'
+import { guardAsyncRoutes, type ApiRouter } from '../src/shared/async-route-guard.js'
+import { fakeApp, makeRegionsRouter, fakeRegionsRes, mountRegionsRoutes } from './helpers.js'
 
 const app = (): ServerAPI => fakeApp() as unknown as ServerAPI
 
@@ -28,7 +29,7 @@ test('POST /api/cache/config rejects a non-integer, a negative, and an over-rang
   const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
   const { calls, fetchImpl } = recordingFetch({})
   const { router, routes } = makeRegionsRouter()
-  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl, getControlToken: () => 'control-secret' })
+  mountRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl, getControlToken: () => 'control-secret' })
   const route = routes.find(r => r.method === 'POST' && r.path === '/api/cache/config')!
   for (const bad of [3.5, -1, 366, 'x']) {
     const { responded, res } = fakeRegionsRes()
@@ -42,7 +43,7 @@ test('POST /api/cache/config saves the store and posts ttlSecs to the container'
   const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
   const { calls, fetchImpl } = recordingFetch({ '/cache/scroll-ttl': { status: 204, body: {} } })
   const { router, routes } = makeRegionsRouter()
-  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl, getControlToken: () => 'control-secret' })
+  mountRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl, getControlToken: () => 'control-secret' })
   const route = routes.find(r => r.method === 'POST' && r.path === '/api/cache/config')!
   const { responded, res } = fakeRegionsRes()
   await route.handler({ params: {}, body: { ttlDays: 7 } }, res)
@@ -58,7 +59,7 @@ test('POST /api/cache/config relays a container rejection instead of reporting s
   const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
   const { fetchImpl } = recordingFetch({ '/cache/scroll-ttl': { status: 503, body: {} } })
   const { router, routes } = makeRegionsRouter()
-  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  mountRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
   const route = routes.find(r => r.method === 'POST' && r.path === '/api/cache/config')!
   const { responded, res } = fakeRegionsRes()
   await route.handler({ params: {}, body: { ttlDays: 7 } }, res)
@@ -69,7 +70,7 @@ test('POST /api/cache/clear-scroll authenticates and relays the freed totals', a
   const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
   const { calls, fetchImpl } = recordingFetch({ '/cache/clear-scroll': { status: 200, body: { freedBytes: 123, freedRows: 4 } } })
   const { router, routes } = makeRegionsRouter()
-  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl, getControlToken: () => 'control-secret' })
+  mountRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl, getControlToken: () => 'control-secret' })
   const route = routes.find(r => r.method === 'POST' && r.path === '/api/cache/clear-scroll')!
   const { responded, res } = fakeRegionsRes()
   await route.handler({ params: {}, body: {} }, res)
@@ -86,7 +87,7 @@ test('POST /api/cache/clear-scroll reports a container auth or server fault as a
   for (const status of [401, 500, 502]) {
     const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
     const { router, routes } = makeRegionsRouter()
-    registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
+    mountRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
       dataDir,
       fetchImpl: async () => new Response(null, { status }),
       getControlToken: () => 'control-secret'
@@ -110,7 +111,7 @@ test('POST /api/cache/config does not surface a container control-token rejectio
   // answers 401 and the caller was told its own session had failed.
   const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
   const { router, routes } = makeRegionsRouter()
-  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
+  mountRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
     dataDir,
     fetchImpl: async () => new Response(null, { status: 401 }),
     getControlToken: () => 'stale-token'
@@ -130,7 +131,7 @@ test('a busy container keeps its 503 and its retry hint instead of becoming a ga
   const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
   const headers: Array<[string, string]> = []
   const { router, routes } = makeRegionsRouter()
-  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
+  mountRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
     dataDir,
     fetchImpl: async () => new Response('tile cache is busy', { status: 503, headers: { 'retry-after': '1' } }),
     getControlToken: () => 'control-secret'
@@ -146,7 +147,7 @@ test('a malformed container retry hint is not forwarded to the caller', async ()
   const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
   const headers: Array<[string, string]> = []
   const { router, routes } = makeRegionsRouter()
-  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
+  mountRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
     dataDir,
     fetchImpl: async () => new Response(null, { status: 503, headers: { 'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT' } })
   })
@@ -161,7 +162,7 @@ test('a container status that describes the caller request is still relayed', as
   // The gateway rule must not swallow the documented client-facing statuses.
   const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
   const { router, routes } = makeRegionsRouter()
-  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
+  mountRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
     dataDir,
     fetchImpl: async () => new Response(null, { status: 429 })
   })
@@ -174,7 +175,7 @@ test('a container status that describes the caller request is still relayed', as
 test('POST /api/cache/clear-scroll still reports 502 when a successful container response is malformed', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
   const { router, routes } = makeRegionsRouter()
-  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
+  mountRegionsRoutes(router, app(), () => '127.0.0.1:9999', {
     dataDir,
     fetchImpl: async () => new Response('{ not json', { status: 200, headers: { 'content-type': 'application/json' } })
   })
@@ -190,7 +191,7 @@ test('GET /api/cache/stats merges ttlDays from the store and passes bySource thr
   saveRegionsStore(dataDir, { ...DEFAULT_REGIONS_STORE, cacheScrollTtlDays: 14 })
   const { fetchImpl } = recordingFetch({ '/cache/stats': { status: 200, body: { rows: 1, bytes: 2, cap: 3, bySource: [{ source: 's', bytes: 2, rows: 1 }], perSourceAvgBytes: {} } } })
   const { router, routes } = makeRegionsRouter()
-  registerRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
+  mountRegionsRoutes(router, app(), () => '127.0.0.1:9999', { dataDir, fetchImpl })
   const route = routes.find(r => r.method === 'GET' && r.path === '/api/cache/stats')!
   const { responded, res } = fakeRegionsRes()
   await route.handler({ params: {}, body: null }, res)
@@ -198,4 +199,24 @@ test('GET /api/cache/stats merges ttlDays from the store and passes bySource thr
   const body = responded[0]?.body as { ttlDays?: number; bySource?: unknown }
   assert.equal(body.ttlDays, 14)
   assert.deepEqual(body.bySource, [{ source: 's', bytes: 2, rows: 1 }])
+})
+
+test('a route handler that throws answers 500 through the shared route guard instead of leaving the request open', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'cache-route-'))
+  const debugged: unknown[] = []
+  const { router, routes } = makeRegionsRouter()
+  // Mounted the way registerWithRouter mounts every /api registrar.
+  const guarded = guardAsyncRoutes(router as unknown as ApiRouter, (error) => { debugged.push(error) })
+  mountRegionsRoutes(guarded as unknown as RegionsRouter, app(), () => '127.0.0.1:9999', {
+    dataDir,
+    // A synchronous throw escapes every try block in the handler: Express 4 ignores the rejected
+    // promise, so without a guard the request never completes and the rejection reaches the process.
+    fetchImpl: () => { throw new Error('unexpected failure') }
+  })
+  const route = routes.find(r => r.method === 'POST' && r.path === '/api/cache/clear-scroll')!
+  const { responded, res } = fakeRegionsRes()
+  await route.handler({ params: {}, body: null }, res)
+  assert.equal(responded[0]?.status, 500)
+  assert.deepEqual(responded[0]?.body, { error: 'internal error' })
+  assert.equal(debugged.length, 1)
 })

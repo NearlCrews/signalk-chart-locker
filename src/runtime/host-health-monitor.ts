@@ -1,5 +1,8 @@
 /** Periodically verifies the host-side container endpoint and repairs a wedged port forward. */
 
+import { errorMessage } from '../shared/error.js'
+import { monotonicNowMs } from '../shared/time.js'
+
 const HOST_HEALTH_INTERVAL_MS = 30_000
 const HOST_HEALTH_FAILURE_THRESHOLD = 3
 const HOST_HEALTH_RECOVERY_COOLDOWN_MS = 5 * 60_000
@@ -40,15 +43,11 @@ export interface HostHealthMonitor {
   stop: () => Promise<void>
 }
 
-function errorMessage (error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
 export function createHostHealthMonitor (options: HostHealthMonitorOptions): HostHealthMonitor {
   const intervalMs = options.intervalMs ?? HOST_HEALTH_INTERVAL_MS
   const failureThreshold = options.failureThreshold ?? HOST_HEALTH_FAILURE_THRESHOLD
   const recoveryCooldownMs = options.recoveryCooldownMs ?? HOST_HEALTH_RECOVERY_COOLDOWN_MS
-  const now = options.now ?? Date.now
+  const now = options.now ?? monotonicNowMs
   if (!Number.isFinite(intervalMs) || intervalMs <= 0) throw new Error('host health interval must be positive')
   if (!Number.isInteger(failureThreshold) || failureThreshold <= 0) throw new Error('host health failure threshold must be a positive integer')
   if (!Number.isFinite(recoveryCooldownMs) || recoveryCooldownMs < 0) throw new Error('host health recovery cooldown must be nonnegative')

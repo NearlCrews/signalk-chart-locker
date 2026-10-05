@@ -1,6 +1,7 @@
-/** Persists the saved map regions and the position-warm settings as a JSON state file under the Signal K data
- * directory. This is the single source of truth; the values are deliberately NOT in schema() or
- * savePluginOptions, so they never surface as a second input surface in the plugin config screen.
+/** Persists the saved map regions, the position-warm settings, and the scroll-tile retention as a JSON
+ * state file under the Signal K data directory. This is the single source of truth; the values are
+ * deliberately NOT in schema() or savePluginOptions, so they never surface as a second input surface
+ * in the plugin config screen.
  * Persistence goes through the shared sync json-state helper so the regions store and the chart override
  * store use one idiom. */
 
@@ -9,9 +10,10 @@ import { statSync, watch, type FSWatcher } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import type { LngLatBbox } from 'signalk-chart-sources'
 import { preserveInvalidJsonState, readJsonState, writeJsonState } from './json-state.js'
-import { nowUnixSecs } from '../shared/time.js'
+import { monotonicNowMs, nowUnixSecs } from '../shared/time.js'
 import { hasControlCharacter, normalizePrintableText } from '../shared/text.js'
 import { isRecord } from '../shared/record.js'
+import { MIN_WARM_INTERVAL_SECS } from './position-warm.js'
 
 export interface PositionWarmSettings {
   enabled: boolean
@@ -78,14 +80,27 @@ export function positionWarmBudgetBytes (regionsBudgetBytes: number): number {
 
 const STORE_FILE = 'regions.json'
 export const MAX_WARM_ZOOM = 24
-const MAX_SOURCE_IDS = 64
-const MAX_SOURCE_ID_LENGTH = 256
+/** The most source identifiers a region or the position-warm selection may carry. */
+export const MAX_SOURCE_IDS = 64
+export const MAX_SOURCE_ID_LENGTH = 256
+export const MAX_REGION_NAME_LENGTH = 120
 export const MAX_REGION_ID_LENGTH = 128
 export const MAX_SAVED_REGIONS = 128
 export const MAX_REGION_TOTAL_ENTRIES = MAX_SAVED_REGIONS + 8
 const REGION_STATUSES = new Set<RegionStatus>(['downloading', 'ready', 'capped', 'error', 'needs-redownload'])
+const SECONDS_PER_DAY = 86_400
 
-function validBbox (value: unknown): value is LngLatBbox {
+/** The accepted range of each numeric position-warm setting. The store normalizer and the settings
+ * route both read it, so a value the route accepts is never one the next load quietly discards. */
+export const POSITION_WARM_RANGES = {
+  radiusMeters: [1, 100_000],
+  moveThresholdMeters: [0, 100_000],
+  intervalSecs: [MIN_WARM_INTERVAL_SECS, SECONDS_PER_DAY]
+} as const satisfies Record<string, readonly [number, number]>
+
+/** A finite lon/lat bbox within world bounds. West greater than east means the box crosses the
+ * antimeridian. Shared by the durable-state parser and the region route. */
+export function isValidRegionBbox (value: unknown): value is LngLatBbox {
   return Array.isArray(value) && value.length === 4 &&
     value.every((coordinate) => typeof coordinate === 'number' && Number.isFinite(coordinate)) &&
     value[0] >= -180 && value[0] <= 180 && value[2] >= -180 && value[2] <= 180 &&
@@ -104,14 +119,20 @@ function finiteBetween (value: unknown, min: number, max: number): value is numb
   return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max
 }
 
+/** True when `value` is a finite number within the accepted range of the named setting. */
+export function inPositionWarmRange (key: keyof typeof POSITION_WARM_RANGES, value: unknown): value is number {
+  const [min, max] = POSITION_WARM_RANGES[key]
+  return finiteBetween(value, min, max)
+}
+
 function normalizePositionWarm (value: unknown): PositionWarmSettings {
   const raw = isRecord(value) ? value : {}
   const defaults = DEFAULT_REGIONS_STORE.positionWarm
   return {
     enabled: typeof raw.enabled === 'boolean' ? raw.enabled : defaults.enabled,
-    radiusMeters: finiteBetween(raw.radiusMeters, 1, 100_000) ? raw.radiusMeters : defaults.radiusMeters,
-    moveThresholdMeters: finiteBetween(raw.moveThresholdMeters, 0, 100_000) ? raw.moveThresholdMeters : defaults.moveThresholdMeters,
-    intervalSecs: finiteBetween(raw.intervalSecs, 60, 86_400) ? raw.intervalSecs : defaults.intervalSecs,
+    radiusMeters: inPositionWarmRange('radiusMeters', raw.radiusMeters) ? raw.radiusMeters : defaults.radiusMeters,
+    moveThresholdMeters: inPositionWarmRange('moveThresholdMeters', raw.moveThresholdMeters) ? raw.moveThresholdMeters : defaults.moveThresholdMeters,
+    intervalSecs: inPositionWarmRange('intervalSecs', raw.intervalSecs) ? raw.intervalSecs : defaults.intervalSecs,
     baseZoom: typeof raw.baseZoom === 'number' && Number.isInteger(raw.baseZoom) && raw.baseZoom >= 0 && raw.baseZoom <= MAX_WARM_ZOOM
       ? raw.baseZoom
       : defaults.baseZoom,
@@ -121,10 +142,10 @@ function normalizePositionWarm (value: unknown): PositionWarmSettings {
 
 function parseRegionState (raw: unknown, ids: Set<string>): SavedRegion | undefined {
   if (!isRecord(raw)) return undefined
-  const name = normalizePrintableText(raw.name, 120)
+  const name = normalizePrintableText(raw.name, MAX_REGION_NAME_LENGTH)
   if (typeof raw.id !== 'string' || raw.id.length === 0 || raw.id.length > MAX_REGION_ID_LENGTH || hasControlCharacter(raw.id) || ids.has(raw.id) ||
       name === undefined ||
-      !validBbox(raw.bbox) || !validSources(raw.sourceIds) || raw.sourceIds.length === 0 ||
+      !isValidRegionBbox(raw.bbox) || !validSources(raw.sourceIds) || raw.sourceIds.length === 0 ||
       typeof raw.minzoom !== 'number' || !Number.isInteger(raw.minzoom) || raw.minzoom < 0 || raw.minzoom > MAX_WARM_ZOOM ||
       typeof raw.maxzoom !== 'number' || !Number.isInteger(raw.maxzoom) || raw.maxzoom < raw.minzoom || raw.maxzoom > MAX_WARM_ZOOM ||
       !finiteBetween(raw.createdAt, 0, Number.MAX_SAFE_INTEGER) || !Number.isInteger(raw.createdAt) ||
@@ -158,6 +179,12 @@ function normalizeRegions (value: unknown): SavedRegion[] {
   return regions
 }
 
+/** The scroll-tile retention in seconds, the unit the container takes. The store and the cache route
+ * keep whole days, the unit an operator edits, so this is the one place the two meet. */
+export function scrollTtlSecsFromDays (days: number): number {
+  return Math.max(0, Math.round(days * SECONDS_PER_DAY))
+}
+
 function normalizeTtlDays (value: unknown): number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 365
     ? value
@@ -168,9 +195,9 @@ function validPositionWarmState (value: unknown): boolean {
   if (value === undefined) return true
   if (!isRecord(value)) return false
   return (value.enabled === undefined || typeof value.enabled === 'boolean') &&
-    (value.radiusMeters === undefined || finiteBetween(value.radiusMeters, 1, 100_000)) &&
-    (value.moveThresholdMeters === undefined || finiteBetween(value.moveThresholdMeters, 0, 100_000)) &&
-    (value.intervalSecs === undefined || finiteBetween(value.intervalSecs, 60, 86_400)) &&
+    (value.radiusMeters === undefined || inPositionWarmRange('radiusMeters', value.radiusMeters)) &&
+    (value.moveThresholdMeters === undefined || inPositionWarmRange('moveThresholdMeters', value.moveThresholdMeters)) &&
+    (value.intervalSecs === undefined || inPositionWarmRange('intervalSecs', value.intervalSecs)) &&
     (value.baseZoom === undefined || (typeof value.baseZoom === 'number' && Number.isInteger(value.baseZoom) && value.baseZoom >= 0 && value.baseZoom <= MAX_WARM_ZOOM)) &&
     (value.sources === undefined || validSources(value.sources))
 }
@@ -198,7 +225,7 @@ function migrateV2 (raw: Record<string, unknown>, dataDir: string): RegionsStore
   const regions = hasRegions ? normalizeRegions(raw['regions']) : []
   const rawBbox = raw['bbox']
   if (
-    !hasRegions && validBbox(rawBbox) && validSources(raw['sources']) && raw['sources'].length > 0
+    !hasRegions && isValidRegionBbox(rawBbox) && validSources(raw['sources']) && raw['sources'].length > 0
   ) {
     const rawSources = raw['sources']
     const rawMinzoom = typeof raw['minzoom'] === 'number' && Number.isInteger(raw['minzoom']) && raw['minzoom'] >= 0 && raw['minzoom'] <= MAX_WARM_ZOOM ? raw['minzoom'] : 6
@@ -321,7 +348,7 @@ export function createCachedRegionsLoader (dataDir: string, options: CachedRegio
 
   return {
     getStore (): RegionsStore {
-      const now = (options.now ?? Date.now)()
+      const now = (options.now ?? monotonicNowMs)()
       if (dirty || cached === null) {
         lastStatMs = now
         return reload(statIdentity())

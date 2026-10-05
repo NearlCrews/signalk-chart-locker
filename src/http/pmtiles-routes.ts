@@ -9,6 +9,7 @@ import { closeSync, constants, createReadStream, fstatSync, openSync, type ReadS
 import { type Writable } from 'node:stream'
 import { nameToId } from '../charts/chart-id.js'
 import type { ChartRegistry } from '../charts/chart-registry.js'
+import { pmtilesRefusal, type PmtilesProviderState } from '../charts/mutual-exclusion.js'
 
 const PMTILES_SERVE_PATH = '/pmtiles/:file'
 const NO_SNIFF_HEADER = 'X-Content-Type-Options'
@@ -105,11 +106,13 @@ function parseRange (raw: string | undefined, size: number): { start: number, en
   return { start, end }
 }
 
-export function registerPmtilesServeRoute (router: ServeRouter, registry: ChartRegistry, isEnabled: () => boolean = () => true, deps: ServeDeps = {}): void {
+/** Mount the archive route, which serves only while the provider state is 'serving'. */
+export function registerPmtilesServeRoute (router: ServeRouter, registry: ChartRegistry, providerState: () => PmtilesProviderState = () => 'serving', deps: ServeDeps = {}): void {
   router.get(PMTILES_SERVE_PATH, (req, res) => {
     res.setHeader(NO_SNIFF_HEADER, 'nosniff')
-    if (!isEnabled()) {
-      res.status(409).end('PMTiles serving is disabled while pmtiles-chart-provider is enabled')
+    const refusal = pmtilesRefusal(providerState(), 'serving')
+    if (refusal !== null) {
+      res.status(refusal.status).end(refusal.message)
       return
     }
     serve(req, res, registry, deps)

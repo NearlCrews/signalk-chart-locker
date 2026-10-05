@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildSourcePayload, pushTilecacheConfig, PLUGIN_PUBLIC_BASE } from '../src/runtime/tilecache-config-push.js'
+import { buildSourcePayload, createRetentionPushQueue, pushTilecacheConfig, PLUGIN_PUBLIC_BASE } from '../src/runtime/tilecache-config-push.js'
 
 test('buildSourcePayload carries the full registry, the public base, and the cap and budgets', async () => {
   const payload = await buildSourcePayload(2_147_483_648, 1_073_741_824, 64 * 1024 * 1024, 0)
@@ -141,4 +141,50 @@ test('pushTilecacheConfig cooperatively aborts an in-flight startup request with
   controller.abort()
   assert.deepEqual(await pushed, { ok: false, error: 'tilecache configuration cancelled' })
   assert.equal(calls, 1)
+})
+
+test('the retention queue runs pushes in call order, each with the retention stored when it starts', async () => {
+  let stored = 100
+  const queue = createRetentionPushQueue(() => stored)
+  let releaseFirst!: () => void
+  const firstHeld = new Promise<void>((resolve) => { releaseFirst = resolve })
+  let firstStarted!: () => void
+  const firstRunning = new Promise<void>((resolve) => { firstStarted = resolve })
+  const order: Array<{ push: string, ttlSecs: number }> = []
+  const first = queue(async (ttlSecs) => { firstStarted(); await firstHeld; order.push({ push: 'first', ttlSecs }) })
+  const second = queue(async (ttlSecs) => { order.push({ push: 'second', ttlSecs }) })
+  await firstRunning
+  // Saved while the first push is in flight: the second push has not read yet, so it carries this.
+  stored = 200
+  releaseFirst()
+  await Promise.all([first, second])
+  assert.deepEqual(order, [{ push: 'first', ttlSecs: 100 }, { push: 'second', ttlSecs: 200 }])
+})
+
+test('the retention queue falls back to the last value read, and fails a read with none', async () => {
+  let readable = false
+  const readErrors: unknown[] = []
+  const queue = createRetentionPushQueue(() => {
+    if (!readable) throw new Error('store unreadable')
+    return 300
+  }, (error) => readErrors.push(error))
+  assert.throws(() => queue.current(), /store unreadable/)
+  await assert.rejects(queue(async (ttlSecs) => ttlSecs), /store unreadable/)
+  readable = true
+  assert.equal(queue.current(), 300)
+  readable = false
+  assert.equal(await queue(async (ttlSecs) => ttlSecs), 300)
+  assert.equal(readErrors.length, 1)
+})
+
+test('the retention queue falls back to a value just saved rather than an older read', async () => {
+  let readable = true
+  const queue = createRetentionPushQueue(() => {
+    if (!readable) throw new Error('store unreadable')
+    return 300
+  })
+  assert.equal(queue.current(), 300)
+  queue.saved(600)
+  readable = false
+  assert.equal(await queue(async (ttlSecs) => ttlSecs), 600)
 })

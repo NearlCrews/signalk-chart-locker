@@ -137,6 +137,34 @@ test('a repeated registration rebinds permanent provider methods to the new regi
   assert.deepEqual(Object.keys(await provider!.methods.listResources({})), ['second-pmtiles'])
 })
 
+test('the v1 routes defer to the next handler while the provider is not active', () => {
+  // Express runs the v1 handlers in registration order. A stopped or conflicted Chart Locker that
+  // answered anyway would shadow signalk-pmtiles-plugin's own handlers at the same paths.
+  const registry = new ChartRegistry()
+  registry.set(record('sf.pmtiles'))
+  let active = false
+  const routes: Record<string, (req: { params: Record<string, string> }, res: FakeRes, next: () => void) => void> = {}
+  const app = {
+    get (path: string, handler: (req: { params: Record<string, string> }, res: FakeRes, next: () => void) => void) { routes[path] = handler },
+    registerResourceProvider () {}
+  }
+  registerChartProvider(app as never, registry, () => active)
+  let deferred = 0
+  const list = new FakeRes()
+  routes['/signalk/v1/api/resources/charts']!({ params: {} }, list, () => { deferred++ })
+  const one = new FakeRes()
+  routes['/signalk/v1/api/resources/charts/:identifier']!({ params: { identifier: 'sf-pmtiles' } }, one, () => { deferred++ })
+  assert.equal(deferred, 2)
+  assert.equal(list.body, undefined)
+  assert.equal(one.body, undefined)
+
+  active = true
+  const served = new FakeRes()
+  routes['/signalk/v1/api/resources/charts']!({ params: {} }, served, () => { deferred++ })
+  assert.equal(deferred, 2)
+  assert.equal(Object.keys(served.body as object).length, 1)
+})
+
 class FakeRes {
   body: unknown
   statusCode = 200

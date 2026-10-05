@@ -8,6 +8,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { nameToId } from './chart-id.js'
 import { ChartRegistry, DEFAULT_SCALE, type ChartRecord } from './chart-registry.js'
 import { type DecodeResult, decodePmtilesArchive, type DecodedPmtiles } from './pmtiles-metadata.js'
+import { errorMessage } from '../shared/error.js'
 import { hasControlCharacter } from '../shared/text.js'
 
 export interface ChartNamer {
@@ -105,7 +106,7 @@ async function prepareChartsDirectory (deps: DiscoveryDeps): Promise<boolean> {
       await mkdir(deps.chartsDir, { recursive: true })
       return true
     } catch (error) {
-      deps.onError?.(`cannot create ${deps.chartsDir}: ${error instanceof Error ? error.message : String(error)}`)
+      deps.onError?.(`cannot create ${deps.chartsDir}: ${errorMessage(error)}`)
       return false
     }
   }
@@ -117,7 +118,7 @@ async function prepareChartsDirectory (deps: DiscoveryDeps): Promise<boolean> {
   try {
     await mkdir(deps.chartsDir, { recursive: true })
   } catch (error) {
-    deps.onError?.(`cannot create ${deps.chartsDir}: ${error instanceof Error ? error.message : String(error)}`)
+    deps.onError?.(`cannot create ${deps.chartsDir}: ${errorMessage(error)}`)
     return false
   }
   return await chartsRootIsSafe(deps)
@@ -338,7 +339,7 @@ export async function startDiscovery (deps: DiscoveryDeps): Promise<DiscoveryHan
   const runRescan = (): void => {
     if (stopped) return
     rescanCharts(scopedDeps).catch((error: unknown) => {
-      deps.onError?.(`chart rescan failed: ${error instanceof Error ? error.message : String(error)}`)
+      deps.onError?.(`chart rescan failed: ${errorMessage(error)}`)
     })
   }
   const installWatcher = (identity: string): void => {
@@ -360,7 +361,7 @@ export async function startDiscovery (deps: DiscoveryDeps): Promise<DiscoveryHan
         watchedIdentity = undefined
       })
     } catch (err) {
-      deps.onError?.(`cannot watch ${deps.chartsDir}: ${err instanceof Error ? err.message : String(err)}`)
+      deps.onError?.(`cannot watch ${deps.chartsDir}: ${errorMessage(err)}`)
       watchedIdentity = undefined
     }
   }
@@ -395,7 +396,7 @@ export async function startDiscovery (deps: DiscoveryDeps): Promise<DiscoveryHan
   const requestPoll = (): void => {
     if (stopped || pollInFlight !== null) return
     const active = poll()
-      .catch((error: unknown) => deps.onError?.(`chart self-heal poll failed: ${error instanceof Error ? error.message : String(error)}`))
+      .catch((error: unknown) => deps.onError?.(`chart self-heal poll failed: ${errorMessage(error)}`))
       .finally(() => {
         if (pollInFlight === active) pollInFlight = null
       })

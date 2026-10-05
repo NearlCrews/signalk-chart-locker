@@ -35,7 +35,7 @@ statistics.
 | Host-side recovery pending | The resolved address failed one or more probes; recovery begins after three consecutive failures | Wait for automatic recovery, then inspect `signalk-container` if the status persists |
 | Unconfigured | The service is running, but the source and budget push failed | Restart after the container is healthy and inspect `tilecache_config_push_failed` |
 | Ready | SQLite is queryable and the configuration push succeeded | No action required |
-| Disk pressure | The filesystem is below its protected headroom | Free disk space or reduce the cache cap |
+| Disk pressure | Free space plus reusable cache pages are below the protected headroom | Free disk space or reduce the cache cap |
 | Slow upstream | A source recently timed out and is using an increased timeout | Cached stale tiles continue to serve; verify internet and provider health |
 
 `GET /health` on the container returns `databaseReady` and `configured`. It returns HTTP 503 only
@@ -61,11 +61,13 @@ whole byte before comparing the estimate with `regionsFreeBytes`. This planning 
 conservative, and the container still enforces the actual tile-count and byte limits during warming.
 
 The cache keeps at least 256 MiB of filesystem space outside new cache writes for SQLite WAL growth
-and other host activity. When a write would consume that reserve:
+and other host activity. Free pages inside the cache database count toward that reserve, because
+SQLite reuses them before it grows the file. When a write would consume that reserve:
 
 - Live tile bytes are still returned to the requesting client.
 - The tile is not stored.
 - A disk-pressure counter is incremented.
+- A saved-region download stops as `capped` and keeps the region's previous pins.
 - The panel reports the condition through cache statistics.
 
 The safe clear action deletes only unpinned scroll rows. It does not remove saved-region tiles,
@@ -173,7 +175,7 @@ read `configPushes` from the route directly:
 
 | Counter | Meaning |
 | ------- | ------- |
-| `cacheOperationErrors` | Cache read, write, eviction, deletion, or management failures |
+| `cacheOperationErrors` | Cache read, write, eviction, deletion, sweep, cleanup, or management failures, including a region promotion, a warm pin, and a blocking cache task that did not return |
 | `diskPressureEvents` | Writes declined because filesystem headroom was insufficient or SQLite reported a full disk |
 | `warmRejections` | Warm requests rejected for an unknown source, invalid geometry, a tile limit, or a job limit |
 | `configPushes` | Configuration pushes accepted by the container |
@@ -192,6 +194,10 @@ Relevant structured container events include:
 - `event=cache_region_bytes_failed`
 - `event=cache_region_delete_failed`
 - `event=cache_region_promote_failed`
+- `event=basemap_assets_capped` (the basemap glyphs and sprite did not fit, so the download ends
+  `capped`)
+- `event=warm_asset_fetch_failed` (a glyph range or sprite could not be fetched, named by its cache
+  source rather than its upstream URL)
 - `event=region_delete_cancel_timeout`
 - `event=scroll_ttl_swept`
 - `event=scroll_ttl_sweep_failed`
@@ -199,7 +205,11 @@ Relevant structured container events include:
 - `event=cache_database_recreated`
 
 Cache work that runs on a blocking thread also reports a `_task_failed` variant of its own event
-when the thread itself does not return, for example `event=cache_region_delete_task_failed`.
+when the thread itself does not return, for example `event=cache_region_delete_task_failed`. Region
+promotion, staging cleanup, warm and asset flushes, and fetch-path cache writes report that case as
+`event=cache_task_failed operation=<operation>` instead. Their database failures are
+`event=cache_region_promote_failed`, `event=cache_staging_cleanup_failed`, and, for flushes and
+fetch-path writes, `event=cache_write_failed operation=<operation>`.
 
 A failed region delete carries the region it could not remove, as
 `event=cache_region_delete_failed region_id=<id> error=<detail>`. A delete that could not stop the
@@ -217,8 +227,11 @@ Host-side port recovery events are `event=tilecache_host_recovery_started` and
 tile proxy every 30 seconds. Three consecutive host-side failures trigger an in-container
 healthcheck. A healthy container with an unreachable published port is restarted and its address is
 resolved again. The plugin restores the source allowlist, cache cap, saved-region budget, position
-warm budget, and scroll retention before reporting recovery. Recovery failures remain in plugin
-status, and another restart is not attempted for five minutes.
+warm budget, and scroll retention before reporting recovery. The retention is read as currently
+saved, so a change made through the panel since startup survives the recreate and the restore.
+Recovery failures remain in plugin status, and another restart is not attempted for five minutes.
+A recovery that leaves no resolvable container address is reported as a plugin error instead,
+because nothing is left to probe: restart Chart Locker to retry the tile cache.
 
 Each health response also reports configuration readiness. If Docker or Podman restarts the process
 outside the plugin lifecycle, Chart Locker detects the healthy but unconfigured service and restores

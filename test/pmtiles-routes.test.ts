@@ -32,12 +32,24 @@ function collect (): { routes: Record<string, (req: ServeRequest, res: FakeRes) 
 
 test('the serve route returns 409 while PMTiles support is disabled', async () => {
   const routes: Record<string, (req: ServeRequest, res: FakeRes) => void> = {}
-  registerPmtilesServeRoute({ get (p, h) { routes[p] = h as never } }, new ChartRegistry(), () => false)
+  registerPmtilesServeRoute({ get (p, h) { routes[p] = h as never } }, new ChartRegistry(), () => 'conflict')
   const res = new FakeRes()
   routes['/pmtiles/:file'](req('sf.pmtiles'), res)
   await new Promise((resolve) => setImmediate(resolve))
   assert.equal(res.statusCode, 409)
   assert.equal(res.outHeaders['x-content-type-options'], 'nosniff')
+})
+
+test('the serve route returns 503 without blaming a conflict while the provider is not running', async () => {
+  const routes: Record<string, (req: ServeRequest, res: FakeRes) => void> = {}
+  registerPmtilesServeRoute({ get (p, h) { routes[p] = h as never } }, new ChartRegistry(), () => 'unavailable')
+  const res = new FakeRes()
+  const body: Buffer[] = []
+  res.on('data', (chunk: Buffer) => body.push(chunk))
+  routes['/pmtiles/:file'](req('sf.pmtiles'), res)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(res.statusCode, 503)
+  assert.doesNotMatch(Buffer.concat(body).toString('utf8'), /signalk-pmtiles-plugin/)
 })
 
 async function fixtureRecord (): Promise<{ record: ChartRecord, cleanup: () => Promise<void>, size: number }> {
@@ -115,7 +127,7 @@ test('a synchronous source-stream construction failure closes the descriptor and
   registerPmtilesServeRoute(
     { get (path, handler) { routes[path] = handler as (req: ServeRequest, res: FakeRes) => void } },
     registry,
-    () => true,
+    () => 'serving',
     {
       createReadStream: ((_path: string, options: { fd?: number }) => {
         descriptor = options.fd
@@ -147,7 +159,7 @@ test('a source error before headers removes range lengths before returning 500',
   registerPmtilesServeRoute(
     { get (path, handler) { routes[path] = handler as (req: ServeRequest, res: FakeRes) => void } },
     registry,
-    () => true,
+    () => 'serving',
     {
       createReadStream: (() => new Readable({
         read () { this.destroy(new Error('read failed')) }
@@ -177,7 +189,7 @@ test('a throwing stream observer destroys the created stream and returns a clean
   registerPmtilesServeRoute(
     { get (path, handler) { routes[path] = handler as (req: ServeRequest, res: FakeRes) => void } },
     registry,
-    () => true,
+    () => 'serving',
     {
       onStream: (stream) => {
         closed = new Promise((resolve) => { stream.once('close', resolve) })
@@ -207,7 +219,7 @@ test('HEAD returns full and range headers without creating a source stream', asy
   registerPmtilesServeRoute(
     { get (path, handler) { routes[path] = handler as (req: ServeRequest, res: FakeRes) => void } },
     registry,
-    () => true,
+    () => 'serving',
     { onStream: () => { streams++ } }
   )
   const { record, cleanup, size } = await fixtureRecord()
@@ -368,7 +380,7 @@ test('disconnecting a PMTiles response destroys and closes the source stream', a
   registerPmtilesServeRoute(
     { get (p, h) { routes[p] = h as (req: ServeRequest, res: FakeRes) => void } },
     registry,
-    () => true,
+    () => 'serving',
     { onStream: (stream) => { source = stream } }
   )
   const { record, cleanup } = await fixtureRecord()

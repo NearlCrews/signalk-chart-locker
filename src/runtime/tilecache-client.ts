@@ -2,11 +2,13 @@
  * position-warm loop uses it so the warm POST and the status poll are spelled once, not re-rolled inline.
  * Returns the terminal { errors, total }, or null on any failure or a job the container no longer has. */
 
+import { setTimeout as sleep } from 'node:timers/promises'
 import type { LngLatBbox } from 'signalk-chart-sources'
 import { containerFetchSignal } from './container-fetch.js'
 import { controlHeaders } from './control-token.js'
 import { MAX_REGION_ID_LENGTH, MAX_REGION_TOTAL_ENTRIES } from './regions-store.js'
 import { hasControlCharacter } from '../shared/text.js'
+import { isNonnegativeSafeInteger } from '../shared/number.js'
 import { readBoundedResponseJson } from './bounded-response.js'
 import { isWarmSnapshot, validWarmJobId, type WarmState } from './warm-contract.js'
 
@@ -23,7 +25,7 @@ export function readRegionByteTotals (value: unknown): Record<string, number> | 
   if (entries.length > MAX_REGION_TOTAL_ENTRIES) return null
   const totals = Object.create(null) as Record<string, number>
   for (const [id, bytes] of entries) {
-    if (id.length === 0 || id.length > MAX_REGION_ID_LENGTH || hasControlCharacter(id) || !isNonnegativeInteger(bytes)) return null
+    if (id.length === 0 || id.length > MAX_REGION_ID_LENGTH || hasControlCharacter(id) || !isNonnegativeSafeInteger(bytes)) return null
     totals[id] = bytes
   }
   return totals
@@ -58,29 +60,6 @@ function isAborted (signal?: AbortSignal): boolean {
   return signal?.aborted === true
 }
 
-async function abortableDelay (delayMs: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted === true) throw new DOMException('Aborted', 'AbortError')
-  await new Promise<void>((resolve, reject) => {
-    let settled = false
-    const timer = setTimeout(done, delayMs)
-    const aborted = (): void => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', aborted)
-      reject(new DOMException('Aborted', 'AbortError'))
-    }
-    function done (): void {
-      if (settled) return
-      settled = true
-      signal?.removeEventListener('abort', aborted)
-      resolve()
-    }
-    signal?.addEventListener('abort', aborted, { once: true })
-    if (signal?.aborted === true) aborted()
-  })
-}
-
 async function fetchWithRetry (url: string, options: RequestInit, fetchImpl: typeof fetch, signal?: AbortSignal): Promise<Response> {
   let lastError: unknown
   for (let i = 0; i < MAX_RETRIES; i++) {
@@ -95,7 +74,7 @@ async function fetchWithRetry (url: string, options: RequestInit, fetchImpl: typ
       lastError = err
       if (isAborted(signal)) throw err
       if (i < MAX_RETRIES - 1) {
-        await abortableDelay(RETRY_DELAY_MS * (i + 1), signal)
+        await sleep(RETRY_DELAY_MS * (i + 1), undefined, { signal })
       }
     }
   }
@@ -129,14 +108,10 @@ export async function warmRegion (
       const snap = await readBoundedResponseJson(status)
       if (!isWarmSnapshot(snap)) return null
       if (snap.state !== 'running') return { state: snap.state, errors: snap.errors, total: snap.total }
-      await abortableDelay(POLL_INTERVAL_MS, signal)
+      await sleep(POLL_INTERVAL_MS, undefined, { signal })
     }
     return null
   } catch {
     return null
   }
-}
-
-function isNonnegativeInteger (value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }

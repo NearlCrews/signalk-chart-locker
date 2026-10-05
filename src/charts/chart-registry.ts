@@ -1,7 +1,8 @@
 /** Holds the discovered chart set and exposes it to the Signal K resources read path. The provider
  * methods and the v1 routes read the live registry, so discovery mutates the map and the registration
  * happens once. Signal K exposes no unregisterResourceProvider and Express no route deregistration,
- * so teardown clears the map: the provider then serves an empty set. */
+ * so teardown clears the map: the provider then serves an empty set, and the v1 routes pass the
+ * request on to the next handler. */
 
 import type { ResourceProvider } from '@signalk/server-api'
 import type { LngLatBbox } from 'signalk-chart-sources'
@@ -84,10 +85,6 @@ export class ChartRegistry {
     this.#lastScanAt = at
   }
 
-  delete (id: string): void {
-    this.#records.delete(id)
-  }
-
   clear (): void {
     this.#records.clear()
     this.#errors.clear()
@@ -124,18 +121,8 @@ export class ChartRegistry {
     this.#errors.set(fileName, error)
   }
 
-  clearError (fileName: string): void {
-    this.#errors.delete(fileName)
-  }
-
   errors (): Array<{ fileName: string, error: string }> {
     return [...this.#errors.entries()].map(([fileName, error]) => ({ fileName, error }))
-  }
-
-  retainErrors (fileNames: Set<string>): void {
-    for (const fileName of this.#errors.keys()) {
-      if (!fileNames.has(fileName)) this.#errors.delete(fileName)
-    }
   }
 
   markScanned (at = Date.now()): void {
@@ -154,22 +141,34 @@ interface V1Res {
 }
 
 export interface ChartRouteApp {
-  get (path: string, handler: (req: { params: Record<string, string> }, res: V1Res) => void): void
+  get (path: string, handler: (req: { params: Record<string, string> }, res: V1Res, next: () => void) => void): void
   registerResourceProvider (provider: ResourceProvider): void
+}
+
+interface ProviderHolder {
+  registry: ChartRegistry
+  isActive: () => boolean
 }
 
 // Register the v2 provider and the v1 routes once per app, so an enable, disable, then re-enable
 // cycle does not throw a duplicate-provider error. A mutable holder lets a recreated plugin factory
 // rebind the permanent provider and routes to its new live registry.
-const registeredApps = new WeakMap<object, { registry: ChartRegistry }>()
+const registeredApps = new WeakMap<object, ProviderHolder>()
 
-export function registerChartProvider (app: ChartRouteApp, registry: ChartRegistry): void {
+/**
+ * `isActive` says whether this provider is serving. The v1 routes sit on the server's own router
+ * beside signalk-pmtiles-plugin's handlers for the same paths, and Express runs them in registration
+ * order, so an inactive provider passes the request on rather than answering for charts it does not
+ * hold. The v2 resources API merges providers itself and needs no such deferral.
+ */
+export function registerChartProvider (app: ChartRouteApp, registry: ChartRegistry, isActive: () => boolean = () => true): void {
   const existing = registeredApps.get(app)
   if (existing !== undefined) {
     existing.registry = registry
+    existing.isActive = isActive
     return
   }
-  const holder = { registry }
+  const holder: ProviderHolder = { registry, isActive }
 
   app.registerResourceProvider({
     type: 'charts',
@@ -192,12 +191,20 @@ export function registerChartProvider (app: ChartRouteApp, registry: ChartRegist
   // retryable instead of poisoning this app in the deduplication map.
   registeredApps.set(app, holder)
 
-  app.get(`${V1_CHARTS}/:identifier`, (req, res) => {
+  app.get(`${V1_CHARTS}/:identifier`, (req, res, next) => {
+    if (!holder.isActive()) {
+      next()
+      return
+    }
     const resource = holder.registry.get(req.params.identifier)
     if (resource) res.json(resource)
     else res.status(404).send('Not found')
   })
-  app.get(V1_CHARTS, (_req, res) => {
+  app.get(V1_CHARTS, (_req, res, next) => {
+    if (!holder.isActive()) {
+      next()
+      return
+    }
     const out: Record<string, ChartResource> = {}
     for (const resource of holder.registry.list()) out[resource.identifier] = resource
     res.json(out)

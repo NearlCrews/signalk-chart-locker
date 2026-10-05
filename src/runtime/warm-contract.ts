@@ -2,6 +2,7 @@
 
 import { hasControlCharacter } from '../shared/text.js'
 import { isRecord } from '../shared/record.js'
+import { isNonnegativeSafeInteger } from '../shared/number.js'
 
 export type WarmState = 'running' | 'done' | 'cancelled' | 'capped' | 'error'
 
@@ -22,10 +23,6 @@ const WARM_STATES = new Set<WarmState>(['running', 'done', 'cancelled', 'capped'
 const WARM_JOB_ID_RE = /^warm-[0-9a-f]{32}-([0-9]{1,20})$/
 const U64_MAX = 18_446_744_073_709_551_615n
 
-function isNonnegativeInteger (value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-}
-
 export function validWarmJobId (value: unknown): value is string {
   if (typeof value !== 'string' || hasControlCharacter(value)) return false
   const match = WARM_JOB_ID_RE.exec(value)
@@ -35,8 +32,8 @@ export function validWarmJobId (value: unknown): value is string {
 export function isWarmSnapshot (value: unknown): value is WarmSnapshot {
   if (!isRecord(value) || typeof value.state !== 'string' || !WARM_STATES.has(value.state as WarmState)) return false
   const { total, done, skipped, bytes, errors } = value
-  if (!isNonnegativeInteger(total) || !isNonnegativeInteger(done) || !isNonnegativeInteger(skipped) ||
-      !isNonnegativeInteger(bytes) || !isNonnegativeInteger(errors)) return false
+  if (!isNonnegativeSafeInteger(total) || !isNonnegativeSafeInteger(done) || !isNonnegativeSafeInteger(skipped) ||
+      !isNonnegativeSafeInteger(bytes) || !isNonnegativeSafeInteger(errors)) return false
   if (done > total || skipped > total || done > total - skipped) return false
   return value.state !== 'done' || done === total - skipped
 }

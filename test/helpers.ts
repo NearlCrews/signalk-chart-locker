@@ -3,14 +3,58 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { ServerAPI } from '@signalk/server-api'
 import type { ContainerConfig, ContainerManager, ContainerRuntimeInfo, ContainerUpdateRegistration, ContainerVersionSource } from '../src/shared/types.js'
-import type { RegionsRouter, RegionsRequest, RegionsResponse } from '../src/http/regions-routes.js'
+import { registerRegionsRoutes, type RegionsRouter, type RegionsRequest, type RegionsResponse } from '../src/http/regions-routes.js'
 import { CONTAINER_MANAGER_GLOBAL_KEY } from '../src/runtime/container-manager.js'
+import { createRetentionPushQueue } from '../src/runtime/tilecache-config-push.js'
+import { loadRegionsStore, scrollTtlSecsFromDays } from '../src/runtime/regions-store.js'
 
 const helperTempDirs = new Set<string>()
 process.once('exit', () => {
   for (const dir of helperTempDirs) rmSync(dir, { recursive: true, force: true })
 })
+
+/** Poll until the predicate holds, failing the test once the timeout passes without it. */
+export async function waitUntil (predicate: () => boolean | Promise<boolean>, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (await predicate()) return
+    if (Date.now() >= deadline) throw new Error(`condition was not met within ${timeoutMs} ms`)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+}
+
+/** Resolve with the promise's value, failing the test when it has not settled within the timeout. */
+export async function settleWithin<T> (promise: Promise<T>, timeoutMs = 2000): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('promise did not settle before the deadline')), timeoutMs)
+      })
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+type RegionsRoutesDeps = Parameters<typeof registerRegionsRoutes>[3]
+
+/**
+ * Mount the regions routes with a retention queue of their own that reads the store they write, the
+ * way the plugin hands them its shared one. A test of that sharing mounts through the plugin instead.
+ */
+export function mountRegionsRoutes (
+  router: RegionsRouter,
+  app: ServerAPI,
+  getAddress: () => string | null,
+  deps: Omit<RegionsRoutesDeps, 'retentionPushes'> = {}
+): ReturnType<typeof registerRegionsRoutes> {
+  const retentionPushes = createRetentionPushQueue(() => scrollTtlSecsFromDays(loadRegionsStore(deps.dataDir ?? app.getDataDirPath()).cacheScrollTtlDays))
+  return registerRegionsRoutes(router, app, getAddress, { ...deps, retentionPushes })
+}
 
 /** One write to the server's single per-plugin status slot. */
 export interface StatusSlotWrite {
@@ -209,7 +253,7 @@ export function readinessRouter (): { router: RegionsRouter, ready: () => number
         setHeader () {},
         end () {}
       }
-      handler?.({ url: '/tiles/ready', headers: {}, on () {} }, res)
+      handler?.({ url: '/tiles/ready', headers: {} }, res)
       return status
     }
   }

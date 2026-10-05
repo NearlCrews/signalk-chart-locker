@@ -8,6 +8,35 @@ import { readJsonState } from '../runtime/json-state.js'
 import { isRecord } from '../shared/record.js'
 
 const THIRD_PARTY_PLUGIN_ID = 'pmtiles-chart-provider'
+/** The npm package an operator installs and recognizes the third-party provider by. Every message that
+ * names the conflict uses it, so the status line, the HTTP bodies, and the README agree. */
+export const THIRD_PARTY_PMTILES_PACKAGE = 'signalk-pmtiles-plugin'
+
+/**
+ * What Chart Locker's own PMTiles provider is doing. 'serving' publishes and serves the discovered
+ * charts. 'conflict' means the third-party provider is enabled and owns the charts. 'unavailable'
+ * means neither: chart discovery has not answered yet for this start, or the plugin is stopped. The
+ * routes outlive a stop and the status line opens before discovery answers, so only 'conflict' may
+ * tell an operator to disable a plugin they may never have installed.
+ */
+export type PmtilesProviderState = 'serving' | 'conflict' | 'unavailable'
+
+/** How a PMTiles route refuses a request while the provider is not serving. */
+export interface PmtilesRefusal {
+  status: 409 | 503
+  message: string
+}
+
+/**
+ * The refusal for a PMTiles route, or null while the provider is serving. `activity` names what the
+ * route does, so the archive route and the management routes each say what the conflict disabled.
+ */
+export function pmtilesRefusal (state: PmtilesProviderState, activity: 'serving' | 'management'): PmtilesRefusal | null {
+  if (state === 'serving') return null
+  return state === 'conflict'
+    ? { status: 409, message: `PMTiles ${activity} is disabled while ${THIRD_PARTY_PMTILES_PACKAGE} is enabled` }
+    : { status: 503, message: 'PMTiles charts are unavailable while Chart Locker is stopped or starting' }
+}
 
 export function isThirdPartyPmtilesEnabled (configPath: string): boolean {
   const file = join(configPath, 'plugin-config-data', `${THIRD_PARTY_PLUGIN_ID}.json`)
@@ -23,16 +52,28 @@ export interface MutualExclusionWatcher {
   stop: () => Promise<void>
 }
 
+interface WatchOptions {
+  intervalMs?: number
+  retryBaseMs?: number
+  onError?: (error: unknown) => void
+  /**
+   * The enabled state the caller's chart provider already reflects. A caller that set its provider up
+   * some time before starting the watcher passes it, so a change made in between is applied on the
+   * first pass instead of being adopted as already applied. Defaults to the state read at start.
+   */
+  applied?: boolean
+}
+
 /** Watch the server-owned plugin config, with a slow poll to self-heal dropped directory events. */
 export function watchThirdPartyPmtilesEnabled (
   configPath: string,
   onChange: (enabled: boolean) => unknown,
-  options: { intervalMs?: number, retryBaseMs?: number, onError?: (error: unknown) => void } = {}
+  options: WatchOptions = {}
 ): MutualExclusionWatcher {
   const directory = join(configPath, 'plugin-config-data')
   const fileName = `${THIRD_PARTY_PLUGIN_ID}.json`
-  let applied = isThirdPartyPmtilesEnabled(configPath)
-  let observed = applied
+  let observed = isThirdPartyPmtilesEnabled(configPath)
+  let applied = options.applied ?? observed
   let stopped = false
   let watcher: FSWatcher | undefined
   let applyTimer: NodeJS.Timeout | undefined
@@ -105,6 +146,7 @@ export function watchThirdPartyPmtilesEnabled (
   }
 
   installWatcher()
+  scheduleApply()
   const pollTimer = setInterval(() => {
     installWatcher()
     check()

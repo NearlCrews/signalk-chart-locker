@@ -1,6 +1,7 @@
 /** Resolves the signalk-container manager from the global it publishes, and guards on a detected runtime. */
 
 import type { ContainerManager } from '../shared/types.js'
+import { errorMessage } from '../shared/error.js'
 
 /**
  * The only surface these helpers need from the server. Narrowed from ServerAPI so a caller can route
@@ -12,32 +13,42 @@ export interface PluginErrorReporter {
   setPluginError: (message: string) => void
 }
 
-/** The global key signalk-container publishes its manager on, mirrored by BRIDGE_GLOBAL_KEY for the bridge. */
+/** The global key signalk-container publishes its manager on. */
 export const CONTAINER_MANAGER_GLOBAL_KEY = '__signalk_containerManager'
 const CONTAINER_READY_TIMEOUT_MS = 30_000
 
-type ReadinessOutcome = 'ready' | 'timeout' | 'aborted' | { error: unknown }
+export type ManagerOperationOutcome<T> =
+  | { status: 'completed', value: T }
+  | { status: 'rejected', error: unknown }
+  | { status: 'timeout' }
+  | { status: 'aborted' }
 
-async function waitForReadiness (operation: Promise<void>, timeoutMs: number, signal?: AbortSignal): Promise<ReadinessOutcome> {
+/** Bound an otherwise uninterruptible manager promise while retaining its eventual completion. None
+ * of the manager calls takes a signal, so this is the one place a caller's timeout and abort apply. */
+export async function waitForManagerOperation<T> (
+  operation: Promise<T>,
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<ManagerOperationOutcome<T>> {
   return await new Promise((resolve) => {
     let settled = false
-    const finish = (outcome: ReadinessOutcome): void => {
+    const finish = (outcome: ManagerOperationOutcome<T>): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       signal?.removeEventListener('abort', onAbort)
       resolve(outcome)
     }
-    const onAbort = (): void => { finish('aborted') }
-    const timer = setTimeout(() => { finish('timeout') }, timeoutMs)
+    const onAbort = (): void => { finish({ status: 'aborted' }) }
+    const timer = setTimeout(() => { finish({ status: 'timeout' }) }, timeoutMs)
     if (signal?.aborted === true) {
-      finish('aborted')
+      finish({ status: 'aborted' })
       return
     }
     signal?.addEventListener('abort', onAbort, { once: true })
     operation.then(
-      () => { finish('ready') },
-      (error: unknown) => { finish({ error }) }
+      (value) => { finish({ status: 'completed', value }) },
+      (error: unknown) => { finish({ status: 'rejected', error }) }
     )
   })
 }
@@ -65,24 +76,24 @@ export async function ensureRuntimeReady (
   try {
     operation = manager.whenReady()
   } catch (error) {
-    app.setPluginError(`The signalk-container plugin readiness check failed: ${error instanceof Error ? error.message : String(error)}`)
+    app.setPluginError(`The signalk-container plugin readiness check failed: ${errorMessage(error)}`)
     return false
   }
-  const outcome = await waitForReadiness(operation, options.timeoutMs ?? CONTAINER_READY_TIMEOUT_MS, options.signal)
-  if (outcome === 'aborted') return false
-  if (outcome === 'timeout') {
+  const outcome = await waitForManagerOperation(operation, options.timeoutMs ?? CONTAINER_READY_TIMEOUT_MS, options.signal)
+  if (outcome.status === 'aborted') return false
+  if (outcome.status === 'timeout') {
     app.setPluginError('The signalk-container plugin did not become ready before the startup timeout.')
     return false
   }
-  if (typeof outcome === 'object') {
-    app.setPluginError(`The signalk-container plugin readiness check failed: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`)
+  if (outcome.status === 'rejected') {
+    app.setPluginError(`The signalk-container plugin readiness check failed: ${errorMessage(outcome.error)}`)
     return false
   }
   let runtime: ReturnType<ContainerManager['getRuntime']>
   try {
     runtime = manager.getRuntime()
   } catch (error) {
-    app.setPluginError(`The signalk-container runtime check failed: ${error instanceof Error ? error.message : String(error)}`)
+    app.setPluginError(`The signalk-container runtime check failed: ${errorMessage(error)}`)
     return false
   }
   if (!runtime) {

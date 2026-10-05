@@ -23,21 +23,9 @@ function collectRoutes (): { routes: Record<string, (req: ProxyRequest, res: nev
   return { routes, router }
 }
 
-/** Dispatches by event name, so a listener registered for one request event can never stand in for
- *  another: moving the proxy's cancel hook onto a different event has to fail these tests. */
-function fakeReq (url: string, headers: Record<string, string> = {}): ProxyRequest & { triggerClose: () => void, triggerAborted: () => void } {
-  const listeners = new Map<string, Array<() => void>>()
-  return {
-    url,
-    headers,
-    on (event: string, cb: () => void) {
-      const registered = listeners.get(event) ?? []
-      registered.push(cb)
-      listeners.set(event, registered)
-    },
-    triggerClose () { for (const cb of listeners.get('close') ?? []) cb() },
-    triggerAborted () { for (const cb of listeners.get('aborted') ?? []) cb() }
-  } as unknown as ProxyRequest & { triggerClose: () => void, triggerAborted: () => void }
+/** No event surface: the proxy cancels on the response's close, never on a request event. */
+function fakeReq (url: string, headers: Record<string, string> = {}): ProxyRequest {
+  return { url, headers }
 }
 
 const tilePath = '/tile/:source/:z/:x/:y'
@@ -153,7 +141,7 @@ test('a browser cancel aborts the upstream fetch', async () => {
   assert.equal(aborted, true)
 })
 
-test('a request close, which fires on every completed request, does not abort the pending upstream response', async () => {
+test('a pending upstream response is not aborted while the browser response stays open', async () => {
   const { routes, router } = collectRoutes()
   let signal: AbortSignal | undefined
   let resolveFetch: ((response: Response) => void) | undefined
@@ -164,28 +152,12 @@ test('a request close, which fires on every completed request, does not abort th
   registerTileRoutes(router, () => 'c:8080', fetchImpl)
   const res = new FakeRes()
   const done = new Promise((resolve) => res.on('finish', resolve))
-  const req = fakeReq('/tile/s/1/0/0')
-  routes[tilePath](req, res as never)
-  req.triggerClose()
+  routes[tilePath](fakeReq('/tile/s/1/0/0'), res as never)
   await new Promise((resolve) => setImmediate(resolve))
   assert.equal(signal?.aborted, false)
   resolveFetch?.(new Response(new Uint8Array([1]), { status: 200 }))
   await done
   assert.equal(res.statusCode, 200)
-})
-
-test('an aborted incoming request aborts the pending upstream response', async () => {
-  const { routes, router } = collectRoutes()
-  let aborted = false
-  const fetchImpl: ProxyFetch = (_url, init) => new Promise<Response>((_resolve, reject) => {
-    init.signal.addEventListener('abort', () => { aborted = true; reject(new Error('aborted')) })
-  })
-  registerTileRoutes(router, () => 'c:8080', fetchImpl)
-  const req = fakeReq('/tile/s/1/0/0')
-  routes[tilePath](req, new FakeRes() as never)
-  req.triggerAborted()
-  await new Promise((resolve) => setImmediate(resolve))
-  assert.equal(aborted, true)
 })
 
 test('the style route rewrites the sprite to an absolute same-origin URL and passes other fields through', async () => {
@@ -254,14 +226,16 @@ test('the style route relays a non-2xx upstream status without parsing', async (
   assert.equal(Buffer.concat(chunks).toString(), 'bad gateway')
 })
 
-test('the style route rejects malformed, non-object, invalid-UTF-8, incorrectly typed, and partial documents', async () => {
+test('the style route rejects malformed, non-object, invalid-UTF-8, incorrectly typed, partial, and empty documents', async () => {
   const invalidResponses = [
     () => new Response('null', { status: 200, headers: { 'content-type': 'application/json' } }),
     () => new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } }),
     () => new Response('{', { status: 200, headers: { 'content-type': 'application/json' } }),
     () => new Response(new Uint8Array([0x7b, 0xff, 0x7d]), { status: 200, headers: { 'content-type': 'application/json' } }),
     () => new Response('{}', { status: 200, headers: { 'content-type': 'text/html' } }),
-    () => new Response('{}', { status: 206, headers: { 'content-type': 'application/json' } })
+    () => new Response('{}', { status: 206, headers: { 'content-type': 'application/json' } }),
+    () => new Response(null, { status: 200, headers: { 'content-type': 'application/json' } }),
+    () => new Response(null, { status: 204, headers: { 'content-type': 'application/json' } })
   ]
 
   for (const invalidResponse of invalidResponses) {

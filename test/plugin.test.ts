@@ -4,16 +4,8 @@ import type { Plugin } from '@signalk/server-api'
 import { createPlugin } from '../src/plugin/plugin.js'
 import { PLUGIN_ID, PLUGIN_NAME } from '../src/shared/plugin-id.js'
 import { TILECACHE_CONTAINER_NAME, DEFAULT_TILECACHE_IMAGE, DEFAULT_TILECACHE_TAG } from '../src/runtime/tilecache-container.js'
-import { fakeApp, fakeManager, managerRecord, readinessRouter, statusSlot, updatesRecord, setContainerManager, clearGlobals, type ManagerRecord, type Recorder } from './helpers.js'
-
-async function waitUntil (predicate: () => boolean, timeoutMs = 1000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  for (;;) {
-    if (predicate()) return
-    if (Date.now() >= deadline) throw new Error(`condition was not met within ${timeoutMs} ms`)
-    await new Promise((resolve) => setTimeout(resolve, 5))
-  }
-}
+import type { RegionsRouter } from '../src/http/regions-routes.js'
+import { fakeApp, fakeManager, fakeRegionsRes, makeRegionsRouter, managerRecord, readinessRouter, statusSlot, updatesRecord, setContainerManager, clearGlobals, waitUntil, type ManagerRecord, type Recorder } from './helpers.js'
 
 /** The uniform three-endpoint tilecache fetch stub the warm-adoption tests share. */
 function tilecacheFetch (configured: boolean): (input: string | URL | Request) => Promise<Response> {
@@ -25,6 +17,26 @@ function tilecacheFetch (configured: boolean): (input: string | URL | Request) =
     throw new Error(`unexpected fetch ${url}`)
   }
 }
+
+/**
+ * The tilecache stub for a host-side recovery: the first two health probes (warm adoption and the
+ * startup probe) pass and every later one fails, so host monitoring recovers on its first check.
+ */
+function recoveryFetch (): (input: string | URL | Request) => Promise<Response> {
+  let healthCalls = 0
+  const healthy = tilecacheFetch(true)
+  return async (input) => {
+    if (String(input).endsWith('/health') && ++healthCalls > 2) return Response.json({}, { status: 503 })
+    return await healthy(input)
+  }
+}
+
+/** Host monitoring that probes every 5 ms and recovers on the first failure with no cooldown. */
+const FAST_RECOVERY = {
+  hostHealthMonitorIntervalMs: 5,
+  hostHealthFailureThreshold: 1,
+  hostHealthRecoveryCooldownMs: 0
+} as const
 
 /** Gates the fake manager's ensureRunning behind the returned release; 'fail' throws on release. */
 function gateEnsureRunning (manager: ReturnType<typeof fakeManager>, record: ManagerRecord, behavior: 'complete' | 'fail'): () => void {
@@ -208,6 +220,9 @@ test('start reports an unavailable configured external cache path without silent
   const slot = statusSlot(app)
   assert.equal(slot?.type, 'error')
   assert.match(slot!.message, /External tile cache path is unavailable: \/media\/offline-drive\/cache/)
+  // The manager says which case it is: a path that does not exist, or one a containerized Signal K
+  // could not see. The remedy differs, so its reason reaches the operator.
+  assert.match(slot!.message, /required host path is missing/)
   assert.doesNotMatch(slot!.message, /Tilecache container unavailable/)
   assert.deepEqual(record.stopped, [TILECACHE_CONTAINER_NAME])
   await plugin.stop()
@@ -582,11 +597,7 @@ test('host-side recovery recreates the container, re-resolves its port, and rest
     throw new Error(`unexpected fetch ${url}`)
   })
   const app = fakeApp()
-  const plugin = createPlugin(app as never, {
-    hostHealthMonitorIntervalMs: 5,
-    hostHealthFailureThreshold: 1,
-    hostHealthRecoveryCooldownMs: 0
-  })
+  const plugin = createPlugin(app as never, FAST_RECOVERY)
 
   await plugin.start({}, () => {})
   try {
@@ -626,11 +637,7 @@ test('an initially unconfigured but reachable container is restored by host moni
     throw new Error(`unexpected fetch ${url}`)
   })
   const app = fakeApp()
-  const plugin = createPlugin(app as never, {
-    hostHealthMonitorIntervalMs: 5,
-    hostHealthFailureThreshold: 1,
-    hostHealthRecoveryCooldownMs: 0
-  })
+  const plugin = createPlugin(app as never, FAST_RECOVERY)
 
   await plugin.start({}, () => {})
   try {
@@ -664,11 +671,7 @@ test('an out-of-band configuration loss keeps public tile routes unavailable whe
     throw new Error(`unexpected fetch ${url}`)
   })
   const app = fakeApp()
-  const plugin = createPlugin(app as never, {
-    hostHealthMonitorIntervalMs: 5,
-    hostHealthFailureThreshold: 1,
-    hostHealthRecoveryCooldownMs: 60_000
-  })
+  const plugin = createPlugin(app as never, { ...FAST_RECOVERY, hostHealthRecoveryCooldownMs: 60_000 })
   const { router, ready } = readinessRouter()
   plugin.registerWithRouter?.(router as never)
 
@@ -693,25 +696,8 @@ test('a pending timed-out recovery recreation suppresses duplicate recreations',
     await new Promise<void>(() => {})
   }
   setContainerManager(manager)
-  let healthCalls = 0
-  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
-    const url = String(input)
-    if (url.endsWith('/health')) {
-      healthCalls++
-      return healthCalls <= 2
-        ? Response.json({ status: 'ok', configured: true })
-        : Response.json({}, { status: 503 })
-    }
-    if (url.endsWith('/config')) return new Response(null, { status: 204 })
-    if (url.endsWith('/cache/regions')) return Response.json({ regions: {} })
-    throw new Error(`unexpected fetch ${url}`)
-  })
-  const plugin = createPlugin(fakeApp() as never, {
-    managerOperationTimeoutMs: 10,
-    hostHealthMonitorIntervalMs: 5,
-    hostHealthFailureThreshold: 1,
-    hostHealthRecoveryCooldownMs: 0
-  })
+  t.mock.method(globalThis, 'fetch', recoveryFetch())
+  const plugin = createPlugin(fakeApp() as never, { ...FAST_RECOVERY, managerOperationTimeoutMs: 10 })
 
   await plugin.start({}, () => {})
   try {
@@ -775,6 +761,23 @@ test('route reconciliation starts whether router registration happens before or 
     await plugin.stop()
     assert.equal(stops, 1)
   }
+})
+
+test('registerWithRouter mounts the /api registrars through the route guard', async () => {
+  const debugged: unknown[][] = []
+  const app = Object.assign(fakeApp(), { debug: (...args: unknown[]) => { debugged.push(args) } })
+  const plugin = createPlugin(app as never, {
+    registerRegionsRoutes: ((router: RegionsRouter) => {
+      router.post('/api/failing', async () => { throw new Error('unexpected failure') })
+      return { start () {}, async stop () {} }
+    }) as never
+  })
+  const { router, routes } = makeRegionsRouter()
+  plugin.registerWithRouter?.(router as never)
+  const { responded, res } = fakeRegionsRes()
+  await routes.find((route) => route.path === '/api/failing')!.handler({ params: {}, body: null }, res)
+  assert.deepEqual(responded, [{ status: 500, body: { error: 'internal error' } }])
+  assert.ok(debugged.some((args) => args[0] === 'Chart Locker route failed:'))
 })
 
 test('admin recovery routes retain the container address when configuration fails while public tiles stay unavailable', async (t) => {
@@ -1067,4 +1070,246 @@ test('a pending late cleanup suppresses a newer launch of the fixed container na
   await plugin.start({}, () => {})
   assert.equal(record.ensured.length, 1)
   await plugin.stop()
+})
+
+test('host-side recovery restores the scroll retention saved since startup, not the startup value', async (t) => {
+  const record = managerRecord()
+  const manager = fakeManager({ record })
+  let address: string | null = '127.0.0.1:31001'
+  let hostFails = false
+  const pushedTtls: unknown[] = []
+  manager.resolveContainerAddress = async () => address
+  manager.recreate = async (name, config) => {
+    record.recreated.push({ name, config })
+    address = '127.0.0.1:31002'
+  }
+  setContainerManager(manager)
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input)
+    if (url.endsWith('/health')) {
+      return hostFails && url.includes('31001')
+        ? Response.json({}, { status: 503 })
+        : Response.json({ status: 'ok', configured: true })
+    }
+    if (url.endsWith('/config')) {
+      pushedTtls.push((JSON.parse(String(init?.body)) as { scrollTtlSecs: unknown }).scrollTtlSecs)
+      return new Response(null, { status: 204 })
+    }
+    if (url.endsWith('/cache/regions')) return Response.json({ regions: {} })
+    throw new Error(`unexpected fetch ${url}`)
+  })
+  const app = fakeApp()
+  const plugin = createPlugin(app as never, FAST_RECOVERY)
+
+  await plugin.start({}, () => {})
+  try {
+    assert.deepEqual(pushedTtls, [30 * 86_400])
+    // POST /api/cache/config persists a new retention while the plugin runs. Zero turns age-based
+    // removal off, so a recreate seeded with the startup value would sweep tiles the operator kept.
+    const { mutateRegionsStore } = await import('../src/runtime/regions-store.js')
+    mutateRegionsStore(app.getDataDirPath(), (store) => { store.cacheScrollTtlDays = 0 })
+    hostFails = true
+    await waitUntil(() => record.recreated.length >= 1 && pushedTtls.length >= 2)
+
+    assert.equal(record.recreated[0]?.config.env?.TILECACHE_SCROLL_TTL_SECS, '0')
+    assert.equal(pushedTtls[1], 0)
+  } finally {
+    await plugin.stop()
+  }
+})
+
+test('a recovery that leaves no resolvable address is reported as an error with its remedy', async (t) => {
+  const record = managerRecord()
+  const manager = fakeManager({ record })
+  let address: string | null = '127.0.0.1:31001'
+  manager.resolveContainerAddress = async () => address
+  manager.recreate = async (name, config) => {
+    record.recreated.push({ name, config })
+    address = null
+  }
+  setContainerManager(manager)
+  t.mock.method(globalThis, 'fetch', recoveryFetch())
+  const app = fakeApp()
+  const plugin = createPlugin(app as never, FAST_RECOVERY)
+
+  await plugin.start({}, () => {})
+  try {
+    await waitUntil(() => statusSlot(app)?.type === 'error')
+    // With no address the monitor has nothing left to probe, so nothing retries until a restart. The
+    // slot has to say so, rather than fall back to the generic unavailable line as a plain status.
+    const slot = statusSlot(app)
+    assert.match(slot!.message, /recovery failed: container address did not resolve after restart/)
+    assert.match(slot!.message, /Restart Chart Locker/)
+    assert.equal(record.recreated.length, 1)
+  } finally {
+    await plugin.stop()
+  }
+})
+
+test('a region-state write failure at startup does not fail the plugin start', async (t) => {
+  setContainerManager(fakeManager({ address: '127.0.0.1:8080' }))
+  const app = fakeApp()
+  const dataDir = app.getDataDirPath()
+  const { addRegion, loadRegionsStore } = await import('../src/runtime/regions-store.js')
+  addRegion(dataDir, {
+    id: 'region-1',
+    name: 'Offline area',
+    bbox: [-1, -1, 1, 1],
+    sourceIds: ['basemap'],
+    minzoom: 1,
+    maxzoom: 2,
+    createdAt: 1,
+    lastDownloadedAt: 2,
+    bytes: 100,
+    status: 'ready'
+  })
+  t.mock.method(globalThis, 'fetch', tilecacheFetch(true))
+  let attempts = 0
+  // A full disk refuses the write the same way on every platform. Directory modes would not: Windows
+  // ignores them for folders and root ignores them everywhere.
+  const plugin = createPlugin(app as never, {
+    mutateRegionsStore: () => {
+      attempts++
+      throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' })
+    }
+  })
+  try {
+    await plugin.start({}, () => {})
+    assert.equal(attempts, 1)
+    assert.ok(!app.errors.some((message) => message.includes('Startup failed')), app.errors.join('\n'))
+    assert.match(statusSlot(app)?.message ?? '', /; ready\./)
+    assert.equal(loadRegionsStore(dataDir).regions[0]?.status, 'ready')
+  } finally {
+    await plugin.stop()
+  }
+})
+
+test('a start after a stop during startup reports Starting again rather than deduplicating it', async () => {
+  const manager = fakeManager()
+  manager.whenReady = async () => await new Promise<void>(() => {})
+  setContainerManager(manager)
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  const first = plugin.start({}, () => {})
+  await new Promise((resolve) => setImmediate(resolve))
+  await Promise.all([first, plugin.stop()])
+  // The server writes its own Stopped into the slot, so the slot no longer holds what this plugin last
+  // wrote, and the next Starting must reach it.
+  const second = plugin.start({}, () => {})
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(app.status.filter((message) => message === 'Starting...'), ['Starting...', 'Starting...'])
+  await Promise.all([second, plugin.stop()])
+})
+
+test('a container callback that fires after stop does not write the status slot', async () => {
+  const manager = fakeManager()
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let volumeIssueReported!: () => void
+  const reported = new Promise<void>((resolve) => { volumeIssueReported = resolve })
+  manager.ensureRunning = async (_name, _config, options) => {
+    await gate
+    await options?.onVolumeIssue?.({
+      containerPath: '/signalk-data/chart-locker-tilecache',
+      source: '/media/offline-drive/cache',
+      action: 'aborted',
+      reason: 'required host path is missing'
+    })
+    volumeIssueReported()
+    throw new Error('required host path is missing')
+  }
+  setContainerManager(manager)
+  const app = fakeApp()
+  const plugin = createPlugin(app as never, { managerOperationTimeoutMs: 10 })
+  await plugin.start({ advanced: { cacheVolumeSource: '/media/offline-drive/cache' } }, () => {})
+  await plugin.stop()
+  const writesAtStop = app.slotWrites.length
+  // The launch outlived its timeout, so its volume callback arrives only now, after the server has
+  // written Stopped into the slot.
+  release()
+  await reported
+  assert.equal(app.slotWrites.length, writesAtStop)
+})
+
+test('a recovery that finds the external cache drive gone keeps the mount remedy in the status slot', async (t) => {
+  const record = managerRecord()
+  const manager = fakeManager({ record, address: '127.0.0.1:31001' })
+  manager.recreate = async (name, config, options) => {
+    record.recreated.push({ name, config })
+    await options?.onVolumeIssue?.({
+      containerPath: '/signalk-data/chart-locker-tilecache',
+      source: '/media/offline-drive/cache',
+      action: 'aborted',
+      reason: 'Required host path /media/offline-drive/cache does not exist'
+    })
+    throw new Error('required host path is missing')
+  }
+  setContainerManager(manager)
+  t.mock.method(globalThis, 'fetch', recoveryFetch())
+  const app = fakeApp()
+  const plugin = createPlugin(app as never, FAST_RECOVERY)
+
+  await plugin.start({ advanced: { cacheVolumeSource: '/media/offline-drive/cache' } }, () => {})
+  try {
+    await waitUntil(() => record.recreated.length >= 1 && statusSlot(app)?.type === 'error')
+    // The remedy is physical. A restart cannot help until the drive is back, so the recovery failure
+    // must not replace the message that says to mount it.
+    const slot = statusSlot(app)
+    assert.match(slot!.message, /External tile cache path is unavailable: \/media\/offline-drive\/cache/)
+    assert.doesNotMatch(slot!.message, /Restart Chart Locker to retry the tile cache/)
+    assert.ok(record.stopped.includes(TILECACHE_CONTAINER_NAME))
+  } finally {
+    await plugin.stop()
+  }
+})
+
+test('a retention change during a slow configuration push reaches the container last', async (t) => {
+  setContainerManager(fakeManager({ address: '127.0.0.1:31001' }))
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let pushStarted!: () => void
+  const configPushStarted = new Promise<void>((resolve) => { pushStarted = resolve })
+  // The retention each request delivered, in the order the container finished receiving them. The
+  // configuration push is held in flight, the way a slow container answers it.
+  const received: Array<{ route: string, ttlSecs: unknown }> = []
+  t.mock.method(globalThis, 'fetch', async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input)
+    if (url.endsWith('/health')) return Response.json({ status: 'ok', configured: true })
+    if (url.endsWith('/config')) {
+      const body = JSON.parse(String(init?.body)) as { scrollTtlSecs: unknown }
+      pushStarted()
+      await gate
+      received.push({ route: '/config', ttlSecs: body.scrollTtlSecs })
+      return new Response(null, { status: 204 })
+    }
+    if (url.endsWith('/cache/scroll-ttl')) {
+      received.push({ route: '/cache/scroll-ttl', ttlSecs: (JSON.parse(String(init?.body)) as { ttlSecs: unknown }).ttlSecs })
+      return new Response(null, { status: 204 })
+    }
+    if (url.endsWith('/cache/regions')) return Response.json({ regions: {} })
+    throw new Error(`unexpected fetch ${url}`)
+  })
+  const app = fakeApp()
+  const plugin = createPlugin(app as never)
+  const { router, routes } = makeRegionsRouter()
+  plugin.registerWithRouter?.(router as never)
+  const cacheConfig = routes.find((route) => route.method === 'POST' && route.path === '/api/cache/config')!
+
+  const started = plugin.start({}, () => {})
+  try {
+    await configPushStarted
+    // The operator saves a new retention while the startup push is still on its way.
+    const { responded, res } = fakeRegionsRes()
+    const saved = cacheConfig.handler({ params: {}, body: { ttlDays: 7 } }, res)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    release()
+    await Promise.all([started, saved])
+
+    assert.equal(responded[0]?.status, 204)
+    assert.deepEqual(received.at(-1), { route: '/cache/scroll-ttl', ttlSecs: 7 * 86_400 })
+    assert.deepEqual(received.map((entry) => entry.route), ['/config', '/cache/scroll-ttl'])
+  } finally {
+    release()
+    await plugin.stop()
+  }
 })

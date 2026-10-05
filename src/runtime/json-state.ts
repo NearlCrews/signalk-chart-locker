@@ -1,7 +1,8 @@
 /** A small sync JSON state helper: read a JSON file with a typed fallback, or write one (creating its
- * parent directory). Shared by the regions store and the PMTiles per-chart override store so the
- * persist-a-small-state-file idiom lives in one place rather than as a sync copy and an async copy. Sync
- * is appropriate for a single-writer state file the plugin owns. */
+ * parent directory). Shared by the regions store, the PMTiles per-chart override store, the control
+ * token, and the third-party provider check, so the persist-a-small-state-file idiom lives in one
+ * place rather than as a sync copy and an async copy. Sync is appropriate for a single-writer state
+ * file the plugin owns. */
 
 import {
   closeSync,

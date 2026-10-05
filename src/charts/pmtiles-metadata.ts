@@ -7,6 +7,7 @@ import { open } from 'node:fs/promises'
 import { gunzipSync } from 'node:zlib'
 import { Compression, type Header, PMTiles, TileType } from 'pmtiles'
 import { PmtilesFileSource } from './pmtiles-file-source.js'
+import { errorMessage } from '../shared/error.js'
 import { hasControlCharacter } from '../shared/text.js'
 import { isRecord } from '../shared/record.js'
 
@@ -95,10 +96,6 @@ function nameFrom (metadata: unknown): string | undefined {
     : undefined
 }
 
-function message (err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
-}
-
 function validSection (offset: number, length: number, fileSize: number): boolean {
   return Number.isSafeInteger(offset) && offset >= 0 && Number.isSafeInteger(length) && length >= 0 &&
     offset <= fileSize && length <= fileSize - offset
@@ -139,7 +136,7 @@ export async function decodePmtilesArchive (filePath: string, deps: DecodeDeps =
       await handle.close()
     }
   } catch (err) {
-    return { ok: false, error: `cannot read archive: ${message(err)}` }
+    return { ok: false, error: `cannot read archive: ${errorMessage(err)}` }
   }
   if (head.subarray(0, 7).toString('ascii') !== MAGIC) {
     return { ok: false, error: 'not a PMTiles archive (bad magic)' }
@@ -175,7 +172,7 @@ export async function decodePmtilesArchive (filePath: string, deps: DecodeDeps =
       metadata = undefined
     }
   } catch (err) {
-    return { ok: false, error: `failed to decode header: ${message(err)}` }
+    return { ok: false, error: `failed to decode header: ${errorMessage(err)}` }
   }
 
   const format = FORMAT_BY_TILE_TYPE[header.tileType]

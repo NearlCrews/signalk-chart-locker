@@ -1,17 +1,15 @@
 /** Builds the tilecache POST /config payload from the shared source registry and pushes it to the container. */
 
+import { setTimeout as sleep } from 'node:timers/promises'
 import type { ChartSource } from 'signalk-chart-sources'
 import { containerFetchSignal } from './container-fetch.js'
 import { PLUGIN_MOUNT_PATH } from '../shared/plugin-id.js'
 import { controlHeaders } from './control-token.js'
 import { MAX_MANAGED_CONTAINER_ERROR_BYTES, readBoundedResponseText } from './bounded-response.js'
+import { loadChartSources } from '../charts/chart-sources.js'
 
 /** The Signal K server route base the browser reaches the proxy through (for the container style rewrite). */
 export const PLUGIN_PUBLIC_BASE = PLUGIN_MOUNT_PATH
-
-// Chart Locker is a CommonJS Signal K plugin, while chart-sources intentionally exposes an
-// ESM-only runtime. Dynamic import is preserved by the NodeNext build and crosses that boundary.
-const chartSources = import('signalk-chart-sources')
 
 export interface TilecacheConfigPayload {
   sources: readonly ChartSource[]
@@ -41,8 +39,49 @@ export async function buildSourcePayload (
   geocodingEnabled: boolean = true,
   publicBase: string = PLUGIN_PUBLIC_BASE
 ): Promise<TilecacheConfigPayload> {
-  const { CHART_SOURCES } = await chartSources
+  const { CHART_SOURCES } = await loadChartSources()
   return { sources: CHART_SOURCES, publicBase, capBytes, regionsBudgetBytes, positionWarmBudgetBytes, scrollTtlSecs, geocodingEnabled }
+}
+
+/**
+ * Runs the container pushes that carry the scroll retention one at a time, in call order, handing each
+ * task the stored retention in seconds.
+ */
+export interface RetentionPushQueue {
+  <T>(task: (ttlSecs: number) => Promise<T>): Promise<T>
+  /** The stored retention in seconds, for a container configuration built outside the queue. */
+  current: () => number
+  /** Records a retention just written to the store, so a failed read falls back to it. */
+  saved: (ttlSecs: number) => void
+}
+
+/**
+ * The configuration push and the cache retention route both set the container's scroll retention, and
+ * the container keeps whichever arrives last. Each task receives the retention read only once it holds
+ * the queue, so the value the container applies last is the value stored last, whatever order the
+ * requests started in. When the store cannot be read, every read falls back to the last value read
+ * from it or saved to it, and fails only when there is none.
+ */
+export function createRetentionPushQueue (readTtlSecs: () => number, onReadError: (error: unknown) => void = () => {}): RetentionPushQueue {
+  let tail: Promise<unknown> = Promise.resolve()
+  let lastRead: number | undefined
+  const current = (): number => {
+    try {
+      lastRead = readTtlSecs()
+      return lastRead
+    } catch (error) {
+      if (lastRead === undefined) throw error
+      onReadError(error)
+      return lastRead
+    }
+  }
+  const push = async <T>(task: (ttlSecs: number) => Promise<T>): Promise<T> => {
+    const run = tail.then(async () => await task(current()))
+    tail = run.catch(() => {})
+    return await run
+  }
+  const saved = (ttlSecs: number): void => { lastRead = ttlSecs }
+  return Object.assign(push, { current, saved })
 }
 
 type PostJson = (url: string, body: string, headers: Record<string, string>, signal?: AbortSignal) => Promise<Response>
@@ -61,23 +100,7 @@ interface PushOptions {
   signal?: AbortSignal
 }
 
-const defaultDelay: Delay = async (ms, signal) => {
-  if (signal?.aborted === true) throw new DOMException('Aborted', 'AbortError')
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(done, ms)
-    const aborted = (): void => {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', aborted)
-      reject(new DOMException('Aborted', 'AbortError'))
-    }
-    function done (): void {
-      signal?.removeEventListener('abort', aborted)
-      resolve()
-    }
-    signal?.addEventListener('abort', aborted, { once: true })
-    if (signal?.aborted === true) aborted()
-  })
-}
+const defaultDelay: Delay = async (ms, signal) => { await sleep(ms, undefined, { signal }) }
 
 // A recreated container (a version bump changes the image tag, see tilecache-container.ts) can take
 // a few seconds longer to start accepting connections than a warm restart, especially the first time
@@ -89,8 +112,8 @@ const MAX_RETRIES = 3
 const RETRY_DELAY_MS = 1000
 
 /** Push the source allowlist to the container, retrying a transient failure (the container not yet
- * accepting connections right after it starts) with linear backoff. Returns true on a 2xx from any
- * attempt, or a structured failure once retries are exhausted or a deterministic rejection arrives. */
+ * accepting connections right after it starts) with linear backoff. Resolves `ok: true` on a 2xx from
+ * any attempt, or a structured failure once retries are exhausted or a deterministic rejection arrives. */
 export async function pushTilecacheConfig (
   address: string,
   payload: TilecacheConfigPayload,

@@ -4,8 +4,9 @@
 
 import type { ServerAPI } from '@signalk/server-api'
 import { type ChartRegistry, chartResource } from '../charts/chart-registry.js'
-import { readChartOverride, type ChartOverride, type OverrideStore } from '../charts/overrides.js'
+import { readChartOverride, type OverrideStore } from '../charts/overrides.js'
 import { ensureApiAdminGate } from '../shared/admin-gate.js'
+import { pmtilesRefusal, type PmtilesProviderState } from '../charts/mutual-exclusion.js'
 
 /**
  * The fixed body a rescan failure answers with. Rescan failures come from node:fs and carry absolute
@@ -14,9 +15,6 @@ import { ensureApiAdminGate } from '../shared/admin-gate.js'
  * retyped copy of it.
  */
 export const RESCAN_FAILED_MESSAGE = 'unable to rescan the charts directory'
-
-/** The body every route here answers with while the third-party PMTiles provider owns the charts. */
-const PROVIDER_CONFLICT_MESSAGE = 'PMTiles management is disabled while pmtiles-chart-provider is enabled'
 
 export interface ManagementRequest {
   params: Record<string, string>
@@ -33,10 +31,6 @@ export interface ManagementRouter {
   post (path: string, handler: (req: ManagementRequest, res: ManagementResponse) => void | Promise<void>): void
 }
 
-function readOverride (body: unknown): ChartOverride | undefined {
-  return readChartOverride(body)
-}
-
 /** Mount the chart-management routes behind the admin gate. Returns whether they were mounted, so the
  *  registrar self-gates and fails closed like the regions and cache-info registrars, rather than relying
  *  on the caller to gate it. */
@@ -46,14 +40,18 @@ export function registerChartManagementRoutes (
   registry: ChartRegistry,
   overrides: OverrideStore,
   onRescan: () => void | Promise<void>,
-  isEnabled: () => boolean = () => true
+  providerState: () => PmtilesProviderState = () => 'serving'
 ): boolean {
   if (!ensureApiAdminGate(app)) return false
+  // Answers for the caller while the provider is not serving, and reports whether the route may proceed.
+  const providerAvailable = (res: ManagementResponse): boolean => {
+    const refusal = pmtilesRefusal(providerState(), 'management')
+    if (refusal === null) return true
+    res.status(refusal.status).json({ error: refusal.message })
+    return false
+  }
   router.get('/api/charts', (_req, res) => {
-    if (!isEnabled()) {
-      res.status(409).json({ error: PROVIDER_CONFLICT_MESSAGE })
-      return
-    }
+    if (!providerAvailable(res)) return
     res.json({
       charts: registry.records().map((record) => ({
         ...chartResource(record),
@@ -66,15 +64,12 @@ export function registerChartManagementRoutes (
   })
 
   router.post('/api/charts/:id/override', async (req, res) => {
-    if (!isEnabled()) {
-      res.status(409).json({ error: PROVIDER_CONFLICT_MESSAGE })
-      return
-    }
+    if (!providerAvailable(res)) return
     if (!registry.has(req.params.id)) {
       res.status(404).json({ error: `Unknown chart: ${req.params.id}` })
       return
     }
-    const override = readOverride(req.body)
+    const override = readChartOverride(req.body)
     if (!override) {
       res.status(400).json({ error: 'Body must be an object with name, description, or scale.' })
       return
@@ -100,10 +95,7 @@ export function registerChartManagementRoutes (
     }
   })
   router.post('/api/charts/rescan', async (_req, res) => {
-    if (!isEnabled()) {
-      res.status(409).json({ error: PROVIDER_CONFLICT_MESSAGE })
-      return
-    }
+    if (!providerAvailable(res)) return
     try {
       await onRescan()
       res.json({ discovery: registry.discoveryStatus() })

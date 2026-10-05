@@ -17,7 +17,6 @@ export interface ProxyRequest {
   protocol?: string
   /** Express derives this through its trust-proxy setting. */
   hostname?: string
-  on(event: 'aborted', listener: () => void): void
 }
 
 /** The response surface the proxy uses, a structural subset of an express Response (a Writable plus a few methods). */
@@ -57,11 +56,6 @@ function relayHeaders (upstream: Response, res: ProxyResponse, names: readonly s
     const value = upstream.headers.get(name)
     if (value !== null) res.setHeader(name, value)
   }
-}
-
-function abortOnClientDisconnect (req: ProxyRequest, res: ProxyResponse, controller: AbortController): void {
-  req.on('aborted', () => controller.abort())
-  res.on('close', () => controller.abort())
 }
 
 function hasUnsafePathSyntax (value: string): boolean {
@@ -172,8 +166,10 @@ async function rewriteStyleSprite (req: ProxyRequest, res: ProxyResponse, addres
     res.end()
     return
   }
+  // The response closes when the browser goes away and when it completes; an abort after completion
+  // is harmless.
   const controller = new AbortController()
-  abortOnClientDisconnect(req, res, controller)
+  res.on('close', () => controller.abort())
 
   let upstream: Response
   try {
@@ -184,8 +180,8 @@ async function rewriteStyleSprite (req: ProxyRequest, res: ProxyResponse, addres
     return
   }
 
-  // A non-2xx (or bodyless) response is relayed verbatim, like any other proxied path.
-  if (upstream.status < 200 || upstream.status >= 300 || upstream.body === null) {
+  // A non-2xx response is relayed verbatim, like any other proxied path.
+  if (upstream.status < 200 || upstream.status >= 300) {
     res.status(upstream.status)
     relayHeaders(upstream, res, RELAYED_HEADERS)
     if (BODYLESS.has(upstream.status) || upstream.body === null) {
@@ -204,8 +200,10 @@ async function rewriteStyleSprite (req: ProxyRequest, res: ProxyResponse, addres
     return
   }
 
-  if (upstream.status !== 200) {
-    try { await upstream.body.cancel() } catch {}
+  // Only a 200 carries a style document. Any other success, or one with no body, is a malformed
+  // answer that MapLibre would fail to parse, so it is a gateway fault rather than a relayed success.
+  if (upstream.status !== 200 || upstream.body === null) {
+    try { await upstream.body?.cancel() } catch {}
     if (!res.headersSent) res.status(502)
     res.end()
     return
@@ -263,8 +261,9 @@ async function streamToContainer (req: ProxyRequest, res: ProxyResponse, address
     return
   }
   // Abort the upstream fetch when the browser cancels (MapLibre cancels tiles on every pan and zoom).
+  // The response closes on that cancel and on completion; an abort after completion is harmless.
   const controller = new AbortController()
-  abortOnClientDisconnect(req, res, controller)
+  res.on('close', () => controller.abort())
 
   const forward: Record<string, string> = {}
   const range = req.headers.range

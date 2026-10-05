@@ -184,23 +184,31 @@ test('routes are not mounted without a security strategy (fail closed)', () => {
   assert.equal(Object.keys(post).length, 0)
 })
 
-test('management routes return 409 while third-party PMTiles support is enabled', async () => {
-  const get: Record<string, (req: ManagementRequest, res: FakeRes) => void | Promise<void>> = {}
-  const post: Record<string, (req: ManagementRequest, res: FakeRes) => void | Promise<void>> = {}
-  registerChartManagementRoutes(
-    { get (p, h) { get[p] = h }, post (p, h) { post[p] = h } },
-    securedApp(),
-    new ChartRegistry(),
-    new OverrideStore('/dev/null'),
-    () => {},
-    () => false
-  )
-  const listRes = new FakeRes()
-  await get['/api/charts']!({ params: {}, body: null }, listRes)
-  assert.equal(listRes.statusCode, 409)
-  const scanRes = new FakeRes()
-  await post['/api/charts/rescan']!({ params: {}, body: null }, scanRes)
-  assert.equal(scanRes.statusCode, 409)
+test('management routes return 409 for a provider conflict and 503 while the provider is not running', async () => {
+  for (const [state, status] of [['conflict', 409], ['unavailable', 503]] as const) {
+    const get: Record<string, (req: ManagementRequest, res: FakeRes) => void | Promise<void>> = {}
+    const post: Record<string, (req: ManagementRequest, res: FakeRes) => void | Promise<void>> = {}
+    registerChartManagementRoutes(
+      { get (p, h) { get[p] = h }, post (p, h) { post[p] = h } },
+      securedApp(),
+      new ChartRegistry(),
+      new OverrideStore('/dev/null'),
+      () => {},
+      () => state
+    )
+    for (const [handler, request] of [
+      [get['/api/charts']!, { params: {}, body: null }],
+      [post['/api/charts/rescan']!, { params: {}, body: null }],
+      [post['/api/charts/:id/override']!, { params: { id: 'a-pmtiles' }, body: { name: 'A' } }]
+    ] as const) {
+      const res = new FakeRes()
+      await handler(request, res)
+      assert.equal(res.statusCode, status)
+      // Only the conflict may name the third-party plugin: a stopped provider has nothing to blame.
+      if (state === 'conflict') assert.match(JSON.stringify(res.body), /signalk-pmtiles-plugin/)
+      else assert.doesNotMatch(JSON.stringify(res.body), /signalk-pmtiles-plugin/)
+    }
+  }
 })
 
 test('an override reports a rescan failure instead of returning stale success', async () => {
