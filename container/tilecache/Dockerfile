@@ -5,9 +5,9 @@
 # own. Build from the repository root with
 # `podman build --format docker --file container/tilecache/Dockerfile .` or the HEALTHCHECK is dropped.
 
-FROM rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS builder
+FROM rust:1.99.0-trixie@sha256:3745c050d12adc738eff16ebfc81ed044bfb2cc27c6828850ff1666beb1c7a49 AS builder
 WORKDIR /build
-# cmake is needed by the aws-lc-rs crypto backend that rustls pulls in; rust:1-bookworm ships cc but
+# cmake is needed by the aws-lc-rs crypto backend that rustls pulls in; rust:1-trixie ships cc but
 # not cmake. It is a build-only dependency: the runtime image gets only the compiled binary.
 RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*
 # The repository-root build context makes the project license material available to the runtime
@@ -22,11 +22,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && mkdir /runtime-data
 
 # Egress TLS uses rustls-platform-verifier: it reads the runtime base image's CA bundle through
-# rustls-native-certs (/etc/ssl/certs, from ca-certificates, which distroless/cc-debian12 ships), with
+# rustls-native-certs (/etc/ssl/certs, from ca-certificates, which distroless/cc-debian13 ships), with
 # a bundled webpki-root-certs fallback if that is absent. Currently fine on this base. If the runtime
 # base is ever swapped to a CA-less image (distroless/static or scratch), egress TLS would fail
 # silently, so keep a CA bundle in whatever runtime base replaces this one.
-FROM gcr.io/distroless/cc-debian12:latest@sha256:e8e7ee4b8b106d4c5fde9e422a321b2b8a2d5cca546c97adcce927f3e1d36e36 AS runtime
+FROM gcr.io/distroless/cc-debian13:latest@sha256:159783207c2cd44c2aa5715961d13c8612368ac9bd450f887e3f08fc8ea461e3 AS runtime
 COPY --from=builder /tilecache /tilecache
 COPY --from=builder --chown=65532:65532 /runtime-data /data
 COPY LICENSE-APACHE THIRD_PARTY_NOTICES.md RUST_THIRD_PARTY_LICENSES.md /usr/share/licenses/chart-locker/
