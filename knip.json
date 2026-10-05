@@ -19,6 +19,10 @@
     "signalk-server",
     "@signalk/server-admin-ui"
   ],
+  // The Admin integration jobs start that same host with npx inside its own install directory.
+  "ignoreBinaries": [
+    "signalk-server"
+  ],
   "ignoreExportsUsedInFile": { "interface": true, "type": true },
   "project": [
     "src/**/*.{ts,tsx}",
