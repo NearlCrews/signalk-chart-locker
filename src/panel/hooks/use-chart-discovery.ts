@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { PLUGIN_ID } from '../../shared/plugin-id.js'
 import { isRecord } from '../../shared/record.js'
 import { hasControlCharacter } from '../../shared/text.js'
-import { useAbortableFetch } from './use-abortable-fetch.js'
+import { describeError, useAbortableFetch } from './use-abortable-fetch.js'
 
 const URL = `/plugins/${PLUGIN_ID}/api/charts`
 
@@ -74,7 +74,7 @@ export function useChartDiscovery (): {
       setError(null)
       return next
     } catch (cause) {
-      if (!fetcher.abandoned(cause)) setError(cause instanceof Error ? cause.message : String(cause))
+      if (!fetcher.abandoned(cause)) setError(describeError(cause))
       return null
     }
   }, [fetcher])

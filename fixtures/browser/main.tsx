@@ -1,6 +1,6 @@
 import * as React from 'react'
-import * as ReactDOM from 'react-dom'
 import { createRoot } from 'react-dom/client'
+import { HostPanelFrame } from 'signalk-nearlcrews-ui/host-harness'
 // Framework-neutral token sheet. Importing it executes no JavaScript and styles nothing on its own:
 // only an element carrying the snui-tokens class picks the variables up, which the screenshot run
 // below is the sole caller to do.
@@ -8,31 +8,8 @@ import 'signalk-nearlcrews-ui/tokens.css'
 
 declare const __REMOTE_URL__: string
 
-interface PanelProps {
-  configuration: Record<string, unknown>
-  save: (configuration: Record<string, unknown>) => void
-}
-
-interface RemoteContainer {
-  get: (module: string) => Promise<() => { default: React.ComponentType<PanelProps> }>
-  init: (scope: ShareScope) => Promise<void> | void
-}
-
-interface ShareScope {
-  readonly react: Record<string, ShareScopeEntry<typeof React>>
-  readonly 'react-dom': Record<string, ShareScopeEntry<typeof ReactDOM>>
-}
-
-interface ShareScopeEntry<T> {
-  readonly eager: boolean
-  readonly from: string
-  readonly get: () => Promise<() => T>
-  readonly loaded: boolean
-  readonly shareConfig: {
-    readonly requiredVersion: string
-    readonly singleton: boolean
-  }
-}
+/** The package the panel remote belongs to, which names its container and its plugin list entry. */
+const PACKAGE_NAME = 'signalk-chart-locker'
 
 const parameters = new URLSearchParams(window.location.search)
 const ACTION_DELAY_MS = 500
@@ -163,7 +140,7 @@ window.fetch = async (input, init): Promise<Response> => {
 
   if (path === '/plugins') {
     return jsonResponse([{
-      id: 'signalk-chart-locker',
+      id: PACKAGE_NAME,
       data: { enabled: true },
       statusMessage: 'Tilecache at 127.0.0.1:8080; ready.'
     }])
@@ -231,55 +208,15 @@ window.fetch = async (input, init): Promise<Response> => {
   return jsonResponse({ ok: false, error: `Unhandled fixture request: ${path}` }, 404)
 }
 
-const shareScope: ShareScope = {
-  react: {
-    [React.version]: {
-      eager: true,
-      from: 'chart-locker-browser-fixture',
-      get: () => Promise.resolve(() => React),
-      loaded: true,
-      shareConfig: {
-        requiredVersion: `^${React.version}`,
-        singleton: true
-      }
-    }
-  },
-  'react-dom': {
-    [ReactDOM.version]: {
-      eager: true,
-      from: 'chart-locker-browser-fixture',
-      get: () => Promise.resolve(() => ReactDOM),
-      loaded: true,
-      shareConfig: {
-        requiredVersion: `^${ReactDOM.version}`,
-        singleton: true
-      }
-    }
-  }
-}
-
-async function loadRemoteContainer (): Promise<RemoteContainer> {
-  await new Promise<void>((resolve, reject) => {
-    const script = document.createElement('script')
-    script.src = __REMOTE_URL__
-    script.addEventListener('load', () => resolve(), { once: true })
-    script.addEventListener('error', () => reject(new Error('Panel remote failed to load.')), { once: true })
-    document.head.append(script)
-  })
-  const container = Reflect.get(window, 'signalk_chart_locker') as RemoteContainer | undefined
-  if (container === undefined) throw new Error('Panel remote did not expose its global container.')
-  return container
-}
-
-try {
-  const container = await loadRemoteContainer()
-  await container.init(shareScope)
-  const factory = await container.get('./PluginConfigurationPanel')
-  const Panel = factory().default
-  const rootElement = document.querySelector('#root')
-  if (!(rootElement instanceof HTMLElement)) throw new Error('Fixture root is missing.')
-
-  const initialConfiguration = {
+/**
+ * The configuration the host holds when the panel opens. The Signal K Admin passes undefined for a
+ * plugin nobody has configured and `{}` for a package enabled by default before its first save, so
+ * each has a scenario of its own beside the saved configuration every other test starts from.
+ */
+function initialConfiguration (): unknown {
+  if (parameters.has('unconfigured')) return undefined
+  if (parameters.has('enabled-by-default')) return {}
+  return {
     futurePluginSetting: { enabled: true, strategy: 'coastal' },
     tileCache: { cacheCapGiB: 8, regionsBudgetGiB: 4 },
     charts: { path: 'charts/pmtiles', futureChartSetting: 'keep-me' },
@@ -289,22 +226,32 @@ try {
       cacheVolumeSource: '/mnt/ssd/tilecache'
     }
   }
+}
 
-  const save = (nextConfiguration: Record<string, unknown>): void => {
-    document.body.dataset.saveCount = String(Number(document.body.dataset.saveCount ?? 0) + 1)
-    document.body.dataset.savedConfiguration = JSON.stringify(nextConfiguration)
-  }
+const recordSave = (nextConfiguration: unknown): void => {
+  document.body.dataset.saveCount = String(Number(document.body.dataset.saveCount ?? 0) + 1)
+  document.body.dataset.savedConfiguration = JSON.stringify(nextConfiguration)
+}
 
+const rootElement = document.querySelector('#root')
+if (rootElement instanceof HTMLElement) {
+  // The shared harness stands in for the Admin loader: its share scope, its script tag, its error
+  // boundary and Suspense fallback, and its configuration state, which a save replaces with the
+  // saved object exactly as the Admin hands it back.
   createRoot(rootElement).render(
     <React.StrictMode>
-      <Panel configuration={initialConfiguration} save={save} />
+      <HostPanelFrame
+        packageName={PACKAGE_NAME}
+        url={__REMOTE_URL__}
+        configuration={initialConfiguration()}
+        onSave={recordSave}
+      />
     </React.StrictMode>
   )
   if (parameters.has('screenshots')) mirrorPanelThemeOntoHost()
   document.body.dataset.fixtureReady = 'true'
-} catch (error) {
-  const message = error instanceof Error ? error.message : String(error)
+} else {
   const errorElement = document.querySelector('#fixture-error')
-  if (errorElement !== null) errorElement.textContent = message
+  if (errorElement !== null) errorElement.textContent = 'Fixture root is missing.'
   document.body.dataset.fixtureReady = 'false'
 }

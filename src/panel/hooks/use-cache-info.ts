@@ -8,7 +8,7 @@
 
 import { useEffect, useState } from 'react'
 import { PLUGIN_ID } from '../../shared/plugin-id.js'
-import { useAbortableFetch } from './use-abortable-fetch.js'
+import { describeError, useAbortableFetch } from './use-abortable-fetch.js'
 
 /** The admin-gated cache-info route, under this plugin's mount. Same-origin, gated by the session. */
 const CACHE_INFO_URL = `/plugins/${PLUGIN_ID}/api/cache-info`
@@ -54,7 +54,7 @@ export function useCacheInfo (): UseCacheInfoResult {
       } catch (cause) {
         // Non-fatal: leave the values null so the panel keeps the static default, but explain why
         // filesystem-specific guidance is unavailable.
-        if (!fetcher.abandoned(cause)) setError(cause instanceof Error ? cause.message : String(cause))
+        if (!fetcher.abandoned(cause)) setError(describeError(cause))
       }
     }
 

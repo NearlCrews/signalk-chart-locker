@@ -3,14 +3,29 @@ import assert from 'node:assert/strict'
 import { resolveNumberDraft } from 'signalk-nearlcrews-ui'
 import { normalizeConfig } from '../src/panel/normalize-config.js'
 
-test('normalizeConfig yields the schema defaults for a never-configured plugin', () => {
-  const config = normalizeConfig(null)
-  assert.equal(config.tileCache.cacheCapGiB, 8)
-  assert.equal(config.tileCache.regionsBudgetGiB, 0)
-  assert.equal(config.charts.path, '')
-  assert.equal(config.advanced.geocodingEnabled, true)
-  assert.equal(config.advanced.imageTag, '')
-  assert.equal(config.advanced.cacheVolumeSource, '')
+test('normalizeConfig yields the schema defaults for both configurations the host passes before a save', () => {
+  // Undefined for a plugin nobody has configured, and {} for a package enabled by default.
+  for (const configuration of [undefined, {}]) {
+    const config = normalizeConfig(configuration)
+    assert.equal(config.tileCache.cacheCapGiB, 8)
+    assert.equal(config.tileCache.regionsBudgetGiB, 0)
+    assert.equal(config.charts.path, '')
+    assert.equal(config.advanced.geocodingEnabled, true)
+    assert.equal(config.advanced.imageTag, '')
+    assert.equal(config.advanced.cacheVolumeSource, '')
+  }
+})
+
+test('normalizeConfig trims text the way the plugin reads it and is stable when applied twice', () => {
+  const config = normalizeConfig({
+    charts: { path: '  charts/new  ' },
+    advanced: { imageTag: ' test-build ', cacheVolumeSource: ' /mnt/ssd ' }
+  })
+  assert.equal(config.charts.path, 'charts/new')
+  assert.equal(config.advanced.imageTag, 'test-build')
+  assert.equal(config.advanced.cacheVolumeSource, '/mnt/ssd')
+  // The panel normalizes what it saves and what the host hands back, so the second pass must agree.
+  assert.deepEqual(normalizeConfig(config), config)
 })
 
 test('normalizeConfig preserves unknown top-level and grouped keys', () => {

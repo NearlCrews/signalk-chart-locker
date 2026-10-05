@@ -16,13 +16,21 @@
 import { useEffect, useRef, useState } from 'react'
 import { PLUGIN_ID } from '../../shared/plugin-id.js'
 import { PANEL_AGE_TICK_MS } from '../age-tick.js'
-import { useAbortableFetch } from './use-abortable-fetch.js'
+import { describeError, useAbortableFetch } from './use-abortable-fetch.js'
 
 /** The admin plugin-list route. Same-origin, gated by the admin session. */
 const PLUGINS_URL = '/plugins'
 
 /** How often, in milliseconds, to poll while the tab is visible. */
 const POLL_INTERVAL_MS = 5000
+
+/**
+ * How old the last committed status may grow before the bar marks it out of date. An unchanged poll
+ * is committed at most once per PANEL_AGE_TICK_MS, so a healthy readout can be that old plus one
+ * poll. Twice the tick leaves room for that and still flags a server that has stopped answering
+ * within a minute.
+ */
+export const STATUS_STALE_AFTER_MS = 2 * PANEL_AGE_TICK_MS
 
 /** The live plugin status the panel consumes. */
 export interface PluginRuntimeStatus {
@@ -108,6 +116,7 @@ export function useStatus (): UseStatusResult {
           // The freshness note re-reads the clock on the shared panel tick and
           // is spelled in whole units, so a timestamp committed more often than
           // that changes nothing on screen while re-rendering the whole panel.
+          // STATUS_STALE_AFTER_MS allows for the age this cadence leaves.
           // Commit on a real status change, and otherwise only once the note
           // itself could have moved, which leaves the age it shows no staler
           // than the note's own resolution and never fresher than the truth.
@@ -121,7 +130,7 @@ export function useStatus (): UseStatusResult {
         }
       } catch (e) {
         if (!fetcher.abandoned(e)) {
-          setError(e instanceof Error ? e.message : String(e))
+          setError(describeError(e))
         }
       } finally {
         inFlight.current = false

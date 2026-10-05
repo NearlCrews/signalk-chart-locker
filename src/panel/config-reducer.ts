@@ -4,8 +4,10 @@
  * is exported and unit-tested directly.
  *
  * Every case returns a new object only on a real change, and returns the input
- * state otherwise, so the panel can use identity equality against the
- * last-requested snapshot as a sound dirty check.
+ * state otherwise, so a keystroke that changes nothing does not re-render the
+ * panel. Whether the buffer differs from the saved configuration is a value
+ * comparison made elsewhere, because an edit and its reverse rebuild a group
+ * that holds what it held before.
  */
 
 import type {
@@ -28,8 +30,7 @@ export type ConfigAction =
 /**
  * Replace one field inside a group, returning the whole config unchanged when
  * the field is already equal. The group object is rebuilt only on a real
- * change, so both the group and the top-level identity stay stable on a no-op,
- * which is what makes the panel's identity-based dirty check sound.
+ * change, so both the group and the top-level identity stay stable on a no-op.
  */
 function setGroupField<
   G extends keyof ChartLockerConfig,

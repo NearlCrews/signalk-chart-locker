@@ -64,8 +64,11 @@ function readBoolean (raw: RawGroup, key: string, fallback: boolean): boolean {
 
 /**
  * Coerce the admin UI's untyped `configuration` prop into a fully populated
- * ChartLockerConfig. A never-configured plugin (null or undefined prop) yields
- * the schema defaults, so the panel opens on the values the plugin would use.
+ * ChartLockerConfig. The admin UI passes undefined for a plugin nobody has
+ * configured and `{}` for a package enabled by default before its first save;
+ * both yield the schema defaults, so the panel opens on the values the plugin
+ * would use. Strings are trimmed the way the plugin trims them, so the panel
+ * validates and saves the text the runtime will actually read.
  */
 export function normalizeConfig (configuration: unknown): ChartLockerConfig {
   const raw = (typeof configuration === 'object' && configuration !== null)

@@ -10,6 +10,15 @@ const pkg = require('./package.json')
 // stays bundled with this remote.
 const { shared } = require('signalk-nearlcrews-ui/federation')
 
+// The Admin's dependency inventory, @signalk/server-admin-ui-dependencies, is deliberately not
+// required here, although the shared UI guide suggests it as a guard against React drift. Its
+// index.js validates its peers as it loads and calls process.exit(-1) unless bootstrap, two icon
+// fonts, react-bootstrap, react-select, and simple-line-icons are installed, none of which this panel
+// uses. Its React range, ^19.0.0, is also wider than the ^19.2.0 the shared UI requires, so it would
+// pass versions the share map above already rejects. The panel build covers the property instead:
+// snui-check-consumer asserts this file shares exactly that map and renders the remote under the
+// host's own share scope.
+
 // The Signal K admin UI looks up a configurator panel on window[<safeName>],
 // so the Module Federation container name must be the package name with any
 // non-word characters replaced.

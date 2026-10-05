@@ -12,17 +12,24 @@
 
 import type * as React from 'react'
 import { memo } from 'react'
-import { RelativeAge, Section, StatusIndicator, type StatusTone, Text } from 'signalk-nearlcrews-ui'
+import {
+  FreshnessNote,
+  Section,
+  StatusIndicator,
+  type StatusTone,
+  usePollFreshness
+} from 'signalk-nearlcrews-ui'
 import { PANEL_AGE_TICK_MS } from '../age-tick.js'
-import type { PluginRuntimeStatus } from '../hooks/use-status.js'
+import { type PluginRuntimeStatus, STATUS_STALE_AFTER_MS } from '../hooks/use-status.js'
 
 interface Props {
   /** The latest plugin status, or null until the first poll resolves. */
   status: PluginRuntimeStatus | null
   /**
    * Epoch milliseconds of the most recent successful status poll, or null.
-   * Renders as a "Checked N minutes ago" note so the operator can tell a live
-   * readout from a stalled one.
+   * Renders as a "Checked N minutes ago" note, which turns into a warning that
+   * the readout is out of date once the polls stop succeeding, so the operator
+   * can tell a live readout from a stalled one.
    */
   lastUpdatedMs: number | null
 }
@@ -30,32 +37,36 @@ interface Props {
 /**
  * The status bar shown at the top of the configuration panel. Memoized: the
  * `status` prop keeps stable identity between unchanged polls and
- * `lastUpdatedMs` changes only on the 5 s poll tick, so a keystroke elsewhere
- * on the panel does not re-render the bar.
+ * `lastUpdatedMs` changes at most once per freshness tick, so a keystroke
+ * elsewhere on the panel does not re-render the bar.
  */
 export default memo(function StatusBar ({ status, lastUpdatedMs }: Props): React.ReactElement {
   const { tone, text } = resolveStatusLine(status)
+  const { stale } = usePollFreshness(lastUpdatedMs, {
+    staleAfterMs: STATUS_STALE_AFTER_MS,
+    tickMs: PANEL_AGE_TICK_MS
+  })
   return (
     <Section
       title='Plugin status'
-      actions={lastUpdatedMs !== null
-        ? <Text tone='muted' size='sm'>Checked <RelativeAge since={lastUpdatedMs} tickMs={PANEL_AGE_TICK_MS} /></Text>
-        : undefined}
+      actions={<FreshnessNote since={lastUpdatedMs} stale={stale} tickMs={PANEL_AGE_TICK_MS} />}
     >
       {/*
         * One status region for every branch, resolved as tone plus text rather than as a choice
         * between components. A live region has to exist before its text changes to be announced
         * reliably, and swapping element types at this position would unmount the loading region and
-        * mount a fresh one at the moment the first poll resolves.
+        * mount a fresh one at the moment the first poll resolves. The loading line it mounts with is
+        * not news, so it shows at once rather than after the hold an announcing region gives a
+        * message it mounts with.
         */}
-      <StatusIndicator tone={tone} live='polite'>{text}</StatusIndicator>
+      <StatusIndicator tone={tone} live='polite' deferFirstMessage={false}>{text}</StatusIndicator>
     </Section>
   )
 })
 
 /** The tone and words for the status line: the plugin's message, or a derived fallback. */
 function resolveStatusLine (status: PluginRuntimeStatus | null): { tone: StatusTone, text: string } {
-  if (status === null) return { tone: 'neutral', text: 'Loading status...' }
+  if (status === null) return { tone: 'neutral', text: 'Loading status…' }
   const { enabled, statusMessage } = status
   if (statusMessage !== '') return { tone: enabled ? 'success' : 'neutral', text: statusMessage }
   return enabled

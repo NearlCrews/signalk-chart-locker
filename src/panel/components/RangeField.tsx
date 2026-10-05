@@ -18,11 +18,13 @@ import {
   InputGroupControl,
   joinIdReferences,
   LabeledField,
+  type NamedUnit,
   NumberInput,
   RangeInput,
   splitLabeledFieldControlProps,
   useNumberDraft
 } from 'signalk-nearlcrews-ui'
+import UnitText from './UnitText.js'
 
 interface Props {
   /** Visible field label. */
@@ -39,8 +41,8 @@ interface Props {
   max: number
   /** Slider and stepper increment. */
   step: number
-  /** Unit suffix shown after the number box and read with both controls, for example "GiB". */
-  unit: string
+  /** The unit drawn after the number box and read with both controls. */
+  unit: NamedUnit
 }
 
 /** A label + slider + number box + hint row for a bounded whole-number value. */
@@ -67,19 +69,14 @@ export default function RangeField ({
       {(contract) => {
         const { controlProps } = splitLabeledFieldControlProps(contract)
         const unitId = `${controlProps.id}-unit`
-        // The package's own id-list rule, which also drops a duplicate: an id the field already
-        // wired and the caller handed back would otherwise be read twice.
-        const description = joinIdReferences(controlProps['aria-describedby'], unitId)
         return (
           <InputGroup density='compact'>
             <InputGroupControl controlWidth='grow'>
+              {/* The slider reads its unit with the value on every step, so the addon that
+                  describes the number box would only repeat it. */}
               <RangeInput
                 {...controlProps}
-                aria-describedby={description}
-                // The unit addon describes the control, and a description is announced once on
-                // focus. Dragging or arrowing the slider announces the value again on every step,
-                // so the value carries its own unit rather than reading as a bare number.
-                aria-valuetext={`${value} ${unit}`}
+                unit={unit}
                 min={min}
                 max={max}
                 step={step}
@@ -92,9 +89,11 @@ export default function RangeField ({
                 {...draft.inputProps}
                 id={`${controlProps.id}-number`}
                 aria-label={`${label} exact value`}
-                aria-describedby={description}
+                // The package's own id-list rule, which also drops a duplicate: an id the field
+                // already wired and the caller handed back would otherwise be read twice.
+                aria-describedby={joinIdReferences(controlProps['aria-describedby'], unitId)}
               />
-              <InputGroupAddon id={unitId}>{unit}</InputGroupAddon>
+              <InputGroupAddon id={unitId}><UnitText unit={unit} /></InputGroupAddon>
             </InputGroupControl>
           </InputGroup>
         )

@@ -1,14 +1,23 @@
 import AxeBuilder from '@axe-core/playwright'
 import { expect, test, type Locator, type Page } from '@playwright/test'
-import { PACKAGE_VERSION, THEME_STORAGE_KEY } from 'signalk-nearlcrews-ui'
+import {
+  PACKAGE_VERSION,
+  PANEL_CONTAINER_NAME,
+  PANEL_LABEL_DEFAULTS,
+  THEME_CHOICES,
+  THEME_STORAGE_KEY,
+  type ThemeChoice
+} from 'signalk-nearlcrews-ui'
 
-// The version the bundle must stamp and the shared theme key both come from the installed package's
-// public entry, which this CommonJS suite can load directly since the package added a `default`
-// export condition. The panel build already proved, through the package's own consumer check, that
-// the installed version is the exact one package.json pins, so the suite asserts against the value
-// the bundle was built from rather than re-reading either manifest.
+// The version the bundle must stamp, the shared theme key and choices, and the package's own words
+// come from the installed package's public entry, which this CommonJS suite can load directly through
+// its `default` export condition. The panel build already proved, through the package's own consumer
+// check, that the installed version is the exact one package.json pins, so the suite asserts against
+// the values the bundle was built from rather than re-reading either manifest or retyping the copy.
 const snuiVersion = PACKAGE_VERSION
 const themeStorageKey = THEME_STORAGE_KEY
+const saveBarLabels = PANEL_LABEL_DEFAULTS.saveActionBar
+const themeToggleLabels = PANEL_LABEL_DEFAULTS.themeToggle
 
 /** Loads a fixture scenario and waits for the panel to be mounted against it. */
 async function gotoFixture (page: Page, query = ''): Promise<void> {
@@ -26,16 +35,32 @@ async function expectAriaDisabled (control: Locator): Promise<void> {
   await expect(control).not.toHaveAttribute('disabled')
 }
 
+/** One of the panel's condition banners, found by its slot because an empty one has no text. */
+function banner (page: Page, slot: string): Locator {
+  return page.locator(`[data-panel-banner="${slot}"]`)
+}
+
 /**
- * One of the panel's own announcers: present, carrying the role its politeness implies, and off
- * screen. Invisibility is asserted through the box the browser gives it rather than by naming the
- * library class that hides it, which is the package's to rename.
+ * A condition banner waiting with nothing to say: present, carrying the role its severity implies,
+ * empty, and out of the flow. Invisibility is asserted through the box the browser gives it rather
+ * than by naming the library class that hides it, which is the package's to rename.
  */
-async function expectPanelAnnouncer (region: Locator, role: 'alert' | 'status'): Promise<void> {
+async function expectWaitingBanner (region: Locator, role: 'alert' | 'status'): Promise<void> {
   await expect(region).toHaveCount(1)
   await expect(region).toHaveAttribute('role', role)
+  await expect(region).toHaveText('')
   const box = await region.boundingBox()
   expect(box === null || (box.width <= 1 && box.height <= 1)).toBe(true)
+}
+
+/** A theme choice, found by the package's own hook rather than by the words it shows. */
+function themeChoice (page: Page, choice: ThemeChoice): Locator {
+  return page.locator(`[data-snui-theme-choice="${choice}"]`)
+}
+
+/** The save bar, found by the package's own hook. */
+function actionBar (page: Page): Locator {
+  return page.locator('[data-snui-action-bar]')
 }
 
 async function expectVisibleFocusRing (control: Locator): Promise<void> {
@@ -90,19 +115,22 @@ test.beforeEach(async ({ page }) => {
 test('loads the production remote and completes save and discard flows', async ({ page }) => {
   const root = page.locator('[data-snui-root]')
   await expect(root).toHaveAttribute('data-snui-version', snuiVersion)
-  await expect(page.locator(`style[data-snui-styles="${snuiVersion}"]`)).toHaveCount(1)
-  // The slider and the exact-value box are one control: both read the committed cap, and the unit
-  // addon describes both, so the value is read with what it measures.
+  // The root stylesheet is installed: the panel root carries the container name the package
+  // publishes for consumer container queries.
+  await expect(root).toHaveCSS('container-name', PANEL_CONTAINER_NAME)
+  // The slider and the exact-value box are one control: both read the committed cap. The slider
+  // speaks its unit with every value, and the unit addon describes the box, so the value is read
+  // with what it measures, in words rather than as a spelled-out symbol.
   const capSlider = page.getByRole('slider', { name: 'Cache size cap' })
   const capExact = page.getByRole('spinbutton', { name: 'Cache size cap exact value' })
   await expect(capSlider).toHaveValue('8')
   await expect(capExact).toHaveValue('8')
-  await expect(capSlider).toHaveAccessibleDescription(/GiB/)
-  await expect(capExact).toHaveAccessibleDescription(/GiB/)
+  await expect(capSlider).toHaveAttribute('aria-valuetext', '8 gibibytes')
+  await expect(capExact).toHaveAccessibleDescription(/gibibytes/)
 
   const chartsPath = page.getByRole('textbox', { name: 'PMTiles charts directory' })
-  const saveButton = page.getByRole('button', { name: 'Save', exact: true })
-  const discardButton = page.getByRole('button', { name: 'Discard', exact: true })
+  const saveButton = page.getByRole('button', { name: saveBarLabels.save, exact: true })
+  const discardButton = page.getByRole('button', { name: saveBarLabels.discard, exact: true })
   await expect(saveButton).toBeDisabled()
   await expect(discardButton).toBeDisabled()
 
@@ -115,7 +143,7 @@ test('loads the production remote and completes save and discard flows', async (
   const chartsPathError = page.locator(`[id="${chartsPathErrorId!}"]`)
   await expect(chartsPathError).toBeVisible()
   await expect(chartsPathError).toContainText(
-    'The PMTiles charts directory must stay relative to the Signal K configuration directory.'
+    'Use a path relative to the Signal K configuration directory, with no leading / and no .. segments.'
   )
   // A save blocked by an invalid field refuses through aria-disabled rather than the native
   // attribute, so Save keeps its place in the tab order and stays reachable beside the reason.
@@ -126,15 +154,15 @@ test('loads the production remote and completes save and discard flows', async (
   // The error region stays mounted and empties rather than being removed, because a live region
   // has to exist before its text changes for the next error to be announced.
   await expect(chartsPathError).toHaveText('')
-  await expect(page.getByText('Unsaved changes', { exact: true })).toBeVisible()
+  await expect(page.getByText(saveBarLabels.unsaved, { exact: true })).toBeVisible()
   await expect(saveButton).toBeEnabled()
-  const actionStatus = page.locator('[data-panel-action-bar] [tabindex="-1"]')
+  const actionStatus = page.locator('[data-snui-action-bar-status]')
   await saveButton.click()
 
   // Check the transient request acknowledgement before slower serialization
   // assertions so a busy cross-browser run cannot outlive its display timer.
   await expect(actionStatus).toBeFocused()
-  await expect(actionStatus).toContainText('Save sent to the server')
+  await expect(actionStatus).toContainText(saveBarLabels.saved)
   await expect(page.locator('body')).toHaveAttribute('data-save-count', '1')
   await expect(page.locator('body')).toHaveAttribute('data-saved-configuration', /charts\/new/)
   const savedConfiguration = JSON.parse(
@@ -142,6 +170,8 @@ test('loads the production remote and completes save and discard flows', async (
   )
   expect(savedConfiguration.futurePluginSetting).toEqual({ enabled: true, strategy: 'coastal' })
   expect(savedConfiguration.charts.futureChartSetting).toBe('keep-me')
+  // The host hands the saved object straight back, and the buffer matches it, so the panel is clean
+  // again without resyncing anything of its own.
   await expect(saveButton).toBeDisabled()
 
   await chartsPath.fill('charts/discard-me')
@@ -149,6 +179,52 @@ test('loads the production remote and completes save and discard flows', async (
   await expect(chartsPath).toHaveValue('charts/new')
   await expect(actionStatus).toBeFocused()
   await expect(page.locator('body')).toHaveAttribute('data-save-count', '1')
+})
+
+test('offers to enable a plugin nobody has configured, with the cap sized from free space', async ({ page }) => {
+  await gotoFixture(page, '?unconfigured')
+
+  // The fixture's cache-info route recommends 32 GiB. The panel adopts it as part of what Save will
+  // enable rather than as an edit, so the bar still offers to enable the plugin and no restart
+  // notice claims a change the operator never made.
+  await expect(page.getByRole('slider', { name: 'Cache size cap' })).toHaveValue('32')
+  await expect(actionBar(page)).toContainText(saveBarLabels.unconfigured)
+  await expect(banner(page, 'restartOnSave')).toHaveText('')
+  const saveButton = page.getByRole('button', { name: saveBarLabels.save, exact: true })
+  await expect(saveButton).toBeEnabled()
+  await expect(page.getByRole('button', { name: saveBarLabels.discard, exact: true })).toBeDisabled()
+
+  await saveButton.click()
+  await expect(page.locator('body')).toHaveAttribute('data-saved-configuration', /"cacheCapGiB":32/)
+  // Once the host holds the saved object the plugin counts as configured, and nothing is left to save.
+  await expect(saveButton).toBeDisabled()
+  await expect(actionBar(page)).toContainText(saveBarLabels.clean)
+})
+
+test('treats an empty configuration from a package enabled by default as configured', async ({ page }) => {
+  await gotoFixture(page, '?enabled-by-default')
+
+  // A package enabled by default is already running on its defaults, so there is nothing to enable,
+  // nothing to save, and no free-space seed over the cap it runs with. The free-space note proves the
+  // cache-info route has answered before the cap is read.
+  await expect(page.getByText('free on the external cache filesystem')).toBeVisible()
+  await expect(page.getByRole('slider', { name: 'Cache size cap' })).toHaveValue('8')
+  await expect(actionBar(page)).toContainText(saveBarLabels.clean)
+  await expect(page.getByRole('button', { name: saveBarLabels.save, exact: true })).toBeDisabled()
+})
+
+test('reads clean again when an edit is reverted by hand', async ({ page }) => {
+  const chartsPath = page.getByRole('textbox', { name: 'PMTiles charts directory' })
+  const saveButton = page.getByRole('button', { name: saveBarLabels.save, exact: true })
+  await chartsPath.fill('charts/other')
+  await expect(saveButton).toBeEnabled()
+  await chartsPath.fill('charts/pmtiles')
+  await expect(saveButton).toBeDisabled()
+  await expect(actionBar(page)).toContainText(saveBarLabels.clean)
+
+  // Surrounding spaces are trimmed the way the plugin trims them, so they are no change either.
+  await chartsPath.fill('  charts/pmtiles  ')
+  await expect(saveButton).toBeDisabled()
 })
 
 test('breaks cache usage down per chart source', async ({ page }) => {
@@ -168,16 +244,17 @@ test('opens Advanced when a stored setting is invalid', async ({ page }) => {
   const advanced = page.getByRole('button', { name: 'Advanced', exact: true })
   const imageTag = page.getByRole('textbox', { name: 'Tile cache container image tag' })
   await expect(advanced).toHaveAttribute('aria-expanded', 'true')
-  await expect(page.getByText('The container image tag is not a valid OCI tag.')).toBeVisible()
-  const blockedSave = page.getByRole('button', { name: 'Save', exact: true })
+  await expect(
+    page.getByText('Use only letters, digits, underscores, periods, and hyphens, starting with a letter, digit, or underscore.')
+  ).toBeVisible()
+  const blockedSave = page.getByRole('button', { name: saveBarLabels.save, exact: true })
   await expectAriaDisabled(blockedSave)
   await expect(imageTag).toHaveAttribute('aria-invalid', 'true')
 
   // Advanced can be collapsed again over an invalid field, so the section header carries a marker
   // and the save bar names the field rather than pointing at highlighting nobody can see.
   await expect(page.getByText('1 problem')).toBeVisible()
-  const actionBar = page.locator('[data-panel-action-bar]')
-  await expect(actionBar).toContainText(
+  await expect(actionBar(page)).toContainText(
     'Fix the tile cache container image tag under Advanced before saving.'
   )
   await advanced.click()
@@ -193,18 +270,26 @@ test('opens Advanced when a stored setting is invalid', async ({ page }) => {
 })
 
 test('announces action outcomes and ambient conditions from regions that stay mounted', async ({ page }) => {
-  // Each announcer is rendered before it has anything to say, because a screen reader only observes
-  // a live region that already existed when its text changed.
-  const alerts = page.locator('[data-panel-announcer="assertive"]')
-  const notices = page.locator('[data-panel-announcer="polite"]')
-  await expectPanelAnnouncer(alerts, 'alert')
-  await expectPanelAnnouncer(notices, 'status')
-  await expect(alerts).toHaveText('')
-  await expect(notices).toHaveText('')
+  // Each condition banner is rendered before it has anything to say, because a screen reader only
+  // observes a live region that already existed when its text changed. Danger interrupts, and the
+  // rest wait for a pause in speech.
+  await expectWaitingBanner(banner(page, 'actionFailed'), 'alert')
+  await expectWaitingBanner(banner(page, 'statusUnavailable'), 'alert')
+  await expectWaitingBanner(banner(page, 'restartOnSave'), 'status')
+  await expectWaitingBanner(banner(page, 'invalidCharts'), 'status')
+
+  // An edit raises the restart notice in the region that was already waiting for it.
+  const chartsPath = page.getByRole('textbox', { name: 'PMTiles charts directory' })
+  await chartsPath.fill('charts/elsewhere')
+  await expect(banner(page, 'restartOnSave')).toHaveText(
+    /Saving will reapply chart discovery and may recreate the tile-cache container\./
+  )
+  await page.getByRole('button', { name: saveBarLabels.discard, exact: true }).click()
+  await expect(banner(page, 'restartOnSave')).toHaveText('')
 
   // One-shot outcomes speak through the frame's own announcer, which is mounted before the panel
-  // renders, so they land in a polite region that already existed rather than in a fourth one the
-  // panel would have to mount beside the words.
+  // renders, so they land in a polite region that already existed rather than in one the panel would
+  // have to mount beside the words.
   const announcements = page.locator('[role="status"]')
   await page.getByRole('button', { name: /Refresh/ }).click()
   await expect(announcements.filter({ hasText: 'Cache statistics refreshed.' })).toHaveCount(1)
@@ -220,15 +305,14 @@ test('announces action outcomes and ambient conditions from regions that stay mo
   ).toHaveCount(1)
 })
 
-test('reports a failed action through the assertive announcer, not a fresh region', async ({ page }) => {
+test('reports a failed action through an alert that was already mounted, not a fresh region', async ({ page }) => {
   await gotoFixture(page, '?fail-retention')
-  const alert = page.locator('[data-panel-announcer="assertive"]')
-  await expectPanelAnnouncer(alert, 'alert')
-  await expect(alert).toHaveText('')
+  const alert = banner(page, 'actionFailed')
+  await expectWaitingBanner(alert, 'alert')
 
   await page.getByRole('spinbutton', { name: 'Scroll cache retention' }).fill('31')
   await page.getByRole('button', { name: 'Apply retention', exact: true }).click()
-  await expect(alert).toHaveText('Panel action failed: HTTP 503.')
+  await expect(alert).toContainText('Applying the retention change failed: HTTP 503. Try again.')
 })
 
 test('summarizes unreadable chart files in one capped warning', async ({ page }) => {
@@ -237,7 +321,7 @@ test('summarizes unreadable chart files in one capped warning', async ({ page })
   const charts = page.getByRole('region', { name: 'Charts' })
   await expect(charts.getByText('7 chart files could not be read')).toBeVisible()
   await expect(charts.getByRole('listitem')).toHaveCount(5)
-  await expect(charts.getByText('2 more not listed.')).toBeVisible()
+  await expect(charts.getByText('2 more files not listed.')).toBeVisible()
   await expect(charts.getByText('1 valid chart, 7 invalid.')).toBeVisible()
 
   // The warning is the panel's only nested list, so audit the region that renders it rather than
@@ -264,7 +348,7 @@ test('saves the optional reverse geocoding preference', async ({ page }) => {
   const geocoding = page.getByRole('checkbox', { name: 'Enable reverse geocoding' })
   await expect(geocoding).toBeChecked()
   await geocoding.uncheck()
-  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await page.getByRole('button', { name: saveBarLabels.save, exact: true }).click()
 
   await expect(page.locator('body')).toHaveAttribute('data-saved-configuration', /"geocodingEnabled":false/)
 })
@@ -278,7 +362,7 @@ test('uses an inline confirmation for destructive cache clearing', async ({ page
   // the message is announced; the Cancel and Confirm actions follow in the tab order.
   await expect(confirmation).toBeFocused()
 
-  const cancelButton = confirmation.getByRole('button', { name: 'Cancel' })
+  const cancelButton = confirmation.getByRole('button', { name: PANEL_LABEL_DEFAULTS.inlineConfirm.cancel })
   await cancelButton.click()
   await expect(clearButton).toBeFocused()
   await expect(page.locator('body')).not.toHaveAttribute('data-clear-request-count')
@@ -367,7 +451,7 @@ test('runs cache and chart actions with stable focus, loading state, and repeat 
   await expect(rescan).not.toHaveAttribute('aria-busy')
   await expect(rescan).toBeFocused()
   await expect(confirmClear).not.toHaveAttribute('aria-busy')
-  await confirmation.getByRole('button', { name: 'Cancel' }).click()
+  await confirmation.getByRole('button', { name: PANEL_LABEL_DEFAULTS.inlineConfirm.cancel }).click()
 })
 
 test('waits out an older cache poll and refreshes again after a mutation', async ({ page }) => {
@@ -397,7 +481,9 @@ test('reports action failures and keeps the last successful live data visible', 
 
   await page.getByRole('spinbutton', { name: 'Scroll cache retention' }).fill('31')
   await page.getByRole('button', { name: 'Apply retention', exact: true }).click()
-  await expect(page.getByText('Panel action failed: HTTP 503', { exact: true })).toBeVisible()
+  await expect(
+    banner(page, 'actionFailed').getByText('Applying the retention change failed: HTTP 503. Try again.')
+  ).toBeVisible()
   await expect(page.getByRole('group', { name: 'Used' })).toContainText('700.0 MiB')
 })
 
@@ -405,7 +491,7 @@ test('explains unavailable filesystem guidance and failed live-data refreshes', 
   await gotoFixture(page, '?fail-cache-stats')
   // The loading line and the failure share one status region, so the failure lands as an update to
   // a region that already existed rather than as a freshly inserted one.
-  const unavailableStats = page.getByRole('status').filter({ hasText: 'Statistics unavailable: HTTP 503' })
+  const unavailableStats = page.getByRole('status').filter({ hasText: 'Cache statistics unavailable: HTTP 503.' })
   await expect(unavailableStats).toBeVisible()
 
   // A roled live region must not also carry aria-live, which double announces on some screen
@@ -439,16 +525,16 @@ test('explains unavailable filesystem guidance and failed live-data refreshes', 
 
 test('supports keyboard operation and visible focus in every explicit theme', async ({ page }) => {
   const root = page.locator('[data-snui-root]')
-  const auto = page.getByRole('radio', { name: 'Match Admin' })
-  const system = page.getByRole('radio', { name: 'Match device' })
-  const light = page.getByRole('radio', { name: 'Light' })
-  const dark = page.getByRole('radio', { name: 'Dark' })
-  const night = page.getByRole('radio', { name: 'Night' })
+  const auto = themeChoice(page, 'auto')
+  const system = themeChoice(page, 'system')
+  const light = themeChoice(page, 'light')
+  const dark = themeChoice(page, 'dark')
+  const night = themeChoice(page, 'night')
 
-  // Since signalk-nearlcrews-ui 0.5.0, a fresh profile resolves to the automatic choice, labelled
-  // "Match Admin" (no explicit theme attribute), and the radio group's roving tabindex follows the
-  // checked option, so the whole group is one tab stop and that choice holds it. Arrow keys move
-  // the selection through "Match device" and the explicit themes.
+  // A fresh profile resolves to the automatic choice (no explicit theme attribute), and the radio
+  // group's roving tabindex follows the checked option, so the whole group is one tab stop and that
+  // choice holds it. Arrow keys move the selection through the device choice and the explicit themes.
+  await expect(auto).toHaveAccessibleName(themeToggleLabels.choiceLabels.auto)
   // The selector sits at the foot of the panel, so the group is reached directly rather than by
   // counting tab stops from the top of a page whose sequential focus start differs by browser.
   await expect(auto).toHaveAttribute('tabindex', '0')
@@ -488,26 +574,20 @@ test('supports keyboard operation and visible focus in every explicit theme', as
 })
 
 test('supports every theme and persists the choice', async ({ page }) => {
-  // The legacy cl-theme key is no longer read: since signalk-nearlcrews-ui 0.5.0 the theme
-  // resolves from the single signalk-nearlcrews-ui.theme.v1 key, and an unresolved preference
-  // falls to Auto rather than Light.
+  // The theme resolves from the single shared key, and an unresolved preference falls to Auto
+  // rather than Light.
   const root = page.locator('[data-snui-root]')
   await expect(root).not.toHaveAttribute('data-snui-theme')
+  await expect(page.getByRole('radiogroup', { name: themeToggleLabels.label })).toBeVisible()
 
-  const themeGroup = page.getByRole('radiogroup', { name: 'Panel theme' })
-  for (const [label, value] of [
-    ['Match device', 'system'],
-    ['Light', 'light'],
-    ['Dark', 'dark'],
-    ['Night', 'night']
-  ] as const) {
-    await themeGroup.getByRole('radio', { name: label }).click()
+  for (const value of THEME_CHOICES.filter((choice) => choice !== 'auto')) {
+    await themeChoice(page, value).click()
     await expect(root).toHaveAttribute('data-snui-theme', value)
     await expect
       .poll(() => page.evaluate((key) => localStorage.getItem(key), themeStorageKey))
       .toBe(value)
   }
-  await themeGroup.getByRole('radio', { name: 'Match Admin' }).click()
+  await themeChoice(page, 'auto').click()
   await expect(root).not.toHaveAttribute('data-snui-theme')
 })
 
@@ -516,7 +596,7 @@ test('keeps its theme when another panel version writes an unrecognized shared v
   // share one theme key. A value this version does not recognize is ignored, so the panel does not
   // fight the theme another panel just wrote. Only a genuine clear returns it to Auto.
   const root = page.locator('[data-snui-root]')
-  await page.getByRole('radiogroup', { name: 'Panel theme' }).getByRole('radio', { name: 'Night' }).click()
+  await themeChoice(page, 'night').click()
   await expect(root).toHaveAttribute('data-snui-theme', 'night')
 
   await writeSharedThemeFromAnotherDocument(page, 'midnight-red')
@@ -665,6 +745,8 @@ test('every interactive control meets its pointer target floor and is reachable'
 
 test('shows a compatibility message when native CSS scope is unavailable', async ({ page }) => {
   await gotoFixture(page, '?unsupported-css-scope')
-  await expect(page.locator('[data-browser-compatibility-message]')).toContainText('Browser update required')
+  await expect(page.locator('[data-browser-compatibility-message]')).toContainText(
+    PANEL_LABEL_DEFAULTS.unsupportedBrowser.title
+  )
   await expect(page.locator('[data-snui-root]')).toHaveCount(0)
 })

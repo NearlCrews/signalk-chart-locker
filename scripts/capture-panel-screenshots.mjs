@@ -35,16 +35,16 @@ try {
   await page.getByText('700.0 MiB').waitFor()
   await page.getByText('2 valid charts, 0 invalid.', { exact: false }).waitFor()
 
-  const themeGroup = page.getByRole('radiogroup', { name: 'Panel theme' })
+  // Each theme radio is found by the package's own hook rather than by the words it shows.
   for (const [theme, path] of [
-    ['Light', 'assets/screenshots/config-panel.png'],
-    ['Dark', 'assets/screenshots/config-panel-dark.png'],
-    ['Night', 'assets/screenshots/config-panel-night.png']
+    ['light', 'assets/screenshots/config-panel.png'],
+    ['dark', 'assets/screenshots/config-panel-dark.png'],
+    ['night', 'assets/screenshots/config-panel-night.png']
   ]) {
-    await themeGroup.getByRole('radio', { name: theme }).click()
+    await page.locator(`[data-snui-theme-choice="${theme}"]`).click()
     await page.waitForFunction(
       (expected) => document.querySelector('[data-snui-root]')?.getAttribute('data-snui-theme') === expected,
-      theme.toLowerCase()
+      theme
     )
     await page.mouse.move(0, 0)
     // The theme selector sits at the foot of the panel, so choosing a theme leaves the page scrolled

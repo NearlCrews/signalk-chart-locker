@@ -7,6 +7,7 @@
 
 import { useEffect, useRef } from 'react'
 import { PANEL_MUTATION_TIMEOUT_MS, PANEL_REQUEST_TIMEOUT_MS } from '../request-timeout.js'
+import { errorMessage } from '../../shared/error.js'
 
 export interface AbortableFetch {
   /** Issue the request, optionally on a budget other than the one its method implies. */
@@ -47,6 +48,15 @@ export function isTeardownAbort (cause: unknown): boolean {
  */
 export function isRequestTimeout (cause: unknown): boolean {
   return cause instanceof DOMException && cause.name === 'TimeoutError'
+}
+
+/**
+ * The words of a rejection, for the panel to quote inside a sentence of its own. A trailing full
+ * stop is dropped, because Firefox ends its network error with one and every sentence that quotes
+ * a failure adds its own.
+ */
+export function describeError (cause: unknown): string {
+  return errorMessage(cause).trim().replace(/\.+$/, '')
 }
 
 /**

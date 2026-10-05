@@ -1,8 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { formatCount } from 'signalk-nearlcrews-ui/format'
+import { changedConfigGroups } from '../src/panel/config-changes.js'
 import { configReducer } from '../src/panel/config-reducer.js'
-import { formatBytes, ONE_DECIMAL, splitBytes, WHOLE } from '../src/panel/format-bytes.js'
-import { isRequestTimeout, isTeardownAbort } from '../src/panel/hooks/use-abortable-fetch.js'
+import { BYTE_UNITS, ONE_DECIMAL, splitBytes, WHOLE } from '../src/panel/format-bytes.js'
+import { describeError, isRequestTimeout, isTeardownAbort } from '../src/panel/hooks/use-abortable-fetch.js'
 import type { ChartLockerConfig } from '../src/panel/config-types.js'
 import { validatePanelConfig } from '../src/panel/validate-config.js'
 import { parseCacheStats } from '../src/panel/hooks/use-cache-operations.js'
@@ -46,6 +48,36 @@ test('configReducer changes the geocoding setting without rebuilding other group
   assert.equal(next.advanced.geocodingEnabled, false)
 })
 
+test('changedConfigGroups compares by value, so an edit and its reverse read as no change', () => {
+  const saved = baseConfig()
+  const edited = configReducer(saved, { type: 'setChartsPath', path: 'charts/other' })
+  assert.deepEqual(changedConfigGroups(edited, saved), ['charts'])
+  const reverted = configReducer(edited, { type: 'setChartsPath', path: '' })
+  assert.notEqual(reverted.charts, saved.charts, 'the reverse edit rebuilds the group')
+  assert.deepEqual(changedConfigGroups(reverted, saved), [])
+})
+
+test('changedConfigGroups names every changed group in the order the restart notice reads them', () => {
+  const saved = baseConfig()
+  let next = configReducer(saved, { type: 'setImageTag', tag: 'test-build' })
+  next = configReducer(next, { type: 'setCacheCapGiB', giB: 16 })
+  assert.deepEqual(changedConfigGroups(next, saved), ['tileCache', 'advanced'])
+})
+
+test('changedConfigGroups carries a key a newer plugin stored without reporting it as a change', () => {
+  const futureSetting = { strategy: 'coastal' }
+  const saved = { ...baseConfig(), charts: { path: '', futureSetting } } as ChartLockerConfig
+  const edited = configReducer(saved, { type: 'setCacheCapGiB', giB: 12 })
+  assert.deepEqual(changedConfigGroups(edited, saved), ['tileCache'])
+})
+
+test('describeError quotes a rejection without a full stop of its own', () => {
+  assert.equal(describeError(new Error('HTTP 503')), 'HTTP 503')
+  // Firefox ends its network error with a full stop, which every sentence quoting it would double.
+  assert.equal(describeError(new TypeError('NetworkError when attempting to fetch resource.')), 'NetworkError when attempting to fetch resource')
+  assert.equal(describeError('plain text. '), 'plain text')
+})
+
 test('a teardown abort is distinguished from a request that ran out of time', () => {
   const controller = new AbortController()
   controller.abort()
@@ -81,14 +113,12 @@ test('byte formatting picks binary units and reports an unknown count', () => {
   // already do, so the expectations are built from the formatters the readout itself uses rather
   // than pinned to one locale's separators or retyped from their options.
   assert.deepEqual(splitBytes(null), { value: 'Unknown' })
-  assert.deepEqual(splitBytes(2048), { value: WHOLE.format(2), unit: 'KiB' })
-  assert.deepEqual(splitBytes(700 * 1024 ** 2), { value: ONE_DECIMAL.format(700), unit: 'MiB' })
-  assert.deepEqual(splitBytes(8 * 1024 ** 3), { value: ONE_DECIMAL.format(8), unit: 'GiB' })
+  assert.deepEqual(splitBytes(2048), { value: WHOLE.format(2), unit: BYTE_UNITS.KiB })
+  assert.deepEqual(splitBytes(700 * 1024 ** 2), { value: ONE_DECIMAL.format(700), unit: BYTE_UNITS.MiB })
+  assert.deepEqual(splitBytes(8 * 1024 ** 3), { value: ONE_DECIMAL.format(8), unit: BYTE_UNITS.GiB })
   // The last KiB before the MiB threshold stays in KiB rather than rounding into it, and a
   // four-digit count is grouped rather than run together.
-  assert.deepEqual(splitBytes(1024 ** 2 - 1), { value: WHOLE.format(1024), unit: 'KiB' })
-  assert.equal(formatBytes(700 * 1024 ** 2), `${ONE_DECIMAL.format(700)} MiB`)
-  assert.equal(formatBytes(null), 'Unknown')
+  assert.deepEqual(splitBytes(1024 ** 2 - 1), { value: WHOLE.format(1024), unit: BYTE_UNITS.KiB })
 })
 
 test('panel validation matches the runtime path text bounds', () => {
@@ -96,8 +126,30 @@ test('panel validation matches the runtime path text bounds', () => {
   state.charts.path = `charts/${'x'.repeat(MAX_CONFIG_PATH_LENGTH)}`
   state.advanced.cacheVolumeSource = '/media/\u2028bad'
   const validation = validatePanelConfig(state)
-  assert.match(validation.chartsPath ?? '', /at most 4096 characters/)
-  assert.match(validation.cacheVolumeSource ?? '', /control characters/)
+  assert.equal(
+    validation.chartsPath,
+    `Shorten the PMTiles charts directory to ${formatCount(MAX_CONFIG_PATH_LENGTH, 'character')} or fewer.`
+  )
+  assert.equal(validation.cacheVolumeSource, 'Remove the control characters from the external tile cache drive path.')
+})
+
+test('panel validation says how to fix each rule a field breaks', () => {
+  const state = baseConfig()
+  state.tileCache.regionsBudgetGiB = 12
+  state.charts.path = 'charts/../outside'
+  state.advanced.cacheVolumeSource = 'mnt/ssd'
+  state.advanced.imageTag = 'bad tag'
+  const validation = validatePanelConfig(state)
+  assert.equal(validation.regionsBudget, 'Set the saved-regions reserved budget no higher than the cache cap.')
+  assert.match(validation.chartsPath ?? '', /^Use a path relative to the Signal K configuration directory/)
+  assert.match(validation.cacheVolumeSource ?? '', /^Use an absolute host path that starts with \//)
+  assert.match(validation.imageTag ?? '', /^Use only letters, digits, underscores, periods, and hyphens/)
+  assert.deepEqual(validatePanelConfig(baseConfig()), {
+    regionsBudget: null,
+    chartsPath: null,
+    cacheVolumeSource: null,
+    imageTag: null
+  })
 })
 
 test('parseCacheStats rejects malformed nested container data', () => {

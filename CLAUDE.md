@@ -96,8 +96,11 @@ cargo audit --file Cargo.lock
 ```
 
 The panel build ends with the shared UI package's `snui-check-consumer`, which asserts the exact pin
-against the installed version, the bundled version stamp, the host share map, and the gzip size
-recorded in `scripts/panel-size-baseline.json`. When a deliberate change grows the remote past the
+against the installed version, the bundled version stamp, the host share map, the Signal K host
+loading contract, and the gzip size recorded in `scripts/panel-size-baseline.json`. It runs with
+`--stats`, which checks the Webpack module graph, and `--runtime`, which renders the built remote
+under the host's share scope with an absent and an empty configuration and expects the cache size
+cap control the browser spec also asserts. When a deliberate change grows the remote past the
 recorded allowance, re-measure and update `gzipBytes` in the same change rather than raising the
 percentage. The Node test suite and the browser spec load the package directly through its `default`
 export condition, which needs Node 22.12 or newer; `devEngines` already requires that.
