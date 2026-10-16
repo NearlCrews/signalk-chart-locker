@@ -10,6 +10,10 @@ All notable changes to this project are documented here. The format follows
 
 - The configuration panel moves to `signalk-nearlcrews-ui` 0.14.0. Save and Discard stay focusable, marked unavailable, when they go idle while focused. Invalid checkboxes, radio groups, range inputs, and switches draw a dashed danger outline. The Light theme borders, disabled text, and tracks are slightly darker.
 
+### Security
+
+- The tile cache takes rustls 0.23.46, which fixes four advisories, RUSTSEC-2026-0346 through RUSTSEC-2026-0349. The most severe let `Debug` output of a client session expose TLS secrets.
+
 <a id="v0100"></a>
 
 ## [0.10.0] - 2026-10-05

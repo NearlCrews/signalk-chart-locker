@@ -86,6 +86,8 @@
     "revalidations",
     "rhysd",
     "rusqlite",
+    "rustls",
+    "RUSTSEC",
     "SBOM",
     "SignalK",
     "signalk",
