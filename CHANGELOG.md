@@ -8,7 +8,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- The configuration panel moves to `signalk-nearlcrews-ui` 0.14.0. Save and Discard stay focusable, marked unavailable, when they go idle while focused. Invalid checkboxes, radio groups, range inputs, and switches draw a dashed danger outline. The Light theme borders, disabled text, and tracks are slightly darker.
+- The configuration panel moves to `signalk-nearlcrews-ui` 0.14.1. Save and Discard stay focusable, marked unavailable, when they go idle while focused. Invalid checkboxes, radio groups, range inputs, and switches draw a dashed danger outline. The Light theme borders, disabled text, and tracks are slightly darker.
 
 ### Security
 
