@@ -115,7 +115,7 @@
     "eslint-plugin-react": "^7.37.5",
     "knip": "^6.39.0",
     "markdownlint": "0.41.1",
-    "neostandard": "^0.13.0",
+    "neostandard": "^0.14.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "signalk-nearlcrews-ui": "0.14.1",
