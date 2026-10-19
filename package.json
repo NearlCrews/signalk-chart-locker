@@ -127,7 +127,7 @@
   },
   "dependencies": {
     "pmtiles": "^4.5.0",
-    "signalk-chart-sources": "^0.7.2"
+    "signalk-chart-sources": "^0.8.0"
   },
   "allowScripts": {
     "esbuild@0.28.2": true
