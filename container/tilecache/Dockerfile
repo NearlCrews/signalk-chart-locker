@@ -5,7 +5,7 @@
 # own. Build from the repository root with
 # `podman build --format docker --file container/tilecache/Dockerfile .` or the HEALTHCHECK is dropped.
 
-FROM rust:1.99.0-trixie@sha256:3745c050d12adc738eff16ebfc81ed044bfb2cc27c6828850ff1666beb1c7a49 AS builder
+FROM rust:1.99.0-trixie@sha256:81015672d6939b0265f09adf96d5de125482bb1330106076956b0518e74edc90 AS builder
 WORKDIR /build
 # cmake is needed by the aws-lc-rs crypto backend that rustls pulls in; rust:1-trixie ships cc but
 # not cmake. It is a build-only dependency: the runtime image gets only the compiled binary.
