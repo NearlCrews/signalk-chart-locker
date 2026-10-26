@@ -26,7 +26,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # a bundled webpki-root-certs fallback if that is absent. Currently fine on this base. If the runtime
 # base is ever swapped to a CA-less image (distroless/static or scratch), egress TLS would fail
 # silently, so keep a CA bundle in whatever runtime base replaces this one.
-FROM gcr.io/distroless/cc-debian13:latest@sha256:159783207c2cd44c2aa5715961d13c8612368ac9bd450f887e3f08fc8ea461e3 AS runtime
+FROM gcr.io/distroless/cc-debian13:latest@sha256:d74d144baa124dd9defd01d71872bb56c49d4441dba6153ccf790364f97e64b1 AS runtime
 COPY --from=builder /tilecache /tilecache
 COPY --from=builder --chown=65532:65532 /runtime-data /data
 COPY LICENSE-APACHE THIRD_PARTY_NOTICES.md RUST_THIRD_PARTY_LICENSES.md /usr/share/licenses/chart-locker/
